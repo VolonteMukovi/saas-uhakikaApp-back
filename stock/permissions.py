@@ -3,6 +3,33 @@ from rest_framework.exceptions import PermissionDenied, NotFound
 from django.utils.translation import gettext as _
 
 
+class EntreprisePermission(permissions.BasePermission):
+    """
+    Règles pour le modèle Entreprise :
+    - SuperAdmin : Read (list, retrieve) + Delete uniquement. Pas de Create ni Update.
+    - Admin : CRUD complet sur sa propre entreprise uniquement.
+    - User (Agent) : aucun accès.
+    """
+
+    message = "Vous n'avez pas les droits nécessaires sur les entreprises."
+
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.is_superadmin():
+            return request.method in ('GET', 'HEAD', 'OPTIONS', 'DELETE')
+        if request.user.is_admin():
+            return True
+        return False
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_superadmin():
+            return request.method in ('GET', 'HEAD', 'OPTIONS', 'DELETE')
+        if request.user.is_admin() and hasattr(obj, 'id'):
+            return getattr(request.user, 'entreprise_id', None) == obj.id
+        return False
+
+
 class IsSuperAdmin(permissions.BasePermission):
     """
     Permission pour les super administrateurs uniquement.
@@ -34,17 +61,22 @@ class IsAdmin(permissions.BasePermission):
 
 
 class IsSuperAdminOrAdmin(permissions.BasePermission):
-    """
-    Permission pour super admin OU admin d'entreprise.
-    Utilisée pour la plupart des vues de l'application.
-    """
+    """Super admin OU admin d'entreprise (pas les agents)."""
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
             raise PermissionDenied(_("Vous devez être connecté pour accéder à cette ressource."))
-        
         if not (request.user.is_superadmin() or request.user.is_admin()):
             raise PermissionDenied(_("Accès réservé aux administrateurs."))
-        
+        return True
+
+
+class IsAdminOrUser(permissions.BasePermission):
+    """Admin ou User (Agent) : accès aux données métier. SuperAdmin n'a pas accès CRUD aux modèles métier."""
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            raise PermissionDenied(_("Vous devez être connecté pour accéder à cette ressource."))
+        if not (request.user.is_admin() or request.user.is_agent()):
+            raise PermissionDenied(_("Accès réservé aux administrateurs ou aux agents de l'entreprise."))
         return True
 
 

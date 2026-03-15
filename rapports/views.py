@@ -28,7 +28,7 @@ from .serializers import (
     BonAchatSerializer,
     RecapitulatifAchatSerializer
 )
-from users.permissions import IsSuperAdminOrAdmin
+from users.permissions import IsSuperAdminOrAdmin, IsAdminOrUser
 from .utils.pdf_generator import PDFGenerator
 from .utils.entete import get_entete_entreprise
 
@@ -36,8 +36,9 @@ from .utils.entete import get_entete_entreprise
 class RapportsViewSet(viewsets.ViewSet):
     """
     ViewSet pour la génération des différents rapports.
+    Accès réservé aux Admin et User (Agent). SuperAdmin n'a pas accès aux rapports métier.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminOrUser]
 
     def _get_entete_entreprise(self, entreprise, user):
         """Génère l'en-tête simplifié : nom, logo, slogan, téléphone uniquement."""

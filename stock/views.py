@@ -15,7 +15,13 @@ from django.db.models import Prefetch, Sum
 from rest_framework.exceptions import PermissionDenied, NotFound
 from django.utils.translation import gettext as _, pgettext
 from .serializers import *
-from users.permissions import IsSuperAdmin, IsAdmin, IsSuperAdminOrAdmin, IsSuperAdminOrReadOnlyAdmin, IsOwnerOrSuperAdmin
+from users.permissions import IsSuperAdmin, IsAdmin, IsSuperAdminOrAdmin, IsSuperAdminOrReadOnlyAdmin, IsOwnerOrSuperAdmin, IsAdminOrUser
+from stock.permissions import EntreprisePermission, IsAdminOrUser as StockIsAdminOrUser
+
+
+class BusinessPermissionMixin:
+    """Accès réservé aux Admin et User (Agent). SuperAdmin n'a pas accès aux données métier."""
+    permission_classes = [StockIsAdminOrUser]
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 import logging
@@ -117,9 +123,7 @@ def _convert_amount(amount: Decimal, source_dev: Devise, target_dev: Devise, ent
 
 class RapportViewSet(viewsets.ViewSet):
     def get_permissions(self):
-        """Permissions dynamiques selon l'action."""
-        permission_classes = [IsAuthenticated]
-        return [permission() for permission in permission_classes]
+        return [StockIsAdminOrUser()]
 
     # NOTE: La fonction fiche_stock_article_pdf a été déplacée vers rapports/views.py
     # pour une meilleure organisation. Utilisez maintenant:
@@ -330,61 +334,44 @@ class RapportViewSet(viewsets.ViewSet):
 
 class EntrepriseViewSet(viewsets.ModelViewSet):
     """
-    ViewSet pour la gestion des entreprises.
-    
-    - Admin peut créer/modifier sa propre entreprise
-    - SuperAdmin peut tout gérer
-    - Champ `logo` : image optionnelle représentant le logo de l'entreprise
-    
-    Pour uploader un logo, envoyer les requêtes POST/PUT/PATCH en
-    `multipart/form-data` avec un champ fichier `logo`.
+    Gestion des entreprises.
+    - SuperAdmin : Read (list, retrieve) + Delete uniquement. Pas de Create ni Update.
+    - Admin : CRUD sur sa propre entreprise.
+    - User (Agent) : aucun accès.
     """
     queryset = Entreprise.objects.all()
     serializer_class = EntrepriseSerializer
-
+    permission_classes = [EntreprisePermission]
 
     def get_queryset(self):
-        """Filtrage selon le rôle. Ordre : plus récent en premier."""
         user = self.request.user
+        if not user.is_authenticated:
+            return Entreprise.objects.none()
         if user.is_superadmin():
             return Entreprise.objects.all().order_by('-id')
-        elif user.is_admin():
-            # Admin peut voir seulement son entreprise
+        if user.is_admin():
             if user.entreprise:
                 return Entreprise.objects.filter(id=user.entreprise.id).order_by('-id')
-            else:
-                # Si l'admin n'a pas d'entreprise, retourner queryset vide pour list/retrieve
-                # mais permettre la création
-                return Entreprise.objects.none()
+            return Entreprise.objects.none()
         return Entreprise.objects.none()
-    
+
     def perform_create(self, serializer):
-        """Logique de création d'entreprise"""
         user = self.request.user
-        
         if user.is_superadmin():
-            # SuperAdmin peut créer n'importe quelle entreprise
-            serializer.save()
-        elif user.is_admin():
-            # Admin peut créer seulement s'il n'a pas encore d'entreprise
+            raise PermissionDenied(_("Le super administrateur ne peut pas créer d'entreprise. Utilisez un compte Admin."))
+        if user.is_admin():
             if user.entreprise:
                 raise PermissionDenied(_("Vous avez déjà une entreprise associée. Contactez le superadmin pour la modifier."))
-            
-            # Créer l'entreprise et l'associer automatiquement à l'admin
             entreprise = serializer.save()
             user.entreprise = entreprise
             user.save()
-            
+
     def perform_update(self, serializer):
-        """Logique de mise à jour d'entreprise"""
         user = self.request.user
         entreprise = self.get_object()
-        
         if user.is_superadmin():
-            # SuperAdmin peut modifier n'importe quelle entreprise
-            serializer.save()
-        elif user.is_admin():
-            # Admin peut modifier seulement sa propre entreprise
+            raise PermissionDenied(_("Le super administrateur ne peut pas modifier une entreprise."))
+        if user.is_admin():
             if user.entreprise != entreprise:
                 raise PermissionDenied(_("Vous ne pouvez modifier que votre propre entreprise."))
             serializer.save()
@@ -443,7 +430,7 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
         return Response(stats)
 
 
-class SortieViewSet(EnterpriseFilterMixin, viewsets.ModelViewSet):
+class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.ModelViewSet):
     """ViewSet pour gérer les sorties de stock"""
     queryset = Sortie.objects.all()
     serializer_class = SortieSerializer
@@ -469,9 +456,9 @@ class SortieViewSet(EnterpriseFilterMixin, viewsets.ModelViewSet):
             )
         )
         
-        if user.is_superadmin():
-            return queryset.order_by('-date_creation')
-        elif user.is_admin():
+        # SuperAdmin n'a pas accès (IsAdminOrUser le bloque en amont)
+        if user.is_admin() or user.is_agent():
+            # TODO: si le modèle Sortie acquiert un champ entreprise, filtrer par user.entreprise_id
             return queryset.order_by('-date_creation')
         return queryset.none()
 
@@ -1420,7 +1407,7 @@ class SortieViewSet(EnterpriseFilterMixin, viewsets.ModelViewSet):
         return self.bon_sortie_pos(request, pk=pk)
 
 
-class LigneSortieViewSet(viewsets.ModelViewSet):
+class LigneSortieViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     serializer_class = LigneSortieSerializer
     queryset = LigneSortie.objects.all()  # Base (sera filtrée)
 
@@ -1604,7 +1591,7 @@ class LigneSortieViewSet(viewsets.ModelViewSet):
         stock_new.Qte -= new_quantite
         stock_new.save()
 
-class UniteViewSet(viewsets.ModelViewSet):
+class UniteViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = Unite.objects.all()
     serializer_class = UniteSerializer
 
@@ -1616,7 +1603,7 @@ class UniteViewSet(viewsets.ModelViewSet):
         return Unite.objects.all().order_by('-id')
 
 
-class TypeArticleViewSet(viewsets.ModelViewSet):
+class TypeArticleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = TypeArticle.objects.all()
     serializer_class = TypeArticleSerializer
 
@@ -1628,7 +1615,7 @@ class TypeArticleViewSet(viewsets.ModelViewSet):
         return TypeArticle.objects.all().order_by('-id')
 
 
-class ArticleViewSet(viewsets.ModelViewSet):
+class ArticleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = Article.objects.all()
     serializer_class = ArticleSerializer
 
@@ -1645,7 +1632,7 @@ class ArticleViewSet(viewsets.ModelViewSet):
         Stock.objects.create(article=article, Qte=0, seuilAlert=0)
 
 
-class StockViewSet(viewsets.ReadOnlyModelViewSet):
+class StockViewSet(BusinessPermissionMixin, viewsets.ReadOnlyModelViewSet):
     queryset = Stock.objects.all()
     serializer_class = StockSerializer
 
@@ -1657,13 +1644,11 @@ class StockViewSet(viewsets.ReadOnlyModelViewSet):
         return Stock.objects.select_related('article').order_by('-id')
 
 
-class EntreeViewSet(viewsets.ModelViewSet):
+class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = Entree.objects.all()
     serializer_class = EntreeSerializer
 
-
     def get_queryset(self):
-        """Filtre automatique par entreprise de l'utilisateur avec optimisation complète."""
         user = self.request.user
         # Optimisation complète avec inner joins pour tous les objets liés
         return Entree.objects.prefetch_related(
@@ -1678,7 +1663,7 @@ class EntreeViewSet(viewsets.ModelViewSet):
         ).all().order_by('-date_op')
 
 
-class LigneEntreeViewSet(viewsets.ModelViewSet):
+class LigneEntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = LigneEntree.objects.all()
     serializer_class = LigneEntreeSerializer
 
@@ -1750,7 +1735,7 @@ class LigneEntreeViewSet(viewsets.ModelViewSet):
         return self.update(request, *args, **kwargs, partial=True)
 
 
-class DeviseViewSet(viewsets.ModelViewSet):
+class DeviseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     """CRUD pour les devises de l'entreprise avec gestion de la devise principale unique."""
     queryset = Devise.objects.all()
     serializer_class = DeviseSerializer
@@ -1861,7 +1846,7 @@ class DeviseViewSet(viewsets.ModelViewSet):
 
 
 
-class MouvementCaisseViewSet(viewsets.ModelViewSet):
+class MouvementCaisseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     """CRUD pour les mouvements de caisse."""
     queryset = MouvementCaisse.objects.all()
     serializer_class = MouvementCaisseSerializer
@@ -1964,12 +1949,10 @@ class MouvementCaisseViewSet(viewsets.ModelViewSet):
         return response
 
 
-class EntreeViewSet(viewsets.ModelViewSet):
+class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     """ViewSet pour gérer les entrées de stock avec support multi-devises."""
     queryset = Entree.objects.all()
     serializer_class = EntreeSerializer
-
-
 
     def get_queryset(self):
         user = self.request.user
@@ -2598,7 +2581,7 @@ class EntreeViewSet(viewsets.ModelViewSet):
         return Response(response_data)
 
 
-class LigneEntreeViewSet(viewsets.ModelViewSet):
+class LigneEntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     """ViewSet pour gérer les lignes d'entrée."""
     queryset = LigneEntree.objects.all()
     serializer_class = LigneEntreeSerializer
@@ -2665,7 +2648,7 @@ class LigneEntreeViewSet(viewsets.ModelViewSet):
         stock_new.save()
 
 
-class MouvementCaisseViewSet(viewsets.ModelViewSet):
+class MouvementCaisseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = MouvementCaisse.objects.all()
     serializer_class = MouvementCaisseSerializer
 
@@ -3410,7 +3393,7 @@ class MouvementCaisseViewSet(viewsets.ModelViewSet):
 
 
 
-class SousTypeArticleViewSet(viewsets.ModelViewSet):
+class SousTypeArticleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des sous-types d'articles.
     CRUD complet avec filtrage automatique par type d'article.
@@ -3454,7 +3437,7 @@ class SousTypeArticleViewSet(viewsets.ModelViewSet):
         return Response(dict(grouped))
 
 
-class ClientViewSet(EnterpriseFilterMixin, viewsets.ModelViewSet):
+class ClientViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des clients.
     """
@@ -3512,7 +3495,7 @@ class ClientViewSet(EnterpriseFilterMixin, viewsets.ModelViewSet):
         })
 
 
-class DetteClientViewSet(EnterpriseFilterMixin, viewsets.ModelViewSet):
+class DetteClientViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des dettes clients.
     """
@@ -3620,7 +3603,7 @@ class DetteClientViewSet(EnterpriseFilterMixin, viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-class PaiementDetteViewSet(EnterpriseFilterMixin, viewsets.ModelViewSet):
+class PaiementDetteViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des paiements de dettes.
     """

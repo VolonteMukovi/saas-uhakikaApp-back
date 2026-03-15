@@ -1,45 +1,57 @@
+import time
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
+from rest_framework import serializers as drf_serializers
+from rest_framework_simplejwt.settings import api_settings
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import update_last_login
 from django.utils.translation import gettext as _
 
-from .serializers import UserSerializer, UserRegistrationSerializer, SuperAdminUserSerializer
+from .serializers import UserSerializer, UserRegistrationSerializer, SuperAdminUserSerializer, AdminUserSerializer
 from .permissions import IsSuperAdmin, IsSuperAdminOrAdmin
 from stock.models import Entreprise
 
+# Durée max de la session (24 h) en secondes ; au-delà, l'utilisateur doit se reconnecter
+SESSION_MAX_AGE_SECONDS = 24 * 3600
+
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-    """Serializer personnalisé pour inclure les informations utilisateur dans le token"""
-    
+    """Connexion : tokens + infos user ; ajout du claim session_start pour limite 24 h."""
+
     def validate(self, attrs):
-        data = super().validate(attrs)
-        
-        # Ajouter les informations utilisateur à la réponse
-        user_data = {
-            'id': self.user.id,
-            'username': self.user.username,
-            'role': self.user.role,
-            'email': self.user.email,
+        # Authentification uniquement (TokenObtainPairSerializer met déjà refresh/access, on les reconstruit avec session_start)
+        super(TokenObtainPairSerializer, self).validate(attrs)
+        refresh = self.get_token(self.user)
+        refresh["session_start"] = int(time.time())
+        data = {
+            "refresh": str(refresh),
+            "access": str(refresh.access_token),
         }
-        
-        # Ajouter les infos entreprise si l'utilisateur en a une
+        if api_settings.UPDATE_LAST_LOGIN:
+            update_last_login(None, self.user)
+
+        user_data = {
+            "id": self.user.id,
+            "username": self.user.username,
+            "role": self.user.role,
+            "email": self.user.email,
+        }
         if self.user.entreprise:
-            user_data['entreprise'] = {
-                'id': self.user.entreprise.id,
-                'nom': self.user.entreprise.nom,
-                'secteur': self.user.entreprise.secteur,
-                'adresse': self.user.entreprise.adresse,
-                'telephone': self.user.entreprise.telephone,
-                'email': self.user.entreprise.email,
-                'responsable': self.user.entreprise.responsable,
+            user_data["entreprise"] = {
+                "id": self.user.entreprise.id,
+                "nom": self.user.entreprise.nom,
+                "secteur": self.user.entreprise.secteur,
+                "adresse": self.user.entreprise.adresse,
+                "telephone": self.user.entreprise.telephone,
+                "email": self.user.entreprise.email,
+                "responsable": self.user.entreprise.responsable,
             }
         else:
-            user_data['entreprise'] = None
-        
-        data['user'] = user_data
+            user_data["entreprise"] = None
+        data["user"] = user_data
         return data
 
 
@@ -48,61 +60,127 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
 
 
+class CustomTokenRefreshSerializer(TokenRefreshSerializer):
+    """
+    Refresh avec limite de session 24 h : même en rafraîchissant,
+    après 24 h depuis la première connexion il faut se reconnecter.
+    """
+    default_error_messages = {
+        **TokenRefreshSerializer.default_error_messages,
+        "session_expired": _("Session expirée (durée max 24 h). Veuillez vous reconnecter."),
+    }
+
+    def validate(self, attrs):
+        refresh = self.token_class(attrs["refresh"])
+        session_start = refresh.get("session_start") or refresh.get("iat")
+        if session_start is not None:
+            now = int(time.time())
+            if (now - session_start) > SESSION_MAX_AGE_SECONDS:
+                raise drf_serializers.ValidationError(
+                    {"detail": self.error_messages["session_expired"]}
+                )
+        return super().validate(attrs)
+
+
+class CustomTokenRefreshView(TokenRefreshView):
+    """Vue de rafraîchissement du token avec durée max de session 24 h."""
+    serializer_class = CustomTokenRefreshSerializer
+
+
 class UserViewSet(viewsets.ModelViewSet):
     """
-    ViewSet pour la gestion des utilisateurs.
-    Super admin : peut tout voir et modifier
-    Admin : peut seulement voir et modifier son propre profil
+    Gestion des utilisateurs selon le rôle :
+    - SuperAdmin : liste/voir tous, modifier/supprimer uniquement son propre compte ; assign_entreprise, remove_entreprise.
+    - Admin : CRUD complet sur les utilisateurs de son entreprise (créer, lire, modifier nom/username/email/mot de passe/rôle, supprimer).
+    - User (Agent) : accès uniquement à son profil (GET me, PATCH/PUT self).
     """
     queryset = get_user_model().objects.all()
-    
+
     def get_serializer_class(self):
-        """Utiliser le bon serializer selon l'action et l'utilisateur"""
-        if self.action == 'create' and not self.request.user.is_authenticated:
-            # Inscription libre pour nouveaux admins
-            return UserRegistrationSerializer
-        elif self.request.user.is_authenticated and self.request.user.is_superadmin():
+        if self.action == 'create':
+            if not self.request.user.is_authenticated:
+                return UserRegistrationSerializer
+            if self.request.user.is_admin():
+                return SuperAdminUserSerializer
+            return UserSerializer
+        if self.action in ('update', 'partial_update') and self.request.user.is_authenticated and self.request.user.is_admin():
+            return AdminUserSerializer
+        if self.request.user.is_authenticated and self.request.user.is_superadmin():
             return SuperAdminUserSerializer
         return UserSerializer
-    
+
     def get_permissions(self):
-        """Permissions dynamiques selon l'action."""
         if self.action == 'create':
-            # Inscription ouverte pour nouveaux admins
             return [permissions.AllowAny()]
-        elif self.action in ['update', 'partial_update', 'destroy', 'assign_entreprise', 'remove_entreprise']:
-            # Seuls les super admin peuvent modifier/supprimer
+        if self.action in ('assign_entreprise', 'remove_entreprise', 'without_entreprise'):
             return [IsSuperAdmin()]
-        elif self.action == 'list':
-            # Liste pour super admin et admin (filtrée)
-            return [IsSuperAdminOrAdmin()]
-        elif self.action == 'retrieve':
-            # Super admin ou admin (pour voir son propre profil)
-            return [IsSuperAdminOrAdmin()]
-        else:
+        if self.action == 'me':
             return [permissions.IsAuthenticated()]
-    
+        if self.action == 'list':
+            return [IsSuperAdminOrAdmin()]
+        return [permissions.IsAuthenticated()]
+
     def get_queryset(self):
-        """Filtrage selon le rôle. Ordre : plus récent en premier."""
         user = self.request.user
+        if not user.is_authenticated:
+            return get_user_model().objects.none()
         base = get_user_model().objects.all().order_by('-date_joined', '-id')
         if user.is_superadmin():
             return base
-        elif user.is_admin():
-            # Admin peut voir les utilisateurs de son entreprise
-            return base
+        if user.is_admin():
+            if user.entreprise_id:
+                return base.filter(entreprise_id=user.entreprise_id)
+            return get_user_model().objects.none()
+        if user.is_agent():
+            return base.filter(pk=user.pk)
         return get_user_model().objects.none()
+
+    def check_object_permissions(self, request, obj):
+        """SuperAdmin : seulement son compte en écriture. Admin : même entreprise. User : seulement soi."""
+        super().check_object_permissions(request, obj)
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return
+        if request.user.is_superadmin() and obj.pk != request.user.pk:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(_("Le super administrateur ne peut modifier que son propre compte."))
+        if request.user.is_agent() and obj.pk != request.user.pk:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(_("Vous ne pouvez modifier que votre propre profil."))
+        if request.user.is_admin() and obj.entreprise_id != request.user.entreprise_id:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(_("Vous ne pouvez gérer que les utilisateurs de votre entreprise."))
     
     def create(self, request, *args, **kwargs):
-        """Inscription d'un nouvel admin"""
+        """Inscription publique (admin sans entreprise) ou création par un Admin (admin/user de son entreprise)."""
+        if request.user.is_authenticated and request.user.is_admin():
+            if not request.user.entreprise_id:
+                return Response(
+                    {'error': _("Vous devez être associé à une entreprise pour créer des utilisateurs.")},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            data = request.data.copy()
+            role = (data.get('role') or 'user').lower()
+            data['role'] = 'user' if role not in ('admin', 'user') else role
+            serializer = SuperAdminUserSerializer(data=data, context={'request': request, 'entreprise': request.user.entreprise})
+            if serializer.is_valid():
+                user = serializer.save()
+                return Response({
+                    'message': _('Utilisateur créé avec succès.'),
+                    'user_id': user.id,
+                    'username': user.username,
+                    'email': user.email,
+                    'role': user.role,
+                    'entreprise': user.entreprise.nom if user.entreprise else None,
+                }, status=status.HTTP_201_CREATED)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         serializer = self.get_serializer(data=request.data)
         if serializer.is_valid():
             user = serializer.save()
             return Response({
-                'message': 'Compte créé avec succès. Contactez le superadmin pour associer votre entreprise.',
+                'message': _('Compte créé avec succès. Contactez le superadmin pour associer votre entreprise.'),
                 'user_id': user.id,
                 'username': user.username,
-                'email': user.email
+                'email': user.email,
             }, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
@@ -147,19 +225,11 @@ class UserViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['post'], permission_classes=[IsSuperAdmin])
     def register_admin(self, request):
-        """Créer un admin avec son entreprise (superadmin seulement)"""
-        serializer = SuperAdminUserSerializer(data=request.data)
-        if serializer.is_valid():
-            user = serializer.save()
-            return Response({
-                'message': 'Admin créé avec succès',
-                'user_id': user.id,
-                'username': user.username,
-                'email': user.email,
-                'role': user.role,
-                'entreprise': user.entreprise.nom if user.entreprise else None
-            }, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        """Désactivé : le super administrateur ne peut pas créer d'utilisateurs (règles de sécurité)."""
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied(
+            _("Le super administrateur ne peut pas créer d'utilisateurs. Les comptes sont créés par les Admins de chaque entreprise.")
+        )
     
     @action(detail=False, methods=['get'], permission_classes=[IsSuperAdmin])
     def without_entreprise(self, request):

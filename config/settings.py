@@ -98,31 +98,28 @@ REST_FRAMEWORK = {
     # ),
 }
 
-# Configuration JWT : token expire après 24 h (1 jour), reconnexion requise après
+# Configuration JWT : session sécurisée (inactivité 1 h → expiration ; durée max 24 h)
 SIMPLE_JWT = {
-    # Durée de vie des tokens
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),  # Token d'accès valide 24 h
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),  # Token de rafraîchissement valide 24 h
-    
-    # Configuration pour sessions persistantes
-    'ROTATE_REFRESH_TOKENS': False,  # Ne pas créer de nouveau refresh token à chaque utilisation
-    'BLACKLIST_AFTER_ROTATION': False,  # Ne pas blacklister l'ancien refresh token
-    'UPDATE_LAST_LOGIN': True,  # Met à jour la date de dernière connexion
-    
-    # Algorithme et signature
+    # Expiration après inactivité : 1 heure (access + refresh)
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
+    'REFRESH_TOKEN_LIFETIME': timedelta(hours=1),
+
+    # Rotation : nouveau refresh à chaque refresh (sliding) ; ancien blacklisté
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'UPDATE_LAST_LOGIN': True,
+
     'ALGORITHM': 'HS256',
     'SIGNING_KEY': SECRET_KEY,
     'VERIFYING_KEY': None,
     'AUDIENCE': None,
     'ISSUER': None,
     'JWK_URL': None,
-    'LEEWAY': 30,  # Marge de 30 secondes pour tenir compte de la latence réseau
+    'LEEWAY': 30,
 
-    # Configuration des headers
     'AUTH_HEADER_TYPES': ('Bearer',),
     'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
-    
-    # Configuration des claims
+
     'USER_ID_FIELD': 'id',
     'USER_ID_CLAIM': 'user_id',
     'USER_AUTHENTICATION_RULE': 'rest_framework_simplejwt.authentication.default_user_authentication_rule',
@@ -132,11 +129,6 @@ SIMPLE_JWT = {
     'TOKEN_USER_CLASS': 'rest_framework_simplejwt.models.TokenUser',
 
     'JTI_CLAIM': 'jti',
-
-    # Configuration pour les sliding tokens (optionnel)
-    'SLIDING_TOKEN_REFRESH_EXP_CLAIM': 'refresh_exp',
-    'SLIDING_TOKEN_LIFETIME': timedelta(days=1),
-    'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
 }
 
 AUTH_PASSWORD_VALIDATORS = [

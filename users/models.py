@@ -21,36 +21,40 @@ class UserManager(BaseUserManager):
 
 class User(AbstractUser):
     """
-    Modèle utilisateur personnalisé avec système simplifié à 2 rôles.
-    
-    Rôles:
-    - superadmin: Développeurs/techniciens (créés via createsuperuser)
-    - admin: Utilisateurs d'entreprise (créés via API)
+    Modèle utilisateur avec 3 rôles : SuperAdmin, Admin, User (Agent).
+    - superadmin : créé via createsuperuser, R+D sur Entreprise uniquement, peut modifier son compte.
+    - admin : propriétaire entreprise, CRUD complet sur les données de son entreprise et ses utilisateurs.
+    - user : employé, CRUD métier, peut modifier uniquement son profil.
     """
     ROLE_CHOICES = (
         ('superadmin', 'Super Administrateur'),
         ('admin', 'Administrateur'),
+        ('user', 'Agent / Employé'),
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="admin")
     entreprise = models.ForeignKey(
-        'stock.Entreprise', 
-        on_delete=models.CASCADE, 
-        related_name='users', 
-        null=True, 
+        'stock.Entreprise',
+        on_delete=models.CASCADE,
+        related_name='users',
+        null=True,
         blank=True
     )
-    
-    objects = UserManager()  # Utiliser notre manager personnalisé
+
+    objects = UserManager()
 
     def __str__(self):
         if self.role == 'superadmin':
             return f"{self.username} (Super Admin)"
-        return f"{self.username} (Admin) - {self.entreprise.nom if self.entreprise else 'Aucune entreprise'}"
-    
+        if self.role == 'admin':
+            return f"{self.username} (Admin) - {self.entreprise.nom if self.entreprise else 'Aucune entreprise'}"
+        return f"{self.username} (Agent) - {self.entreprise.nom if self.entreprise else 'Aucune entreprise'}"
+
     def is_superadmin(self):
-        """Vérifie si l'utilisateur est un super administrateur"""
         return self.role == 'superadmin' or self.is_superuser
-    
+
     def is_admin(self):
-        """Vérifie si l'utilisateur est un administrateur d'entreprise"""
         return self.role == 'admin'
+
+    def is_agent(self):
+        """Vérifie si l'utilisateur est un agent / employé."""
+        return self.role == 'user'

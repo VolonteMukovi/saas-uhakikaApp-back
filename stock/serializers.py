@@ -62,6 +62,10 @@ class ArticleSerializer(serializers.ModelSerializer):
         ]
 
 class EntrepriseSerializer(serializers.ModelSerializer):
+    """
+    CRUD entreprise. Tous les champs sont éditables par l'Admin (logo, email, slogan, etc.).
+    Les mises à jour partielles (PATCH) sont supportées pour modifier un ou plusieurs champs.
+    """
     class Meta:
         model = Entreprise
         fields = '__all__'
