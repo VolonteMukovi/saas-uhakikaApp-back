@@ -1,0 +1,12 @@
+WARNING 2025-09-18 14:09:39,251 test_logging_suppression 12512 13280 TEST SUPPRESSION AUTOMATIQUE STOCK - Article 'Article Test' (ID: 999) supprim� du stock de l'entreprise 'Entreprise Test' suite � quantit� = 0. Sortie #123 | Utilisateur: test_user | Date: 2025-09-18 10:00:00
+WARNING 2025-09-18 15:17:30,948 views 9152 9956 SUPPRESSION AUTOMATIQUE STOCK - Article 'stylonttttttttttttttty' (ID: 8) supprim� du stock de l'entreprise 'musoft' suite � quantit� = 0. Sortie #29 | Utilisateur: volonte | Date: 2025-09-18 13:17:30 | IP: 127.0.0.1
+WARNING 2025-09-18 16:14:01,648 views 9028 10508 SUPPRESSION AUTOMATIQUE STOCK - Article 'stylonttttttttttttttty' (ID: 8) supprim� du stock de l'entreprise 'musoft' suite � quantit� = 0. Sortie #32 | Utilisateur: volonte | Date: 2025-09-18 14:14:01 | IP: 127.0.0.1
+WARNING 2025-09-18 21:35:21,142 views 6832 15268 SUPPRESSION AUTOMATIQUE STOCK - Article 'carozene' (ID: 9) supprim� du stock de l'entreprise 'musoft' suite � quantit� = 0. Sortie #40 | Utilisateur: volonte | Date: 2025-09-18 19:35:21 | IP: 127.0.0.1
+
+
+
+
+
+
+
+

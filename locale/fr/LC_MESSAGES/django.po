@@ -1,0 +1,115 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the PACKAGE package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-13 03:51+0100\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+#: .\import_excel\views.py:143 .\import_excel\views.py:455
+#: .\import_excel\views.py:703
+msgid "Aucun fichier envoyé."
+msgstr ""
+
+#: .\stock\permissions.py:13 .\stock\permissions.py:28
+#: .\stock\permissions.py:43 .\stock\permissions.py:58
+#: .\stock\permissions.py:77
+msgid "Vous devez être connecté pour accéder à cette ressource."
+msgstr ""
+
+#: .\stock\permissions.py:16
+msgid "Accès réservé aux super administrateurs."
+msgstr ""
+
+#: .\stock\permissions.py:31
+msgid "Accès réservé aux administrateurs d'entreprise."
+msgstr ""
+
+#: .\stock\permissions.py:46
+msgid "Accès réservé aux administrateurs."
+msgstr ""
+
+#: .\stock\permissions.py:68
+msgid "Accès en écriture réservé aux super administrateurs."
+msgstr ""
+
+#: .\stock\serializers.py:134
+msgid "Le champ devise est obligatoire pour chaque ligne de sortie."
+msgstr ""
+
+#: .\stock\serializers.py:419
+msgid "Le seuil d'alerte est obligatoire pour chaque ligne d'entrée."
+msgstr ""
+
+#: .\stock\serializers.py:424
+msgid "La quantité est obligatoire pour chaque ligne d'entrée."
+msgstr ""
+
+#: .\stock\serializers.py:427
+msgid "La quantité doit être supérieure à 0."
+msgstr ""
+
+#: .\stock\serializers.py:429
+msgid "La quantité doit être un nombre valide."
+msgstr ""
+
+#: .\stock\serializers.py:568
+msgid "Le montant doit être > 0"
+msgstr ""
+
+#: .\stock\serializers.py:572
+msgid "Le champ devise est obligatoire pour le mouvement de caisse."
+msgstr ""
+
+#: .\stock\serializers.py:616
+#, python-format
+msgid ""
+"Impossible de créer une dette pour cette sortie. La sortie #%(pk)s a le "
+"statut '%(statut)s'. Seules les sorties avec le statut 'EN_CREDIT' peuvent "
+"générer une dette."
+msgstr ""
+
+#: .\stock\views.py:365
+msgid ""
+"Vous avez déjà une entreprise associée. Contactez le superadmin pour la "
+"modifier."
+msgstr ""
+
+#: .\stock\views.py:383
+msgid "Vous ne pouvez modifier que votre propre entreprise."
+msgstr ""
+
+#: .\stock\views.py:396
+msgid "Vous ne pouvez supprimer que votre propre entreprise."
+msgstr ""
+
+#: .\stock\views.py:409
+msgid "Superadmin n'appartient à aucune entreprise"
+msgstr ""
+
+#: .\stock\views.py:410
+msgid "Aucune entreprise associée"
+msgstr ""
+
+#: .\users\serializers.py:29
+msgid "Les mots de passe ne correspondent pas"
+msgstr ""
+
+#: .\users\views.py:116
+msgid "entreprise_id est requis"
+msgstr ""
+
+#: .\users\views.py:129
+msgid "Entreprise introuvable"
+msgstr ""

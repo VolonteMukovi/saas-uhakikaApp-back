@@ -1,0 +1,684 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the PACKAGE package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-15 02:56+0100\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: en\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: .\config\views_i18n.py:20
+msgid "Bonjour"
+msgstr "Hello"
+
+#: .\config\views_i18n.py:21 .\stock\serializers.py:424
+msgid "La quantité est obligatoire pour chaque ligne d'entrée."
+msgstr "Quantity is required for each entry line."
+
+#: .\import_excel\views.py:143 .\import_excel\views.py:455
+#: .\import_excel\views.py:703
+msgid "Aucun fichier envoyé."
+msgstr "No file uploaded."
+
+#: .\rapports\serializers.py:30
+msgid "RUPTURE"
+msgstr "OUT OF STOCK"
+
+#: .\rapports\serializers.py:32
+msgid "ALERTE"
+msgstr "ALERT"
+
+#: .\rapports\serializers.py:34 .\rapports\serializers.py:88
+msgid "NORMAL"
+msgstr "NORMAL"
+
+#: .\rapports\serializers.py:84
+msgid "RUPTURE - Urgent"
+msgstr "OUT OF STOCK - Urgent"
+
+#: .\rapports\serializers.py:86
+msgid "ALERTE - À réapprovisionner"
+msgstr "ALERT - To reorder"
+
+# --- Rapports / Fiche de stock (pdf_generator, views, serializers) ---
+#: .\rapports\utils\pdf_generator.py:115 .\rapports\utils\pdf_generator.py:602
+#: .\stock\views.py:1245 .\stock\views.py:3708
+msgid "Tél"
+msgstr "Tel"
+
+#: .\rapports\utils\pdf_generator.py:133
+msgid "Statistiques"
+msgstr "Statistics"
+
+#: .\rapports\utils\pdf_generator.py:139-142 (statistiques rapport de réquisition)
+msgid "Total articles"
+msgstr "Total articles"
+
+msgid "En alerte"
+msgstr "On alert"
+
+msgid "En rupture"
+msgstr "Out of stock"
+
+msgid "Normaux"
+msgstr "Normal"
+
+#: .\rapports\utils\pdf_generator.py:188
+#, python-format
+msgid "Période: du %(debut)s au %(fin)s"
+msgstr "Period: from %(debut)s to %(fin)s"
+
+#: .\rapports\utils\pdf_generator.py:196
+msgid "Liste des Articles"
+msgstr "List of Articles"
+
+#: .\rapports\utils\pdf_generator.py:200
+msgid "Article ID"
+msgstr "Article ID"
+
+#: .\rapports\utils\pdf_generator.py:201 .\rapports\utils\pdf_generator.py:772
+#: .\stock\views.py:3704
+msgid "Nom"
+msgstr "Name"
+
+#: .\rapports\utils\pdf_generator.py:202 .\rapports\utils\pdf_generator.py:362
+msgid "Unité"
+msgstr "Unit"
+
+#: .\rapports\utils\pdf_generator.py:203 .\rapports\views.py:850
+msgid "Stock"
+msgstr "Stock"
+
+#: .\rapports\utils\pdf_generator.py:204 .\rapports\utils\pdf_generator.py:488
+#: .\stock\views.py:1256 .\stock\views.py:3752
+msgid "P.U."
+msgstr "Unit price"
+
+#: .\stock\views.py:1256
+msgctxt "facture"
+msgid "P.U."
+msgstr "UP"
+
+#: .\rapports\utils\pdf_generator.py:205
+msgid "Prix total"
+msgstr "Total price"
+
+#: .\rapports\utils\pdf_generator.py:206
+msgid "Seuil"
+msgstr "Threshold"
+
+#: .\rapports\utils\pdf_generator.py:207 .\rapports\utils\pdf_generator.py:365
+#: .\rapports\utils\pdf_generator.py:618
+msgid "Statut"
+msgstr "Status"
+
+#: .\rapports\utils\pdf_generator.py:243 .\rapports\utils\pdf_generator.py:509
+#: .\rapports\utils\pdf_generator.py:795
+msgid "TOTAL GÉNÉRAL"
+msgstr "TOTAL"
+
+#: .\rapports\utils\pdf_generator.py:357
+msgid "Articles à Réapprovisionner"
+msgstr "Items to Reorder"
+
+#: .\rapports\utils\pdf_generator.py:372
+msgid "Articles à réapprovisionner"
+msgstr "Items to reorder"
+
+#: .\rapports\utils\pdf_generator.py:361 .\rapports\views.py:847
+#: .\stock\views.py:3721
+msgid "Désignation"
+msgstr "Description"
+
+#: .\rapports\utils\pdf_generator.py:363
+msgid "Quantité"
+msgstr "Quantity"
+
+#: .\rapports\utils\pdf_generator.py:364
+msgid "Prix Total"
+msgstr "Total Price"
+
+#: .\rapports\utils\pdf_generator.py:375 .\rapports\utils\pdf_generator.py:377
+msgid "Dernier prix"
+msgstr "Last price"
+
+#: .\rapports\utils\pdf_generator.py:464
+#, python-format
+msgid "<b>Intervalle :</b> du %(debut)s au %(fin)s"
+msgstr "<b>Period:</b> from %(debut)s to %(fin)s"
+
+#: .\rapports\utils\pdf_generator.py:477
+msgid "Commentaire"
+msgstr "Comment"
+
+#: .\rapports\utils\pdf_generator.py:482
+msgid "Détail des Achats"
+msgstr "Purchase Details"
+
+#: .\rapports\utils\pdf_generator.py:485
+msgid "N° Entrée"
+msgstr "Entry No."
+
+#: .\rapports\utils\pdf_generator.py:486 .\stock\views.py:1254
+#: .\stock\views.py:3752
+msgid "Article"
+msgstr "Item"
+
+#: .\rapports\utils\pdf_generator.py:487 .\rapports\views.py:855
+#: .\rapports\views.py:856 .\rapports\views.py:857 .\stock\views.py:1255
+#: .\stock\views.py:1362 .\stock\views.py:3752
+msgid "Qté"
+msgstr "Qty"
+
+#: .\rapports\utils\pdf_generator.py:489 .\stock\views.py:1257
+#: .\stock\views.py:1379 .\stock\views.py:3752
+msgid "Total"
+msgstr "Total"
+
+#: .\rapports\utils\pdf_generator.py:591
+msgid "Clients et Dettes"
+msgstr "Clients and Debts"
+
+#: .\rapports\utils\pdf_generator.py:604 .\stock\views.py:1247
+#: .\stock\views.py:3710
+msgid "Email"
+msgstr "Email"
+
+#: .\rapports\utils\pdf_generator.py:606 .\stock\views.py:1243
+#: .\stock\views.py:3706
+msgid "Adresse"
+msgstr "Address"
+
+#: .\rapports\utils\pdf_generator.py:613
+msgid "Aucune dette enregistrée."
+msgstr "No debt recorded."
+
+#: .\rapports\utils\pdf_generator.py:618
+msgid "Sortie / Produits"
+msgstr "Sale / Products"
+
+#: .\rapports\utils\pdf_generator.py:618 .\rapports\utils\pdf_generator.py:774
+msgid "Montant Total"
+msgstr "Total Amount"
+
+#: .\rapports\utils\pdf_generator.py:618 .\rapports\utils\pdf_generator.py:775
+msgid "Montant Payé"
+msgstr "Amount Paid"
+
+#: .\rapports\utils\pdf_generator.py:618
+msgid "Solde"
+msgstr "Balance"
+
+#: .\rapports\utils\pdf_generator.py:618
+msgid "Date création"
+msgstr "Creation date"
+
+#: .\rapports\utils\pdf_generator.py:618
+msgid "Échéance"
+msgstr "Due date"
+
+#: .\rapports\utils\pdf_generator.py:686
+msgid "Tot. Montant (EN_COURS)"
+msgstr "Total Amount (ONGOING)"
+
+#: .\rapports\utils\pdf_generator.py:686
+msgid "Tot. Payé (EN_COURS)"
+msgstr "Total Paid (ONGOING)"
+
+#: .\rapports\utils\pdf_generator.py:686
+msgid "Solde (EN_COURS)"
+msgstr "Balance (ONGOING)"
+
+#: .\rapports\utils\pdf_generator.py:749 .\rapports\views.py:539
+msgid "Rapport général des dettes clients"
+msgstr "General report of client debts"
+
+#: .\rapports\utils\pdf_generator.py:756
+#, python-format
+msgid "Du %(date)s"
+msgstr "From %(date)s"
+
+#: .\rapports\utils\pdf_generator.py:758
+#, python-format
+msgid "au %(date)s"
+msgstr "to %(date)s"
+
+#: .\rapports\utils\pdf_generator.py:767
+msgid "Aucun client avec des dettes en cours."
+msgstr "No clients with outstanding debts."
+
+#: .\rapports\utils\pdf_generator.py:771
+msgid "ID Client"
+msgstr "Client ID"
+
+#: .\rapports\utils\pdf_generator.py:773
+msgid "Téléphone"
+msgstr "Phone"
+
+#: .\rapports\utils\pdf_generator.py:776
+msgid "Solde Restant"
+msgstr "Remaining Balance"
+
+#: .\rapports\utils\pdf_generator.py:836
+msgid "Nombre de clients avec dettes"
+msgstr "Number of clients with debts"
+
+#: .\rapports\views.py:115
+msgid "RAPPORT D'INVENTAIRE"
+msgstr "INVENTORY REPORT"
+
+#: .\rapports\views.py:218
+msgid "RAPPORT DE RÉQUISITION"
+msgstr "REQUISITION REPORT"
+
+#: .\rapports\views.py:219
+msgid ""
+"Remplir manuellement les colonnes \"Quantité\" et \"Prix Total\" lors de "
+"l'approvisionnement. Les montants sont en devise principale mentionnée dans "
+"l'en-tête."
+msgstr ""
+"Fill in the \"Quantity\" and \"Total Price\" columns manually when "
+"restocking. Amounts are in the main currency shown in the header."
+
+#: .\rapports\views.py:379
+#, python-format
+msgid "Dettes du client: %(nom)s"
+msgstr "Client debts: %(nom)s"
+
+#: .\rapports\views.py:543
+#, python-format
+msgid "Rapport général des dettes clients (%(debut)s - %(fin)s)"
+msgstr "General report of client debts (%(debut)s - %(fin)s)"
+
+#: .\rapports\views.py:549
+#, python-format
+msgid "Rapport général des dettes clients (à partir du %(date)s)"
+msgstr "General report of client debts (from %(date)s)"
+
+#: .\rapports\views.py:555
+#, python-format
+msgid "Rapport général des dettes clients (jusqu'au %(date)s)"
+msgstr "General report of client debts (until %(date)s)"
+
+#: .\rapports\views.py:691
+msgid "BON D'ACHAT - APPROVISIONNEMENTS EFFECTUÉS"
+msgstr "PURCHASE ORDER - COMPLETED STOCK"
+
+#: .\rapports\views.py:803
+msgid "FICHE DE STOCK"
+msgstr "STOCK SHEET"
+
+#: .\rapports\views.py:828 .\stock\views.py:210
+msgid "Entrée"
+msgstr "Entry"
+
+#: .\rapports\views.py:836
+msgid "Sortie"
+msgstr "Sale"
+
+#: .\rapports\views.py:847 .\stock\views.py:1236 .\stock\views.py:3817
+msgid "Date"
+msgstr "Date"
+
+#: .\rapports\views.py:848
+msgid "Entrées"
+msgstr "Entries"
+
+#: .\rapports\views.py:849
+msgid "Sorties"
+msgstr "Sales"
+
+#: .\rapports\views.py:855 .\rapports\views.py:856 .\rapports\views.py:857
+#: .\stock\views.py:1362
+msgid "PU"
+msgstr "UP"
+
+#: .\rapports\views.py:855 .\rapports\views.py:856 .\rapports\views.py:857
+msgid "PT"
+msgstr "Total"
+
+#: .\rapports\views.py:919
+msgid "SOLDE FINAL"
+msgstr "FINAL BALANCE"
+
+#: .\stock\permissions.py:13 .\stock\permissions.py:28
+#: .\stock\permissions.py:43 .\stock\permissions.py:58
+#: .\stock\permissions.py:77
+msgid "Vous devez être connecté pour accéder à cette ressource."
+msgstr "You must be logged in to access this resource."
+
+#: .\stock\permissions.py:16
+msgid "Accès réservé aux super administrateurs."
+msgstr "Access restricted to super administrators."
+
+#: .\stock\permissions.py:31
+msgid "Accès réservé aux administrateurs d'entreprise."
+msgstr "Access restricted to company administrators."
+
+#: .\stock\permissions.py:46
+msgid "Accès réservé aux administrateurs."
+msgstr "Access restricted to administrators."
+
+#: .\stock\permissions.py:68
+msgid "Accès en écriture réservé aux super administrateurs."
+msgstr "Write access restricted to super administrators."
+
+#: .\stock\serializers.py:134
+msgid "Le champ devise est obligatoire pour chaque ligne de sortie."
+msgstr "The currency field is required for each output line."
+
+#: .\stock\serializers.py:419
+msgid "Le seuil d'alerte est obligatoire pour chaque ligne d'entrée."
+msgstr "The alert threshold is required for each entry line."
+
+#: .\stock\serializers.py:427
+msgid "La quantité doit être supérieure à 0."
+msgstr "Quantity must be greater than 0."
+
+#: .\stock\serializers.py:429
+msgid "La quantité doit être un nombre valide."
+msgstr "Quantity must be a valid number."
+
+#: .\stock\serializers.py:568
+msgid "Le montant doit être > 0"
+msgstr "Amount must be > 0"
+
+#: .\stock\serializers.py:572
+msgid "Le champ devise est obligatoire pour le mouvement de caisse."
+msgstr "The currency field is required for the cash movement."
+
+#: .\stock\serializers.py:616
+#, python-format
+msgid ""
+"Impossible de créer une dette pour cette sortie. La sortie #%(pk)s a le "
+"statut '%(statut)s'. Seules les sorties avec le statut 'EN_CREDIT' peuvent "
+"générer une dette."
+msgstr ""
+"Unable to create a debt for this sale. Sale #%(pk)s has status '%(statut)s'. "
+"Only sales with status 'EN_CREDIT' can generate a debt."
+
+#: .\stock\views.py:166
+#, fuzzy, python-format
+#| msgid "Période: du %(debut)s au %(fin)s"
+msgid "Du %(debut)s au %(fin)s"
+msgstr "Period: from %(debut)s to %(fin)s"
+
+#: .\stock\views.py:209
+msgid "Approvisionnement"
+msgstr "Restocking"
+
+#: .\stock\views.py:226 .\stock\views.py:227
+msgid "Vente"
+msgstr "Sale"
+
+#: .\stock\views.py:227 .\stock\views.py:1241 .\stock\views.py:1359
+#: .\stock\views.py:3703
+msgid "Client"
+msgstr "Client"
+
+#: .\stock\views.py:233
+msgid "Caisse Entrée"
+msgstr "Cash In"
+
+#: .\stock\views.py:233
+msgid "Caisse Sortie"
+msgstr "Cash Out"
+
+#: .\stock\views.py:248 .\stock\views.py:249
+msgid "Paiement dette"
+msgstr "Debt payment"
+
+#: .\stock\views.py:284
+msgid "Période"
+msgstr "Period"
+
+#: .\stock\views.py:285
+msgid "JOURNAL COMPLET DES OPÉRATIONS"
+msgstr "COMPLETE OPERATIONS JOURNAL"
+
+#: .\stock\views.py:286
+#, python-format
+msgid "Généré le %(date)s par %(user)s"
+msgstr "Generated on %(date)s by %(user)s"
+
+#: .\stock\views.py:288
+msgid "Système"
+msgstr "System"
+
+#: .\stock\views.py:294
+msgid "Date/Heure"
+msgstr "Date/Time"
+
+#: .\stock\views.py:295
+msgid "Type"
+msgstr "Type"
+
+#: .\stock\views.py:296
+msgid "Désignation / Motif"
+msgstr "Description / Reason"
+
+#: .\stock\views.py:297 .\stock\views.py:3721 .\stock\views.py:3817
+msgid "Montant"
+msgstr "Amount"
+
+#: .\stock\views.py:298
+msgid "Réf."
+msgstr "Ref."
+
+#: .\stock\views.py:310
+msgid "Aucune opération pour la période."
+msgstr "No operations for this period."
+
+#: .\stock\views.py:323
+#, python-format
+msgid "Total : %(count)s opération(s)"
+msgstr "Total: %(count)s operation(s)"
+
+#: .\stock\views.py:371
+msgid ""
+"Vous avez déjà une entreprise associée. Contactez le superadmin pour la "
+"modifier."
+msgstr ""
+"You already have an associated company. Contact the superadmin to modify it."
+
+#: .\stock\views.py:389
+msgid "Vous ne pouvez modifier que votre propre entreprise."
+msgstr "You can only modify your own company."
+
+#: .\stock\views.py:402
+msgid "Vous ne pouvez supprimer que votre propre entreprise."
+msgstr "You can only delete your own company."
+
+#: .\stock\views.py:415
+msgid "Superadmin n'appartient à aucune entreprise"
+msgstr "Superadmin does not belong to any company"
+
+#: .\stock\views.py:416
+msgid "Aucune entreprise associée"
+msgstr "No company associated"
+
+#: .\stock\views.py:1229
+msgid "FACTURE DE VENTE"
+msgstr "SALE INVOICE"
+
+#: .\stock\views.py:1235
+msgid "N° Facture"
+msgstr "Invoice No."
+
+#: .\stock\views.py:1286
+msgid "TOTAL"
+msgstr "TOTAL"
+
+#: .\stock\views.py:1311
+msgid "Merci pour votre achat !"
+msgstr "Thank you for your purchase!"
+
+#: .\stock\views.py:1314 .\stock\views.py:3843
+#, python-format
+msgid "Imprimé par: %(user)s"
+msgstr "Printed by: %(user)s"
+
+#: .\stock\views.py:1315 .\stock\views.py:3844
+#, python-format
+msgid "Le %(date)s"
+msgstr "On %(date)s"
+
+#: .\stock\views.py:1356
+msgid "BON DE SORTIE"
+msgstr "PICKING SLIP"
+
+#: .\stock\views.py:1357
+msgid "N°"
+msgstr "No."
+
+#: .\stock\views.py:1358
+msgid "Client Anonyme"
+msgstr "Anonymous Customer"
+
+#: .\stock\views.py:1362
+msgid "Art"
+msgstr "Item"
+
+#: .\stock\views.py:1362
+msgid "Tot"
+msgstr "Tot"
+
+#: .\stock\views.py:1393
+msgid "-- Fin --"
+msgstr "-- End --"
+
+#: .\stock\views.py:3694
+msgid "REÇU DE PAIEMENT"
+msgstr "PAYMENT RECEIPT"
+
+#: .\stock\views.py:3698
+msgid "N° Reçu"
+msgstr "Receipt No."
+
+#: .\stock\views.py:3699
+#, fuzzy
+#| msgid "Date/Heure"
+msgid "Date et heure"
+msgstr "Date/Time"
+
+#: .\stock\views.py:3714
+msgid "Référence dette"
+msgstr "Debt reference"
+
+#: .\stock\views.py:3722
+msgid "Montant total de la dette"
+msgstr "Total debt amount"
+
+#: .\stock\views.py:3723
+msgid "Montant déjà payé (avant ce reçu)"
+msgstr "Amount already paid (before this receipt)"
+
+#: .\stock\views.py:3724
+msgid "Solde restant avant ce paiement"
+msgstr "Balance remaining before this payment"
+
+#: .\stock\views.py:3727
+msgid "N° Sortie / Facture"
+msgstr "Sale / Invoice No."
+
+#: .\stock\views.py:3750
+msgid "Produits concernés par la dette"
+msgstr "Items related to this debt"
+
+#: .\stock\views.py:3784
+msgid "Détail du paiement"
+msgstr "Payment details"
+
+#: .\stock\views.py:3785
+msgid "Non précisé"
+msgstr "Not specified"
+
+#: .\stock\views.py:3787
+msgid "Libellé"
+msgstr "Label"
+
+#: .\stock\views.py:3787
+msgid "Valeur"
+msgstr "Value"
+
+#: .\stock\views.py:3788
+msgid "Montant payé (ce reçu)"
+msgstr "Amount paid (this receipt)"
+
+#: .\stock\views.py:3789
+msgid "Moyen de paiement"
+msgstr "Payment method"
+
+#: .\stock\views.py:3808
+msgid "Solde restant à payer après ce paiement"
+msgstr "Balance remaining after this payment"
+
+#: .\stock\views.py:3810
+msgid "Dette soldée. Merci."
+msgstr "Debt paid in full. Thank you."
+
+#: .\stock\views.py:3816
+msgid "Autres paiements sur cette dette"
+msgstr "Other payments on this debt"
+
+#: .\stock\views.py:3817
+msgid "Moyen"
+msgstr "Method"
+
+#: .\stock\views.py:3840
+msgid ""
+"Merci pour votre confiance. Conservez ce reçu comme justificatif de paiement."
+msgstr "Thank you for your trust. Keep this receipt as proof of payment."
+
+#: .\users\serializers.py:29
+msgid "Les mots de passe ne correspondent pas"
+msgstr "Passwords do not match"
+
+#: .\users\views.py:116
+msgid "entreprise_id est requis"
+msgstr "entreprise_id is required"
+
+#: .\users\views.py:129
+msgid "Entreprise introuvable"
+msgstr "Company not found"
+
+#~ msgid "Nom de l'article"
+#~ msgstr "Item name"
+
+#~ msgid "Code"
+#~ msgstr "Code"
+
+#~ msgid "Entreprise"
+#~ msgstr "Company"
+
+#~ msgid "Devise"
+#~ msgstr "Currency"
+
+#~ msgid "Scannez pour vérifier la facture"
+#~ msgstr "Scan to verify invoice"
+
+#~ msgid "Responsable"
+#~ msgstr "Responsible"
+
+#~ msgid "Devise principale"
+#~ msgstr "Main currency"
+
+#~ msgid "Généré le"
+#~ msgstr "Generated on"
+
+#~ msgid "Par"
+#~ msgstr "By"
+
+#~ msgid "Non définie"
+#~ msgstr "Not defined"

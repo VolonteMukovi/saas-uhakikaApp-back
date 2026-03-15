@@ -1,0 +1,12 @@
+1. gestion des devises
+2. embalage(conditioinement)
+3. gestion des utilisateur : 
+    3.1 creation des utilisateur
+    3.2 attribution des roles
+    3.2 action des utilisateur
+4. partage les parties interface selon le role(front)
+5.hebergement (fornt et backend)
+
+
+
+ besoin d'autres fonctionnalités des different rapports , qui sont inventaire : doit etre fait appartir d'une intervale de jour donne pardefaut le jour doit aller jusqu'a 31/decembre/ et il doit etre capables des prelever tout les produits qui ont ete disponible pendant l'anne en stock , fiche de bon entree : elle est etablie en foction de se qui est en stock qui ont le seuil d'alert faible au seuil entree lors d'approvisionnement sans rien laisser les colonnes:qte,unite,designation,pt, completez seulement la designation et unite , les autres collonnes on le complete manuellement lors de l'approvisionnement, les bon d'achat pour indiquer tout se que l'on vient d'approvisionner apartir d'une date donner . pour l'instant travaille d'abord sur ca , creer une application pour toute ces different rapports pour un code claire .

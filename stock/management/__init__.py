@@ -1,0 +1,1 @@
+# Fichier nécessaire pour que Django reconnaisse ce répertoire comme un package Python
