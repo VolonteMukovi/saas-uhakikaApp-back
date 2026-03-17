@@ -11,7 +11,7 @@ from django.contrib.auth.models import update_last_login
 from django.utils.translation import gettext as _
 
 from .serializers import UserSerializer, UserRegistrationSerializer, SuperAdminUserSerializer, AdminUserSerializer
-from .permissions import IsSuperAdmin, IsSuperAdminOrAdmin
+from .permissions import IsSuperAdmin, IsSuperAdminOrAdmin, IsAdminFullEnterpriseAndUsers
 from stock.models import Entreprise
 
 # Durée max de la session (24 h) en secondes ; au-delà, l'utilisateur doit se reconnecter
@@ -114,10 +114,9 @@ class UserViewSet(viewsets.ModelViewSet):
             return [permissions.AllowAny()]
         if self.action in ('assign_entreprise', 'remove_entreprise', 'without_entreprise'):
             return [IsSuperAdmin()]
-        if self.action == 'me':
-            return [permissions.IsAuthenticated()]
-        if self.action == 'list':
-            return [IsSuperAdminOrAdmin()]
+        # Admin gère entièrement les utilisateurs de son entreprise (séparation stricte entre entreprises)
+        if self.action in ('me', 'list', 'retrieve', 'update', 'partial_update', 'destroy'):
+            return [IsAdminFullEnterpriseAndUsers()]
         return [permissions.IsAuthenticated()]
 
     def get_queryset(self):
@@ -217,10 +216,22 @@ class UserViewSet(viewsets.ModelViewSet):
             'user_id': user.id
         })
     
-    @action(detail=False, methods=['get'], permission_classes=[IsSuperAdminOrAdmin])
+    @action(detail=False, methods=['get', 'put', 'patch'], permission_classes=[IsSuperAdminOrAdmin])
     def me(self, request):
-        """Récupérer les informations de l'utilisateur connecté"""
-        serializer = self.get_serializer(request.user)
+        """
+        Récupérer ou modifier les informations de l'utilisateur connecté (profil).
+        SuperAdmin et Admin : GET (voir profil + entreprise), PATCH/PUT (modifier profil).
+        Permission IsSuperAdminOrAdmin conservée pour que l'Admin garde l'accès à son entreprise et aux utilisateurs.
+        """
+        user = request.user
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            serializer = self.get_serializer(user)
+            return Response(serializer.data)
+        # PUT / PATCH : mise à jour du profil
+        serializer_class = AdminUserSerializer if user.is_admin() else UserSerializer
+        serializer = serializer_class(user, data=request.data, partial=(request.method == 'PATCH'))
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
         return Response(serializer.data)
     
     @action(detail=False, methods=['post'], permission_classes=[IsSuperAdmin])

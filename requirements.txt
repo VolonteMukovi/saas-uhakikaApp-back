@@ -23,5 +23,6 @@ PyYAML==6.0.3
 qrcode==8.2
 reportlab==4.4.9
 sqlparse==0.5.5
+typing_extensions==4.15.0
 tzdata==2025.3
 uritemplate==4.2.0

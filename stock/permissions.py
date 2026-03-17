@@ -5,9 +5,10 @@ from django.utils.translation import gettext as _
 
 class EntreprisePermission(permissions.BasePermission):
     """
-    Règles pour le modèle Entreprise :
+    Garantit que l'Admin puisse gérer entièrement son entreprise (CRUD complet sur sa seule
+    entreprise), tout en respectant la séparation entre entreprises.
     - SuperAdmin : Read (list, retrieve) + Delete uniquement. Pas de Create ni Update.
-    - Admin : CRUD complet sur sa propre entreprise uniquement.
+    - Admin : CRUD complet sur sa propre entreprise uniquement (get_queryset restreint à son entreprise).
     - User (Agent) : aucun accès.
     """
 

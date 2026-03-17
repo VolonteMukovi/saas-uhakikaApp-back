@@ -61,6 +61,29 @@ class IsSuperAdminOrAdmin(permissions.BasePermission):
         )
 
 
+class IsAdminFullEnterpriseAndUsers(permissions.BasePermission):
+    """
+    Garantit que l'Admin peut gérer entièrement son entreprise et ses utilisateurs,
+    dans le strict respect de la séparation entre entreprises (accès uniquement aux
+    données de son entreprise). Utilisé en combinaison avec get_queryset / check_object_permissions.
+    """
+    message = "Accès réservé aux administrateurs pour la gestion de leur entreprise et de leurs utilisateurs."
+
+    def has_permission(self, request, view):
+        return (
+            request.user
+            and request.user.is_authenticated
+            and (request.user.is_superadmin() or request.user.is_admin())
+        )
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_superadmin():
+            return True
+        if request.user.is_admin() and hasattr(obj, "entreprise_id"):
+            return obj.entreprise_id == request.user.entreprise_id
+        return False
+
+
 class IsSuperAdminOrReadOnlyAdmin(permissions.BasePermission):
     """Super admin (lecture/écriture) ou admin (lecture seule)."""
     message = "Accès en écriture réservé aux super administrateurs."
