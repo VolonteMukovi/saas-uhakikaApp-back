@@ -79,8 +79,9 @@ class IsAdminFullEnterpriseAndUsers(permissions.BasePermission):
     def has_object_permission(self, request, view, obj):
         if request.user.is_superadmin():
             return True
-        if request.user.is_admin() and hasattr(obj, "entreprise_id"):
-            return obj.entreprise_id == request.user.entreprise_id
+        if request.user.is_admin():
+            obj_eid = obj.get_entreprise_id() if hasattr(obj, 'get_entreprise_id') else getattr(obj, 'entreprise_id', None)
+            return obj_eid == request.user.get_entreprise_id()
         return False
 
 
@@ -125,8 +126,12 @@ class IsOwnerOrSameEnterprise(permissions.BasePermission):
     def has_object_permission(self, request, view, obj):
         if request.user.is_superadmin():
             return True
-        if request.user.is_admin() and hasattr(obj, 'entreprise'):
-            return obj.entreprise == request.user.entreprise
-        if request.user.is_agent() and hasattr(obj, 'entreprise'):
-            return obj.entreprise == request.user.entreprise
+        user_ent = request.user.get_entreprise()
+        if not user_ent:
+            return False
+        if request.user.is_admin() or request.user.is_agent():
+            if hasattr(obj, 'get_entreprise_id'):
+                return obj.get_entreprise_id() == user_ent.id
+            if hasattr(obj, 'entreprise'):
+                return obj.entreprise_id == user_ent.id
         return False

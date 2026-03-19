@@ -11,24 +11,27 @@ if admin.site.is_registered(User):
 
 class UserAdmin(BaseUserAdmin):
     """
-    Administration personnalisée pour le modèle User
+    Administration personnalisée pour le modèle User (entreprise via Membership).
     """
-    list_display = ('username', 'email', 'role', 'entreprise', 'is_active', 'date_joined')
-    list_filter = ('role', 'is_active', 'entreprise')
+    list_display = ('username', 'email', 'role', 'admin_entreprise_display', 'is_active', 'date_joined')
+    list_filter = ('role', 'is_active')
     search_fields = ('username', 'email', 'first_name', 'last_name')
     ordering = ('username',)
-    
-    # Champs à afficher dans le formulaire d'édition
+
+    def admin_entreprise_display(self, obj):
+        ent = obj.get_entreprise()
+        return ent.nom if ent else '-'
+    admin_entreprise_display.short_description = 'Entreprise'
+
     fieldsets = BaseUserAdmin.fieldsets + (
         ('Informations Supplémentaires', {
-            'fields': ('role', 'entreprise')
+            'fields': ('role',)
         }),
     )
-    
-    # Champs à afficher lors de la création d'un utilisateur
+
     add_fieldsets = BaseUserAdmin.add_fieldsets + (
         ('Informations Supplémentaires', {
-            'fields': ('role', 'entreprise', 'email', 'first_name', 'last_name')
+            'fields': ('role', 'email', 'first_name', 'last_name')
         }),
     )
 

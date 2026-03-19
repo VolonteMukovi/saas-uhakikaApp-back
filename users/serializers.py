@@ -5,14 +5,22 @@ from stock.serializers import EntrepriseSerializer
 
 
 class UserSerializer(serializers.ModelSerializer):
-    """Serializer de base pour les utilisateurs"""
-    entreprise_nom = serializers.CharField(source='entreprise.nom', read_only=True)
-    
+    """Serializer de base pour les utilisateurs (entreprise via Membership)."""
+    entreprise_nom = serializers.SerializerMethodField()
+    entreprise_id = serializers.SerializerMethodField()
+
     class Meta:
         model = get_user_model()
-        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'role', 
-                 'entreprise', 'entreprise_nom', 'is_active', 'date_joined']
-        read_only_fields = ['role', 'date_joined', 'entreprise']
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'role',
+                  'entreprise_id', 'entreprise_nom', 'is_active', 'date_joined']
+        read_only_fields = ['role', 'date_joined']
+
+    def get_entreprise_nom(self, obj):
+        ent = obj.get_entreprise()
+        return ent.nom if ent else None
+
+    def get_entreprise_id(self, obj):
+        return obj.get_entreprise_id()
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -46,10 +54,8 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 class AdminUserSerializer(serializers.ModelSerializer):
     """
     Serializer pour l'Admin : gestion des utilisateurs de son entreprise.
-    Permet de modifier : nom, username, email, mot de passe, rôle (admin/user), is_active.
-    L'entreprise n'est pas modifiable (toujours celle de l'Admin).
     """
-    entreprise_nom = serializers.CharField(source='entreprise.nom', read_only=True)
+    entreprise_nom = serializers.SerializerMethodField()
     password = serializers.CharField(write_only=True, required=False, min_length=8)
 
     class Meta:
@@ -57,6 +63,10 @@ class AdminUserSerializer(serializers.ModelSerializer):
         fields = ['id', 'username', 'email', 'first_name', 'last_name', 'role',
                   'entreprise_nom', 'is_active', 'date_joined', 'password']
         read_only_fields = ['date_joined', 'entreprise_nom']
+
+    def get_entreprise_nom(self, obj):
+        ent = obj.get_entreprise()
+        return ent.nom if ent else None
 
     def validate_role(self, value):
         if value and value not in ('admin', 'user'):
@@ -74,21 +84,27 @@ class AdminUserSerializer(serializers.ModelSerializer):
 
 
 class SuperAdminUserSerializer(serializers.ModelSerializer):
-    """Serializer pour les actions du superadmin sur les utilisateurs"""
-    entreprise_nom = serializers.CharField(source='entreprise.nom', read_only=True)
-    entreprise = EntrepriseSerializer(required=False)
+    """Serializer pour les actions du superadmin sur les utilisateurs (entreprise via Membership)."""
+    entreprise_nom = serializers.SerializerMethodField()
+    entreprise = EntrepriseSerializer(required=False, write_only=True)
     password = serializers.CharField(write_only=True, required=False)
-    
+
     class Meta:
         model = get_user_model()
-        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'role', 
-                 'entreprise', 'entreprise_nom', 'is_active', 'date_joined', 'password']
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'role',
+                  'entreprise', 'entreprise_nom', 'is_active', 'date_joined', 'password']
         read_only_fields = ['date_joined']
-    
+
+    def get_entreprise_nom(self, obj):
+        ent = obj.get_entreprise()
+        return ent.nom if ent else None
+
     def create(self, validated_data):
-        """Créer un utilisateur avec son entreprise (nested dict ou depuis le context pour Admin)."""
+        """Créer un utilisateur puis un Membership si entreprise fournie (context ou nested)."""
+        from .models import Membership
         entreprise_data = validated_data.pop('entreprise', None)
         password = validated_data.pop('password', None)
+        role = validated_data.get('role', 'admin')
         entreprise = self.context.get('entreprise')
         if not entreprise and entreprise_data:
             if isinstance(entreprise_data, dict):
@@ -99,22 +115,42 @@ class SuperAdminUserSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(entreprise_serializer.errors)
             else:
                 entreprise = entreprise_data
-        if entreprise:
-            validated_data['entreprise'] = entreprise
         if 'role' not in validated_data:
-            validated_data['role'] = 'admin'
+            validated_data['role'] = role
         user = get_user_model().objects.create(**validated_data)
         if password:
             user.set_password(password)
             user.save()
+        if entreprise:
+            Membership.objects.get_or_create(
+                user=user,
+                entreprise=entreprise,
+                defaults={'role': 'admin' if role == 'admin' else 'user', 'is_active': True},
+            )
         return user
-    
+
     def update(self, instance, validated_data):
-        # Le superadmin peut modifier tous les champs, y compris le rôle et l'entreprise
+        """Mise à jour utilisateur ; entreprise gérée via Membership (création si fournie)."""
+        from .models import Membership
         password = validated_data.pop('password', None)
+        entreprise_data = validated_data.pop('entreprise', None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         if password:
             instance.set_password(password)
         instance.save()
+        if entreprise_data is not None:
+            if isinstance(entreprise_data, dict):
+                entreprise_serializer = EntrepriseSerializer(data=entreprise_data)
+                if entreprise_serializer.is_valid():
+                    entreprise = entreprise_serializer.save()
+                else:
+                    raise serializers.ValidationError(entreprise_serializer.errors)
+            else:
+                entreprise = entreprise_data
+            Membership.objects.get_or_create(
+                user=instance,
+                entreprise=entreprise,
+                defaults={'role': 'admin', 'is_active': True},
+            )
         return instance

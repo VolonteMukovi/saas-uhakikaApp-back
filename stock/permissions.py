@@ -27,7 +27,8 @@ class EntreprisePermission(permissions.BasePermission):
         if request.user.is_superadmin():
             return request.method in ('GET', 'HEAD', 'OPTIONS', 'DELETE')
         if request.user.is_admin() and hasattr(obj, 'id'):
-            return getattr(request.user, 'entreprise_id', None) == obj.id
+            eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id()
+            return eid == obj.id
         return False
 
 
@@ -118,11 +119,13 @@ class IsOwnerOrSuperAdmin(permissions.BasePermission):
         
         # Admin peut accéder seulement aux objets de son entreprise
         if request.user.is_admin():
-            # Vérifier si l'objet appartient à l'entreprise de l'utilisateur
-            if hasattr(obj, 'entreprise'):
-                return obj.entreprise == request.user.entreprise
-            # Si l'objet est une entreprise elle-même
-            elif obj.__class__.__name__ == 'Entreprise':
-                return obj == request.user.entreprise
-        
+            user_ent = request.user.get_entreprise()
+            if not user_ent:
+                return False
+            if hasattr(obj, 'entreprise_id'):
+                return obj.entreprise_id == user_ent.id
+            if hasattr(obj, 'get_entreprise_id'):
+                return obj.get_entreprise_id() == user_ent.id
+            if obj.__class__.__name__ == 'Entreprise':
+                return obj.id == user_ent.id
         return False

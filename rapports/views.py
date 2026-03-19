@@ -60,7 +60,7 @@ class RapportsViewSet(viewsets.ViewSet):
         GET /api/rapports/inventaire/?statut=ALERTE
         """
         user = request.user
-        entreprise = user.entreprise
+        entreprise = user.get_entreprise()
         
         # Récupération des paramètres
         date_debut = request.query_params.get('date_debut')
@@ -73,8 +73,10 @@ class RapportsViewSet(viewsets.ViewSet):
             annee_actuelle = timezone.now().year
             date_fin = f"{annee_actuelle}-12-31"
         
-        # Requête de base: tous les stocks, ordre plus récent en premier
+        # Requête de base: stocks de l'entreprise de l'utilisateur
+        eid = entreprise.pk if entreprise else None
         stocks = Stock.objects.filter(
+            **({'article__entreprise_id': eid} if eid else {})
         ).select_related(
             'article',
             'article__sous_type_article',
@@ -169,12 +171,15 @@ class RapportsViewSet(viewsets.ViewSet):
     def _get_bon_entree_queryset_and_stats(self, request):
         """Retourne (queryset stocks, dict statistiques) pour le rapport de réquisition."""
         user = request.user
+        eid = user.get_entreprise_id()
+        base_filter = {'article__entreprise_id': eid} if eid else {}
         inclure_normaux = request.query_params.get('inclure_normaux', 'false').lower() == 'true'
         if inclure_normaux:
-            stocks = Stock.objects.filter()
+            stocks = Stock.objects.filter(**base_filter)
         else:
             stocks = Stock.objects.filter(
-                Q(Qte=0) | Q(Qte__lte=F('seuilAlert'))
+                Q(Qte=0) | Q(Qte__lte=F('seuilAlert')),
+                **base_filter
             )
         stocks = stocks.select_related(
             'article',
@@ -207,7 +212,7 @@ class RapportsViewSet(viewsets.ViewSet):
         GET /api/rapports/bon-entree/?inclure_normaux=true
         """
         user = request.user
-        entreprise = user.entreprise
+        entreprise = user.get_entreprise()
         stocks, statistiques = self._get_bon_entree_queryset_and_stats(request)
         
         # Pagination pour l'API JSON
@@ -249,7 +254,7 @@ class RapportsViewSet(viewsets.ViewSet):
 
         # Données pour le PDF : tous les articles (en rupture + en alerte), sans pagination, + extra_articles (ex. état normal)
         user = request.user
-        entreprise = user.entreprise
+        entreprise = user.get_entreprise()
         stocks, statistiques = self._get_bon_entree_queryset_and_stats(request)
         stocks_list = list(stocks)
         # Articles supplémentaires demandés (ex. état normal) : ?extra_articles=PRLI0007 ou extra_articles=ID1,ID2
@@ -259,8 +264,11 @@ class RapportsViewSet(viewsets.ViewSet):
             existing_ids = {s.article.article_id for s in stocks_list}
             extra_ids_to_add = [aid for aid in extra_ids if aid not in existing_ids]
             if extra_ids_to_add:
+                eid = user.get_entreprise_id()
+                extra_filter = {'article__entreprise_id': eid} if eid else {}
                 extra_stocks = Stock.objects.filter(
-                    article__article_id__in=extra_ids_to_add
+                    article__article_id__in=extra_ids_to_add,
+                    **extra_filter
                 ).select_related(
                     'article',
                     'article__sous_type_article',
@@ -312,11 +320,13 @@ class RapportsViewSet(viewsets.ViewSet):
                 'exemple': '/api/rapports/clients-dettes/?client_id=CLI0001'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Récupérer le client spécifique
         from stock.models import Client, DetteClient
-
+        eid = entreprise.pk if entreprise else None
+        client_qs = Client.objects.filter(id=client_id)
+        if eid:
+            client_qs = client_qs.filter(entreprise_id=eid)
         try:
-            client = Client.objects.get(id=client_id)
+            client = client_qs.get()
         except Client.DoesNotExist:
             return Response({
                 'error': f'Client avec ID "{client_id}" non trouvé'
@@ -495,10 +505,12 @@ class RapportsViewSet(viewsets.ViewSet):
         if date_fin_obj:
             filtre_dettes['date_creation__date__lte'] = date_fin_obj
 
-        # Récupérer tous les clients ayant des dettes avec solde > 0 dans la période
+        eid = entreprise.pk if entreprise else None
+        base_client_filter = {'entreprise_id': eid} if eid else {}
         clients_avec_dettes = Client.objects.filter(
             dettes__solde_restant__gt=0,
-            dettes__statut='EN_COURS'
+            dettes__statut='EN_COURS',
+            **base_client_filter
         )
         
         # Appliquer le filtre de date sur les dettes si nécessaire
@@ -639,7 +651,7 @@ class RapportsViewSet(viewsets.ViewSet):
         GET /api/rapports/bon-achat/?date_debut=2025-11-01&article_id=CAPE0001
         """
         user = request.user
-        entreprise = user.entreprise
+        entreprise = user.get_entreprise()
         
         # Récupération des paramètres
         date_debut = request.query_params.get('date_debut')
@@ -666,10 +678,12 @@ class RapportsViewSet(viewsets.ViewSet):
                 'exemple': '2025-11-01'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Requête des lignes d'entrée (plus récent en premier)
+        eid = entreprise.pk if entreprise else None
+        base_entree_filter = {'entree__entreprise_id': eid} if eid else {}
         lignes_entree = LigneEntree.objects.filter(
             date_entree__date__gte=date_debut_obj,
-            date_entree__date__lte=date_fin_obj
+            date_entree__date__lte=date_fin_obj,
+            **base_entree_filter
         ).select_related(
             'article',
             'article__unite',
@@ -784,13 +798,16 @@ class RapportsViewSet(viewsets.ViewSet):
         GET /api/rapports/{article_id}/fiche-stock/?date_min=2025-01-01&date_max=2025-12-31
         """
         user = request.user
-        if not user.is_authenticated or not hasattr(user, 'entreprise'):
-            return Response({
-                'detail': "Utilisateur non authentifié ou sans entreprise."
-            }, status=status.HTTP_403_FORBIDDEN)
-
-        article = get_object_or_404(Article, pk=pk)
-        entreprise = user.entreprise
+        if not user.is_authenticated:
+            return Response({'detail': "Utilisateur non authentifié."}, status=status.HTTP_403_FORBIDDEN)
+        entreprise = user.get_entreprise()
+        eid = user.get_entreprise_id()
+        article_qs = Article.objects.filter(pk=pk)
+        if eid:
+            article_qs = article_qs.filter(entreprise_id=eid)
+        article = article_qs.first()
+        if not article:
+            return Response({'detail': "Article non trouvé ou accès refusé."}, status=status.HTTP_404_NOT_FOUND)
         
         # Filtres optionnels
         date_min = request.query_params.get('date_min')

@@ -4,6 +4,7 @@ from django.urls import path, include
 
 router = routers.DefaultRouter()
 router.register(r'entreprises', EntrepriseViewSet)
+router.register(r'succursales', SuccursaleViewSet, basename='succursale')
 router.register(r'unites', UniteViewSet)
 router.register(r'typearticles', TypeArticleViewSet)
 router.register(r'soustypearticles', SousTypeArticleViewSet)

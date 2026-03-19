@@ -17,13 +17,40 @@ class Entreprise(models.Model):
     responsable = models.CharField(max_length=255)
     logo = models.ImageField(upload_to='entreprises/logos/', blank=True, null=True)
     slogan = models.CharField(max_length=255, blank=True, null=True, help_text="Devise ou slogan de l'entreprise (affiché dans l'en-tête des rapports)")
+    has_branches = models.BooleanField(default=False, help_text="Active la gestion par succursales (branches).")
 
     def __str__(self):
         return self.nom
+
+
+class Succursale(models.Model):
+    """Succursale (branch) d'une entreprise (tenant)."""
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='succursales')
+    nom = models.CharField(max_length=255)
+    adresse = models.CharField(max_length=255, blank=True, null=True)
+    telephone = models.CharField(max_length=50, blank=True, null=True)
+    email = models.EmailField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('entreprise', 'nom')
+        ordering = ['entreprise_id', 'nom', 'id']
+
+    def __str__(self):
+        return f"{self.entreprise.nom} - {self.nom}"
     
 class Unite(models.Model):
     libelle = models.CharField(max_length=100)
     description = models.TextField(blank=True)
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='unites', null=True, blank=True)
+    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='unites', null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['entreprise_id']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+        ]
 
     def __str__(self):
         return self.libelle
@@ -32,24 +59,52 @@ class Unite(models.Model):
 class TypeArticle(models.Model):
     libelle = models.CharField(max_length=100)
     description = models.TextField(blank=True)
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='type_articles', null=True, blank=True)
+    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='type_articles', null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['entreprise_id']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+        ]
 
     def __str__(self):
         return self.libelle
-        
+
+
 class SousTypeArticle(models.Model):
     type_article = models.ForeignKey(TypeArticle, on_delete=models.CASCADE, related_name='sous_types')
     libelle = models.CharField(max_length=100)
     description = models.TextField(blank=True)
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='sous_type_articles', null=True, blank=True)
+    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='sous_type_articles', null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['entreprise_id']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+        ]
 
     def __str__(self):
         return self.libelle
+
+
 class Article(models.Model):
     nom_scientifique = models.CharField(max_length=100)
     nom_commercial = models.CharField(max_length=100, blank=True, null=True)
     article_id = models.CharField(primary_key=True, max_length=10, unique=True, editable=False)
     sous_type_article = models.ForeignKey(SousTypeArticle, on_delete=models.CASCADE, default=1)
     unite = models.ForeignKey(Unite, on_delete=models.CASCADE)
-    emplacement = models.CharField(max_length=200,default=1)
+    emplacement = models.CharField(max_length=200, default=1)
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='articles', null=True, blank=True)
+    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='articles', null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['entreprise_id']),
+            models.Index(fields=['succursale_id']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+        ]
 
     def __str__(self):
         return self.nom_scientifique
@@ -58,8 +113,10 @@ class Article(models.Model):
         if not self.article_id:
             type_code = self.sous_type_article.type_article.libelle[:2].upper()
             sous_type_code = self.sous_type_article.libelle[:2].upper()
-            # Compter les articles existants pour ce sous-type et type
-            count = Article.objects.filter(sous_type_article=self.sous_type_article).count() + 1
+            qs = Article.objects.filter(sous_type_article=self.sous_type_article)
+            if self.entreprise_id:
+                qs = qs.filter(entreprise_id=self.entreprise_id)
+            count = qs.count() + 1
             numero = str(count).zfill(4)
             self.article_id = f"{type_code}{sous_type_code}{numero}"
         super().save(*args, **kwargs)
@@ -69,6 +126,15 @@ class Entree(models.Model):
     libele = models.CharField(max_length=100)
     description = models.TextField(blank=True)
     date_op = models.DateTimeField(auto_now_add=True)
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='entrees', null=True, blank=True)
+    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='entrees', null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['entreprise_id']),
+            models.Index(fields=['succursale_id']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+        ]
 
     def __str__(self):
         return f"Entree: {self.libele} ({self.date_op})"
@@ -116,11 +182,8 @@ class Stock(models.Model):
 
 # Sortie et LigneSortie
 class Sortie(models.Model):
-  
     motif = models.CharField(max_length=255, blank=True)
-    # Relation avec Client (optionnel)
     client = models.ForeignKey('Client', on_delete=models.SET_NULL, related_name='sorties', null=True, blank=True, help_text="Client associé à cette sortie (optionnel)")
-    # Devise de la sortie (nullable)
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='sorties', null=True, blank=True)
     statut = models.CharField(
         max_length=20,
@@ -131,7 +194,16 @@ class Sortie(models.Model):
         default='PAYEE'
     )
     date_creation = models.DateTimeField(auto_now_add=True)
-    
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='sorties', null=True, blank=True)
+    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='sorties', null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['entreprise_id']),
+            models.Index(fields=['succursale_id']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+        ]
+
     def __str__(self):
         client_nom = self.client.nom if self.client else "Client Anonyme"
         return f"Sortie #{self.pk} - {client_nom}"
@@ -139,21 +211,26 @@ class Sortie(models.Model):
 
 class Client(models.Model):
     id = models.CharField(primary_key=True, max_length=20)
-   
     nom = models.CharField(max_length=150)
     telephone = models.CharField(max_length=50, blank=True, null=True)
     adresse = models.CharField(max_length=255, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
     date_enregistrement = models.DateTimeField(auto_now_add=True)
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='clients', null=True, blank=True)
+    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='clients', null=True, blank=True)
+
+    class Meta:
+        ordering = ['nom']
+        indexes = [
+            models.Index(fields=['entreprise_id']),
+            models.Index(fields=['succursale_id']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+        ]
 
     def __str__(self):
         return f"{self.id} - {self.nom}"
 
-    class Meta:
-        ordering = ['nom']
-
 class DetteClient(models.Model):
-  
     client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='dettes')
     sortie = models.OneToOneField('Sortie', on_delete=models.CASCADE, related_name='dette')
     montant_total = models.DecimalField(max_digits=12, decimal_places=2)
@@ -172,11 +249,17 @@ class DetteClient(models.Model):
         default='EN_COURS'
     )
     commentaire = models.TextField(blank=True, null=True)
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='dettes_clients', null=True, blank=True)
+    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='dettes_clients', null=True, blank=True)
 
     class Meta:
         ordering = ['-date_creation']
         verbose_name = "Dette client"
         verbose_name_plural = "Dettes clients"
+        indexes = [
+            models.Index(fields=['entreprise_id']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+        ]
 
     def __str__(self):
         return f"Dette {self.client.nom} - {self.montant_total}{self.devise.sigle if self.devise else ''}"
@@ -202,7 +285,6 @@ class DetteClient(models.Model):
 
 
 class PaiementDette(models.Model):
- 
     dette = models.ForeignKey(DetteClient, on_delete=models.CASCADE, related_name='paiements')
     montant_paye = models.DecimalField(max_digits=12, decimal_places=2)
     date_paiement = models.DateTimeField(auto_now_add=True)
@@ -210,11 +292,17 @@ class PaiementDette(models.Model):
     reference = models.CharField(max_length=100, blank=True, null=True)
     utilisateur = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='paiements_dettes_effectues')
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='paiements_dettes', null=True, blank=True)
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='paiements_dettes', null=True, blank=True)
+    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='paiements_dettes', null=True, blank=True)
 
     class Meta:
         ordering = ['-date_paiement']
         verbose_name = "Paiement de dette"
         verbose_name_plural = "Paiements de dettes"
+        indexes = [
+            models.Index(fields=['entreprise_id']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+        ]
 
     def __str__(self):
         return f"Paiement {self.montant_paye}{self.devise.sigle if self.devise else ''} - Dette #{self.dette.id}"
@@ -245,7 +333,7 @@ class PaiementDette(models.Model):
             # Save dette with update_fields to avoid full save() logic
             self.dette.save(update_fields=['solde_restant', 'statut'])
 
-            # Enregistrer automatiquement le mouvement de caisse
+            # Enregistrer automatiquement le mouvement de caisse (même entreprise/succursale que la dette)
             from .models import MouvementCaisse
             MouvementCaisse.objects.create(
                 type='ENTREE',
@@ -254,6 +342,8 @@ class PaiementDette(models.Model):
                 motif=f"Paiement dette client {self.dette.client.nom}",
                 moyen=self.moyen or "Inconnu",
                 reference_piece=f"DET-{self.dette.id}",
+                entreprise_id=self.dette.entreprise_id,
+                succursale_id=self.dette.succursale_id,
             )
 
 
@@ -353,18 +443,23 @@ class MouvementCaisse(models.Model):
     TYPE_CHOICES = [('ENTREE', 'Entrée'), ('SORTIE', 'Sortie')]
     date = models.DateTimeField(auto_now_add=True)
     montant = models.DecimalField(max_digits=12, decimal_places=2)
-    # Devise pour le mouvement (nullable). Si absent, utiliser la devise principale de l'entreprise lors de la création.
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
     type = models.CharField(max_length=10, choices=TYPE_CHOICES)
     motif = models.TextField()
     moyen = models.CharField(max_length=30, blank=True, null=True, help_text='Ex: Cash, Mobile Money, Chèque')
     reference_piece = models.CharField(max_length=100, blank=True, null=True)
     sortie = models.ForeignKey('Sortie', null=True, blank=True, on_delete=models.SET_NULL, related_name='mouvement_caisse')
-    # Nouveau lien optionnel pour tracer les approvisionnements (entrées de stock)
     entree = models.ForeignKey('Entree', null=True, blank=True, on_delete=models.SET_NULL, related_name='mouvement_caisse')
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
+    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
 
     class Meta:
         ordering = ['-date']
+        indexes = [
+            models.Index(fields=['entreprise_id']),
+            models.Index(fields=['succursale_id']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+        ]
 
     def __str__(self):
         sens = '+' if self.type == 'ENTREE' else '-'

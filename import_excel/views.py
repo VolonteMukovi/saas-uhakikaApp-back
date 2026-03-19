@@ -50,7 +50,9 @@ def download_template(request):
         cell.alignment = header_align
         cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
         ws2.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 22
-    for article in Article.objects.all():
+    tenant_id = request.user.get_entreprise_id() if request.user.is_authenticated else None
+    articles_qs = Article.objects.filter(entreprise_id=tenant_id) if tenant_id else Article.objects.all()
+    for article in articles_qs:
         ws2.append([article.article_id, article.nom_scientifique, article.nom_commercial or ''])
 
     # Feuille de référence des devises
@@ -63,7 +65,8 @@ def download_template(request):
         cell.alignment = header_align
         cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
         ws3.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 18
-    for devise in Devise.objects.all():
+    devises_qs = Devise.objects.filter(entreprise_id=tenant_id) if tenant_id else Devise.objects.all()
+    for devise in devises_qs:
         ws3.append([devise.id, devise.sigle, devise.nom, devise.symbole])
 
     # Feuille "Référence complète" : tous les articles (code) et devises en un seul endroit
@@ -93,7 +96,7 @@ def download_template(request):
         cell.alignment = header_align
         cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
     row_art = 5
-    for article in Article.objects.order_by('article_id'):
+    for article in articles_qs.order_by('article_id'):
         ws_ref.append([
             article.article_id,
             article.nom_scientifique,
@@ -117,7 +120,7 @@ def download_template(request):
         cell.alignment = header_align
         cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
     row_art += 1
-    for devise in Devise.objects.order_by('id'):
+    for devise in devises_qs.order_by('id'):
         ws_ref.append([devise.id, devise.sigle, devise.nom, devise.symbole])
         for col in range(1, 5):
             ws_ref.cell(row=row_art, column=col).border = Border(top=thin, left=thin, right=thin, bottom=thin)
@@ -145,10 +148,12 @@ def import_approvisionnement(request):
     ws = wb['Approvisionnement']
     lignes = []
     from datetime import datetime
-    # Récupère la devise principale de l'entreprise de l'utilisateur connecté
-    entreprise = request.user.entreprise
+    from stock.views import _get_tenant_ids
     from stock.models import Devise
-    devise_principale = Devise.objects.filter(est_principal=True).first()
+    tenant_id, branch_id = _get_tenant_ids(request)
+    if not tenant_id:
+        return JsonResponse({'error': _('Contexte entreprise manquant. Connectez-vous et sélectionnez une entreprise.')}, status=400)
+    devise_principale = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
             # Ignore les lignes vides (toutes les valeurs nulles ou vides)
             if not row or all(cell is None or (isinstance(cell, str) and not cell.strip()) for cell in row):
@@ -276,8 +281,9 @@ def import_approvisionnement(request):
         devise_obj = Devise.objects.filter(pk=devise_id).first()
         if not devise_obj:
             continue
-        entrees = MouvementCaisse.objects.filter(devise=devise_obj, type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        sorties = MouvementCaisse.objects.filter(devise=devise_obj, type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
+        qs = MouvementCaisse.objects.filter(devise=devise_obj, entreprise_id=tenant_id)
+        entrees = qs.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
+        sorties = qs.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
         solde = entrees - sorties
         if total > solde:
             erreurs_solde.append(f"Solde insuffisant en {devise_obj.nom} ({devise_obj.sigle}): Requis {total} {devise_obj.symbole}, Disponible {solde} {devise_obj.symbole}. Veuillez d'abord effectuer une entrée en caisse dans cette devise.")
@@ -295,8 +301,7 @@ def import_approvisionnement(request):
     }
     serializer = EntreeSerializer(data=data, context={'request': request})
     if serializer.is_valid():
-        entree = serializer.save()
-        # Débiter la caisse (SORTIE) comme pour la création manuelle dans EntreeViewSet.create()
+        entree = serializer.save(entreprise_id=tenant_id, succursale_id=branch_id)
         from stock.models import MouvementCaisse
         for devise_id, total in totaux_par_devise.items():
             if total <= 0:
@@ -310,7 +315,9 @@ def import_approvisionnement(request):
                 type='SORTIE',
                 motif=f"Approvisionnement entrée #{entree.pk} (Import Excel)",
                 moyen='Cash',
-                entree=entree
+                entree=entree,
+                entreprise_id=tenant_id,
+                succursale_id=branch_id,
             )
         return JsonResponse(serializer.data, status=201)
     else:
@@ -450,6 +457,14 @@ def download_template_articles(request):
 @permission_classes([IsAuthenticated])
 def import_articles(request):
     """Importe un fichier Excel d'articles et crée les articles + un Stock à 0 pour chacun."""
+    from stock.views import _get_tenant_ids
+    tenant_id, branch_id = _get_tenant_ids(request)
+    if not tenant_id:
+        return JsonResponse(
+            {'error': _('Contexte entreprise manquant. Connectez-vous et sélectionnez une entreprise.')},
+            status=400
+        )
+
     file = request.FILES.get('file')
     if not file:
         return JsonResponse({'error': _('Aucun fichier envoyé.')}, status=400)
@@ -541,7 +556,7 @@ def import_articles(request):
             continue
 
         try:
-            article = serializer.save()
+            article = serializer.save(entreprise_id=tenant_id, succursale_id=branch_id)
             if emplacement != '1':
                 article.emplacement = emplacement
                 article.save(update_fields=['emplacement'])
@@ -578,6 +593,11 @@ def import_articles(request):
 def download_template_sortie(request):
     """Télécharge un fichier Excel modèle pour l'import de sorties (ventes)."""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    tenant_id = request.user.get_entreprise_id() if request.user.is_authenticated else None
+    articles_qs = Article.objects.filter(entreprise_id=tenant_id) if tenant_id else Article.objects.all()
+    devises_qs = Devise.objects.filter(entreprise_id=tenant_id) if tenant_id else Devise.objects.all()
+    clients_qs = Client.objects.filter(entreprise_id=tenant_id) if tenant_id else Client.objects.all()
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -633,7 +653,7 @@ def download_template_sortie(request):
         cell.alignment = header_align
         cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
     row_cur = 7
-    for article in Article.objects.order_by('article_id'):
+    for article in articles_qs.order_by('article_id'):
         ws_ref.append([article.article_id, article.nom_scientifique, article.nom_commercial or ''])
         for col in range(1, 4):
             ws_ref.cell(row=row_cur, column=col).border = Border(top=thin, left=thin, right=thin, bottom=thin)
@@ -653,7 +673,7 @@ def download_template_sortie(request):
         cell.alignment = header_align
         cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
     row_cur += 1
-    for devise in Devise.objects.order_by('id'):
+    for devise in devises_qs.order_by('id'):
         ws_ref.append([devise.id, devise.sigle, devise.nom, devise.symbole])
         for col in range(1, 5):
             ws_ref.cell(row=row_cur, column=col).border = Border(top=thin, left=thin, right=thin, bottom=thin)
@@ -673,7 +693,7 @@ def download_template_sortie(request):
         cell.alignment = header_align
         cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
     row_cur += 1
-    for client in Client.objects.order_by('nom'):
+    for client in clients_qs.order_by('nom'):
         ws_ref.append([client.id, client.nom, (client.telephone or '')])
         for col in range(1, 4):
             ws_ref.cell(row=row_cur, column=col).border = Border(top=thin, left=thin, right=thin, bottom=thin)
@@ -698,6 +718,11 @@ def download_template_sortie(request):
 @permission_classes([IsAuthenticated])
 def import_sortie(request):
     """Importe un fichier Excel de sortie (vente) et crée une Sortie avec ses lignes (FIFO, caisse, etc.)."""
+    from stock.views import _get_tenant_ids
+    tenant_id, branch_id = _get_tenant_ids(request)
+    if not tenant_id:
+        return JsonResponse({'error': _('Contexte entreprise manquant. Connectez-vous et sélectionnez une entreprise.')}, status=400)
+
     file = request.FILES.get('file')
     if not file:
         return JsonResponse({'error': _('Aucun fichier envoyé.')}, status=400)
@@ -792,7 +817,7 @@ def import_sortie(request):
                 except (ValueError, TypeError):
                     pass
         if not devise_id or not Devise.objects.filter(pk=devise_id).exists():
-            default_dev = Devise.objects.filter(est_principal=True).first()
+            default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
             devise_id = default_dev.id if default_dev else None
         if not devise_id:
             return JsonResponse({'error': f'Ligne {row_idx}: devise_id invalide et aucune devise principale.'}, status=400)
@@ -865,13 +890,15 @@ def import_sortie(request):
                 if ligne.devise_id and devise_dette is None:
                     devise_dette = ligne.devise
             if devise_dette is None:
-                devise_dette = Devise.objects.filter(est_principal=True).first()
+                devise_dette = Devise.objects.filter(entreprise_id=sortie.entreprise_id, est_principal=True).first()
             client_obj = Client.objects.get(id=client_id_global)
             DetteClient.objects.create(
                 sortie=sortie,
                 client=client_obj,
                 montant_total=total_dette.quantize(Decimal('0.01')),
                 devise=devise_dette,
+                entreprise_id=sortie.entreprise_id,
+                succursale_id=sortie.succursale_id,
             )
 
     return JsonResponse(response.data, status=201)

@@ -40,13 +40,14 @@ class Command(BaseCommand):
             user.save()
             self.stdout.write(f"✅ {user.username}: Partenaire → admin")
         
-        # 4. S'assurer que tous les superusers sont des superadmin
+        # 4. S'assurer que tous les superusers sont des superadmin (sans membership actif)
+        from users.models import Membership
         superusers = User.objects.filter(is_superuser=True)
         superuser_count = superusers.count()
         for user in superusers:
             user.role = 'superadmin'
-            user.entreprise = None  # Superadmin n'appartient à aucune entreprise
             user.save()
+            Membership.objects.filter(user=user).update(is_active=False)
             self.stdout.write(f"✅ {user.username}: configuré comme superadmin")
         
         # 5. Statistiques finales

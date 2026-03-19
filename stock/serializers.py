@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import (
-    Entreprise, Devise, TypeArticle, SousTypeArticle, Unite, Article, Entree, LigneEntree, Stock, Sortie, LigneSortie, LigneSortieLot, BeneficeLot, MouvementCaisse, Client, DetteClient, PaiementDette
+    Entreprise, Succursale, Devise, TypeArticle, SousTypeArticle, Unite, Article, Entree, LigneEntree, Stock, Sortie, LigneSortie, LigneSortieLot, BeneficeLot, MouvementCaisse, Client, DetteClient, PaiementDette
 )
 from django.db import transaction, models
 from django.utils.translation import gettext as _
@@ -69,6 +69,17 @@ class EntrepriseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Entreprise
         fields = '__all__'
+
+
+class SuccursaleSerializer(serializers.ModelSerializer):
+    """CRUD succursale (branch) d'une entreprise. L'entreprise est fixée par la vue (contexte tenant)."""
+    entreprise_nom = serializers.CharField(source='entreprise.nom', read_only=True)
+
+    class Meta:
+        model = Succursale
+        fields = ['id', 'entreprise', 'entreprise_nom', 'nom', 'adresse', 'telephone', 'email', 'is_active', 'created_at']
+        read_only_fields = ['created_at']
+        extra_kwargs = {'entreprise': {'required': False}}
 
 
 class LigneSortieSerializer(serializers.ModelSerializer):
@@ -266,17 +277,6 @@ class SortieSerializer(serializers.ModelSerializer):
             stock.save()
 
         return instance
-
-
-class UniteSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Unite
-        fields = '__all__'
-
-class TypeArticleSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = TypeArticle
-        fields = '__all__'
 
 
 class StockSerializer(serializers.ModelSerializer):

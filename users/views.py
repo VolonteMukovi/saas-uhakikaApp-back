@@ -1,9 +1,10 @@
 import time
 from rest_framework import viewsets, permissions, status
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework import serializers as drf_serializers
 from rest_framework_simplejwt.settings import api_settings
 from django.contrib.auth import get_user_model
@@ -12,20 +13,43 @@ from django.utils.translation import gettext as _
 
 from .serializers import UserSerializer, UserRegistrationSerializer, SuperAdminUserSerializer, AdminUserSerializer
 from .permissions import IsSuperAdmin, IsSuperAdminOrAdmin, IsAdminFullEnterpriseAndUsers
-from stock.models import Entreprise
+from stock.models import Entreprise, Succursale
+from .models import Membership
 
 # Durée max de la session (24 h) en secondes ; au-delà, l'utilisateur doit se reconnecter
 SESSION_MAX_AGE_SECONDS = 24 * 3600
 
 
+def _add_context_to_token(refresh, membership):
+    """Ajoute le contexte multi-tenant aux claims JWT (entreprise_id, succursale_id, membership_id)."""
+    if not membership:
+        refresh["entreprise_id"] = None
+        refresh["succursale_id"] = None
+        refresh["membership_id"] = None
+        return
+    refresh["entreprise_id"] = membership.entreprise_id
+    refresh["succursale_id"] = membership.default_succursale_id
+    refresh["membership_id"] = membership.id
+
+
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-    """Connexion : tokens + infos user ; ajout du claim session_start pour limite 24 h."""
+    """Connexion : tokens + infos user ; claims session_start + contexte tenant (entreprise/succursale)."""
 
     def validate(self, attrs):
-        # Authentification uniquement (TokenObtainPairSerializer met déjà refresh/access, on les reconstruit avec session_start)
         super(TokenObtainPairSerializer, self).validate(attrs)
         refresh = self.get_token(self.user)
         refresh["session_start"] = int(time.time())
+
+        # Contexte multi-tenant : premier membership actif (entreprise + succursale par défaut)
+        first_m = (
+            Membership.objects
+            .select_related('entreprise', 'default_succursale')
+            .filter(user_id=self.user.id, is_active=True)
+            .order_by('entreprise_id', 'id')
+            .first()
+        )
+        _add_context_to_token(refresh, first_m)
+
         data = {
             "refresh": str(refresh),
             "access": str(refresh.access_token),
@@ -36,21 +60,36 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         user_data = {
             "id": self.user.id,
             "username": self.user.username,
-            "role": self.user.role,
             "email": self.user.email,
         }
-        if self.user.entreprise:
-            user_data["entreprise"] = {
-                "id": self.user.entreprise.id,
-                "nom": self.user.entreprise.nom,
-                "secteur": self.user.entreprise.secteur,
-                "adresse": self.user.entreprise.adresse,
-                "telephone": self.user.entreprise.telephone,
-                "email": self.user.entreprise.email,
-                "responsable": self.user.entreprise.responsable,
-            }
-        else:
-            user_data["entreprise"] = None
+        memberships = (
+            Membership.objects
+            .select_related('entreprise', 'default_succursale')
+            .filter(user_id=self.user.id, is_active=True)
+            .order_by('entreprise_id', 'id')
+        )
+        entreprises = []
+        for m in memberships:
+            e = m.entreprise
+            entreprises.append({
+                "membership_id": m.id,
+                "entreprise": {
+                    "id": e.id,
+                    "nom": e.nom,
+                    "secteur": e.secteur,
+                    "adresse": e.adresse,
+                    "telephone": e.telephone,
+                    "email": e.email,
+                    "responsable": e.responsable,
+                    "has_branches": getattr(e, "has_branches", False),
+                },
+                "role": m.role,
+                "default_branch_id": m.default_succursale_id,
+            })
+
+        primary_entreprise = entreprises[0]["entreprise"] if entreprises else None
+        user_data["entreprise"] = primary_entreprise
+        user_data["enterprises"] = entreprises
         data["user"] = user_data
         return data
 
@@ -85,6 +124,84 @@ class CustomTokenRefreshSerializer(TokenRefreshSerializer):
 class CustomTokenRefreshView(TokenRefreshView):
     """Vue de rafraîchissement du token avec durée max de session 24 h."""
     serializer_class = CustomTokenRefreshSerializer
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def select_context(request):
+    """
+    Étape 2/3 du login multi-tenant : choisir l'entreprise (et optionnellement la succursale).
+    Body: { "entreprise_id": int, "succursale_id": int | null }
+    Retourne de nouveaux access + refresh avec le contexte dans les claims.
+    """
+    user = request.user
+    entreprise_id = request.data.get('entreprise_id')
+    if not entreprise_id:
+        return Response(
+            {'error': _('entreprise_id est requis.')},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    try:
+        entreprise_id = int(entreprise_id)
+    except (TypeError, ValueError):
+        return Response(
+            {'error': _('entreprise_id doit être un entier.')},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    membership = (
+        Membership.objects
+        .select_related('entreprise', 'default_succursale')
+        .filter(user=user, entreprise_id=entreprise_id, is_active=True)
+        .first()
+    )
+    if not membership:
+        return Response(
+            {'error': _("Vous n'avez pas accès à cette entreprise.")},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    succursale_id = request.data.get('succursale_id')
+    if succursale_id is not None and succursale_id != '':
+        try:
+            succursale_id = int(succursale_id)
+        except (TypeError, ValueError):
+            succursale_id = None
+        if succursale_id is not None:
+            if not Succursale.objects.filter(id=succursale_id, entreprise_id=entreprise_id).exists():
+                return Response(
+                    {'error': _("Cette succursale n'appartient pas à l'entreprise choisie.")},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+    else:
+        succursale_id = membership.default_succursale_id
+
+    # Nouveaux tokens avec contexte
+    refresh = RefreshToken.for_user(user)
+    refresh["session_start"] = int(time.time())
+    # Construire un "contexte" pour le token (même membership, succursale choisie ou défaut)
+    refresh["entreprise_id"] = entreprise_id
+    refresh["succursale_id"] = succursale_id
+    refresh["membership_id"] = membership.id
+
+    data = {
+        'refresh': str(refresh),
+        'access': str(refresh.access_token),
+        'user': {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'entreprise_id': entreprise_id,
+            'succursale_id': succursale_id,
+            'membership_id': membership.id,
+            'entreprise': {
+                'id': membership.entreprise.id,
+                'nom': membership.entreprise.nom,
+                'has_branches': getattr(membership.entreprise, 'has_branches', False),
+            },
+        },
+    }
+    return Response(data, status=status.HTTP_200_OK)
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -127,8 +244,9 @@ class UserViewSet(viewsets.ModelViewSet):
         if user.is_superadmin():
             return base
         if user.is_admin():
-            if user.entreprise_id:
-                return base.filter(entreprise_id=user.entreprise_id)
+            eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id()
+            if eid:
+                return base.filter(memberships__entreprise_id=eid, memberships__is_active=True).distinct()
             return get_user_model().objects.none()
         if user.is_agent():
             return base.filter(pk=user.pk)
@@ -145,14 +263,17 @@ class UserViewSet(viewsets.ModelViewSet):
         if request.user.is_agent() and obj.pk != request.user.pk:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied(_("Vous ne pouvez modifier que votre propre profil."))
-        if request.user.is_admin() and obj.entreprise_id != request.user.entreprise_id:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied(_("Vous ne pouvez gérer que les utilisateurs de votre entreprise."))
+        if request.user.is_admin():
+            eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id()
+            if obj.get_entreprise_id() != eid:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied(_("Vous ne pouvez gérer que les utilisateurs de votre entreprise."))
     
     def create(self, request, *args, **kwargs):
         """Inscription publique (admin sans entreprise) ou création par un Admin (admin/user de son entreprise)."""
         if request.user.is_authenticated and request.user.is_admin():
-            if not request.user.entreprise_id:
+            entreprise = getattr(request, 'tenant_id', None) and Entreprise.objects.filter(id=request.tenant_id).first() or request.user.get_entreprise()
+            if not entreprise:
                 return Response(
                     {'error': _("Vous devez être associé à une entreprise pour créer des utilisateurs.")},
                     status=status.HTTP_403_FORBIDDEN
@@ -160,7 +281,7 @@ class UserViewSet(viewsets.ModelViewSet):
             data = request.data.copy()
             role = (data.get('role') or 'user').lower()
             data['role'] = 'user' if role not in ('admin', 'user') else role
-            serializer = SuperAdminUserSerializer(data=data, context={'request': request, 'entreprise': request.user.entreprise})
+            serializer = SuperAdminUserSerializer(data=data, context={'request': request, 'entreprise': entreprise})
             if serializer.is_valid():
                 user = serializer.save()
                 return Response({
@@ -169,7 +290,7 @@ class UserViewSet(viewsets.ModelViewSet):
                     'username': user.username,
                     'email': user.email,
                     'role': user.role,
-                    'entreprise': user.entreprise.nom if user.entreprise else None,
+                    'entreprise': user.get_entreprise().nom if user.get_entreprise() else None,
                 }, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         serializer = self.get_serializer(data=request.data)
@@ -185,35 +306,42 @@ class UserViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'], permission_classes=[IsSuperAdmin])
     def assign_entreprise(self, request, pk=None):
-        """Associer un utilisateur à une entreprise (superadmin seulement)"""
+        """Associer un utilisateur à une entreprise via Membership (superadmin seulement)."""
         user = self.get_object()
         entreprise_id = request.data.get('entreprise_id')
-        
         if not entreprise_id:
             return Response({'error': _('entreprise_id est requis')}, status=400)
-        
         try:
             entreprise = Entreprise.objects.get(id=entreprise_id)
-            user.entreprise = entreprise
-            user.save()
+            membership, created = Membership.objects.get_or_create(
+                user=user,
+                entreprise=entreprise,
+                defaults={'role': 'admin', 'is_active': True},
+            )
+            if not created:
+                membership.is_active = True
+                membership.save()
             return Response({
-                'message': f'Utilisateur {user.username} associé à {entreprise.nom}',
+                'message': _('Utilisateur %(user)s associé à %(ent)s') % {'user': user.username, 'ent': entreprise.nom},
                 'user_id': user.id,
                 'entreprise_id': entreprise.id,
-                'entreprise_nom': entreprise.nom
+                'entreprise_nom': entreprise.nom,
             })
         except Entreprise.DoesNotExist:
             return Response({'error': _('Entreprise introuvable')}, status=400)
-    
+
     @action(detail=True, methods=['post'], permission_classes=[IsSuperAdmin])
     def remove_entreprise(self, request, pk=None):
-        """Retirer l'association entreprise d'un utilisateur"""
+        """Retirer l'association entreprise d'un utilisateur (entreprise_id dans le body)."""
         user = self.get_object()
-        user.entreprise = None
-        user.save()
+        entreprise_id = request.data.get('entreprise_id')
+        if not entreprise_id:
+            return Response({'error': _('entreprise_id est requis')}, status=400)
+        deleted, _ = Membership.objects.filter(user=user, entreprise_id=entreprise_id).delete()
         return Response({
-            'message': f'Association entreprise retirée pour {user.username}',
-            'user_id': user.id
+            'message': _('Association entreprise retirée pour %(user)s') % {'user': user.username},
+            'user_id': user.id,
+            'deleted': deleted,
         })
     
     @action(detail=False, methods=['get', 'put', 'patch'], permission_classes=[IsSuperAdminOrAdmin])
@@ -244,8 +372,9 @@ class UserViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'], permission_classes=[IsSuperAdmin])
     def without_entreprise(self, request):
-        """Lister les utilisateurs sans entreprise (paginated, pour superadmin)"""
-        users = get_user_model().objects.filter(entreprise__isnull=True, role='admin').order_by('-date_joined', '-id')
+        """Lister les utilisateurs sans aucune entreprise (aucun membership actif), pour superadmin."""
+        with_membership = Membership.objects.filter(is_active=True).values_list('user_id', flat=True)
+        users = get_user_model().objects.exclude(id__in=with_membership).filter(role='admin').order_by('-date_joined', '-id')
         page = self.paginate_queryset(users)
         if page is not None:
             serializer = self.get_serializer(page, many=True)

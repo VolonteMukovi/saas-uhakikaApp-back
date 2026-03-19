@@ -8,7 +8,7 @@ from rest_framework import viewsets, status, serializers, permissions
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .models import (
-    Entreprise, Devise, TypeArticle, SousTypeArticle, Unite, Article, Entree, LigneEntree, Stock, Sortie, LigneSortie, LigneSortieLot, BeneficeLot, MouvementCaisse, Client, DetteClient, PaiementDette
+    Entreprise, Succursale, Devise, TypeArticle, SousTypeArticle, Unite, Article, Entree, LigneEntree, Stock, Sortie, LigneSortie, LigneSortieLot, BeneficeLot, MouvementCaisse, Client, DetteClient, PaiementDette
 )
 from django.db import transaction, models
 from django.db.models import Prefetch, Sum
@@ -52,6 +52,56 @@ class EnterpriseFilterMixin:
     def get_queryset(self):
         queryset = super().get_queryset()
         return queryset
+
+
+def _get_tenant_ids(request):
+    """
+    Retourne (entreprise_id, succursale_id) depuis le contexte JWT ou le user.
+    Utilisé pour isolation stricte multi-tenant sur tous les ViewSets.
+    """
+    tenant_id = getattr(request, 'tenant_id', None) or (request.user.get_entreprise_id() if request.user.is_authenticated else None)
+    branch_id = getattr(request, 'branch_id', None)
+    if branch_id is None and request.user.is_authenticated:
+        m = request.user.get_current_membership()
+        if m and m.default_succursale_id:
+            branch_id = m.default_succursale_id
+    return tenant_id, branch_id
+
+
+class TenantFilterMixin:
+    """
+    Mixin multi-tenant : filtre le queryset par entreprise (et optionnellement succursale).
+    - Si le modèle a entreprise_id : filtre par request.tenant_id / branch_id.
+    - Si tenant_lookup est défini (ex. 'entree__entreprise_id') : filtre par ce lookup.
+    """
+    tenant_lookup = None  # ex. 'entree__entreprise_id' pour LigneEntree
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if not self.request.user.is_authenticated:
+            return queryset.none() if (self.tenant_lookup or hasattr(queryset.model, 'entreprise_id')) else queryset
+        tenant_id, branch_id = _get_tenant_ids(self.request)
+        if tenant_id is None:
+            return queryset.none() if (self.tenant_lookup or hasattr(queryset.model, 'entreprise_id')) else queryset
+        if self.tenant_lookup:
+            return queryset.filter(**{self.tenant_lookup: tenant_id})
+        if not hasattr(queryset.model, 'entreprise_id'):
+            return queryset
+        queryset = queryset.filter(entreprise_id=tenant_id)
+        if hasattr(queryset.model, 'succursale_id') and branch_id is not None:
+            queryset = queryset.filter(succursale_id=branch_id)
+        return queryset
+
+    def get_tenant_ids(self):
+        return _get_tenant_ids(self.request)
+
+    def perform_create(self, serializer):
+        tenant_id, branch_id = self.get_tenant_ids()
+        model = getattr(serializer.Meta, 'model', None)
+        if model and hasattr(model, 'entreprise_id') and tenant_id is not None:
+            serializer.save(entreprise_id=tenant_id, succursale_id=branch_id)
+        else:
+            serializer.save()
 
 
 def _format_amount(amount: Decimal, devise_obj, entreprise=None):
@@ -144,6 +194,10 @@ class RapportViewSet(viewsets.ViewSet):
         principal = _get_principal_devise()
         now = timezone.now()
 
+        tenant_id, branch_id = _get_tenant_ids(request)
+        if not tenant_id:
+            return Response({'error': 'Contexte entreprise manquant.'}, status=400)
+
         # Filtrage : month/year (défaut = mois et année en cours), ou date_min/date_max pour plage personnalisée
         month_param = request.query_params.get('month')
         year_param = request.query_params.get('year')
@@ -170,28 +224,38 @@ class RapportViewSet(viewsets.ViewSet):
             periode_txt = _("Du %(debut)s au %(fin)s") % {'debut': date_min or '...', 'fin': date_max or '...'}
 
         # 1) Entrées (approvisionnements)
-        qs_entrees = Entree.objects.all().prefetch_related('lignes', 'lignes__article', 'lignes__devise')
+        qs_entrees = Entree.objects.filter(entreprise_id=tenant_id)
+        if branch_id is not None:
+            qs_entrees = qs_entrees.filter(succursale_id=branch_id)
+        qs_entrees = qs_entrees.prefetch_related('lignes', 'lignes__article', 'lignes__devise')
         if date_min:
             qs_entrees = qs_entrees.filter(date_op__date__gte=date_min)
         if date_max:
             qs_entrees = qs_entrees.filter(date_op__date__lte=date_max)
 
         # 2) Sorties (ventes)
-        qs_sorties = Sortie.objects.all().prefetch_related('lignes', 'lignes__article', 'lignes__devise', 'client')
+        qs_sorties = Sortie.objects.filter(entreprise_id=tenant_id)
+        if branch_id is not None:
+            qs_sorties = qs_sorties.filter(succursale_id=branch_id)
+        qs_sorties = qs_sorties.prefetch_related('lignes', 'lignes__article', 'lignes__devise', 'client')
         if date_min:
             qs_sorties = qs_sorties.filter(date_creation__date__gte=date_min)
         if date_max:
             qs_sorties = qs_sorties.filter(date_creation__date__lte=date_max)
 
         # 3) Mouvements de caisse
-        qs_caisse = MouvementCaisse.objects.all().select_related('devise', 'sortie', 'entree')
+        qs_caisse = MouvementCaisse.objects.filter(entreprise_id=tenant_id).select_related('devise', 'sortie', 'entree')
+        if branch_id is not None:
+            qs_caisse = qs_caisse.filter(succursale_id=branch_id)
         if date_min:
             qs_caisse = qs_caisse.filter(date__date__gte=date_min)
         if date_max:
             qs_caisse = qs_caisse.filter(date__date__lte=date_max)
 
         # 4) Paiements de dettes
-        qs_paiements = PaiementDette.objects.all().select_related('dette', 'dette__client', 'devise')
+        qs_paiements = PaiementDette.objects.filter(entreprise_id=tenant_id).select_related('dette', 'dette__client', 'devise')
+        if branch_id is not None:
+            qs_paiements = qs_paiements.filter(succursale_id=branch_id)
         if date_min:
             qs_paiements = qs_paiements.filter(date_paiement__date__gte=date_min)
         if date_max:
@@ -259,7 +323,7 @@ class RapportViewSet(viewsets.ViewSet):
         events.sort(key=lambda x: x['date'])
 
         # Entreprise pour l'en-tête
-        entreprise = getattr(user, 'entreprise', None) or Entreprise.objects.first()
+        entreprise = user.get_entreprise() or Entreprise.objects.first()
 
         # PDF
         buffer = io.BytesIO()
@@ -350,21 +414,24 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
         if user.is_superadmin():
             return Entreprise.objects.all().order_by('-id')
         if user.is_admin():
-            if user.entreprise:
-                return Entreprise.objects.filter(id=user.entreprise.id).order_by('-id')
+            eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id()
+            if eid:
+                return Entreprise.objects.filter(id=eid).order_by('-id')
             return Entreprise.objects.none()
         return Entreprise.objects.none()
 
     def perform_create(self, serializer):
+        from users.models import Membership
         user = self.request.user
         if user.is_superadmin():
             raise PermissionDenied(_("Le super administrateur ne peut pas créer d'entreprise. Utilisez un compte Admin."))
         if user.is_admin():
-            if user.entreprise:
-                raise PermissionDenied(_("Vous avez déjà une entreprise associée. Contactez le superadmin pour la modifier."))
             entreprise = serializer.save()
-            user.entreprise = entreprise
-            user.save()
+            Membership.objects.get_or_create(
+                user=user,
+                entreprise=entreprise,
+                defaults={'role': 'admin', 'is_active': True},
+            )
 
     def perform_update(self, serializer):
         user = self.request.user
@@ -372,41 +439,46 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
         if user.is_superadmin():
             raise PermissionDenied(_("Le super administrateur ne peut pas modifier une entreprise."))
         if user.is_admin():
-            if user.entreprise != entreprise:
+            # Admin : autorise uniquement si l'utilisateur a une membership active pour cette entreprise
+            is_member = (
+                user.memberships.filter(entreprise=entreprise, is_active=True).exists()
+            )
+            if not is_member:
                 raise PermissionDenied(_("Vous ne pouvez modifier que votre propre entreprise."))
             serializer.save()
-    
+
     def perform_destroy(self, instance):
-        """Logique de suppression d'entreprise"""
+        from users.models import Membership
         user = self.request.user
-        
         if user.is_superadmin():
-            # SuperAdmin peut supprimer n'importe quelle entreprise
             instance.delete()
         elif user.is_admin():
-            # Admin peut supprimer seulement sa propre entreprise
-            if user.entreprise != instance:
+            # Admin : autorise uniquement si l'utilisateur a une membership active pour cette entreprise
+            is_member = (
+                user.memberships.filter(entreprise=instance, is_active=True).exists()
+            )
+            if not is_member:
                 raise PermissionDenied(_("Vous ne pouvez supprimer que votre propre entreprise."))
-            # Dissocier l'utilisateur avant de supprimer l'entreprise
-            user.entreprise = None
-            user.save()
+            Membership.objects.filter(user=user, entreprise=instance).delete()
             instance.delete()
-    
+
     @action(detail=False, methods=['get'])
     def my_entreprise(self, request):
-        """Récupérer l'entreprise de l'utilisateur connecté (pour admin)"""
-        if request.user.is_admin() and request.user.entreprise:
-            serializer = self.get_serializer(request.user.entreprise)
+        """Récupérer l'entreprise de l'utilisateur connecté (pour admin)."""
+        eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id()
+        ent = Entreprise.objects.filter(id=eid).first() if eid else request.user.get_entreprise()
+        if request.user.is_admin() and ent:
+            serializer = self.get_serializer(ent)
             return Response(serializer.data)
-        elif request.user.is_superadmin():
+        if request.user.is_superadmin():
             return Response({'message': _("Superadmin n'appartient à aucune entreprise")})
         return Response({'error': _("Aucune entreprise associée")}, status=400)
-    
+
     @action(detail=True, methods=['get'])
     def users(self, request, pk=None):
-        """Lister tous les utilisateurs d'une entreprise (paginated)."""
+        """Lister tous les utilisateurs d'une entreprise (paginated, via Membership)."""
         entreprise = self.get_object()
-        users = get_user_model().objects.filter(entreprise=entreprise).order_by('-date_joined', '-id')
+        users = get_user_model().objects.filter(memberships__entreprise=entreprise, memberships__is_active=True).distinct().order_by('-date_joined', '-id')
         page = self.paginate_queryset(users)
         if page is not None:
             serializer = UserSerializer(page, many=True)
@@ -419,7 +491,7 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
         """Statistiques de l'entreprise"""
         entreprise = self.get_object()
         stats = {
-            'nombre_utilisateurs': get_user_model().objects.filter(entreprise=entreprise).count(),
+            'nombre_utilisateurs': get_user_model().objects.filter(memberships__entreprise=entreprise, memberships__is_active=True).distinct().count(),
             'nombre_articles': Article.objects.filter(entreprise=entreprise).count(),
             'nombre_sorties': Sortie.objects.filter(entreprise=entreprise).count(),
             'nombre_entrees': Entree.objects.filter(entreprise=entreprise).count(),
@@ -430,37 +502,64 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
         return Response(stats)
 
 
-class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.ModelViewSet):
-    """ViewSet pour gérer les sorties de stock"""
+class SuccursaleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
+    """
+    Succursales (branches) de l'entreprise courante.
+    - Liste : filtrée par entreprise (tenant_id ou premier membership).
+    - Create/Update/Delete : réservé à l'Admin de l'entreprise.
+    Utilisé pour le flow login (choix de la succursale si has_branches).
+    """
+    queryset = Succursale.objects.all()
+    serializer_class = SuccursaleSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user.is_authenticated:
+            return Succursale.objects.none()
+        eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id()
+        if not eid:
+            return Succursale.objects.none()
+        return Succursale.objects.filter(entreprise_id=eid, is_active=True).order_by('nom', 'id')
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if not user.is_admin():
+            raise PermissionDenied(_("Seul l'administrateur de l'entreprise peut créer une succursale."))
+        eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id()
+        if not eid:
+            raise PermissionDenied(_("Aucune entreprise sélectionnée."))
+        entreprise = Entreprise.objects.get(id=eid)
+        serializer.save(entreprise=entreprise)
+
+    def perform_update(self, serializer):
+        if not self.request.user.is_admin():
+            raise PermissionDenied(_("Seul l'administrateur peut modifier une succursale."))
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if not self.request.user.is_admin():
+            raise PermissionDenied(_("Seul l'administrateur peut supprimer une succursale."))
+        instance.is_active = False
+        instance.save()
+
+
+class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    """ViewSet pour gérer les sorties de stock (filtré par entreprise/succursale)."""
     queryset = Sortie.objects.all()
     serializer_class = SortieSerializer
 
-    
     def get_queryset(self):
-        """Filtre automatique par entreprise de l'utilisateur avec optimisation complète."""
-        user = self.request.user
-        
-        # Si l'utilisateur n'est pas authentifié, retourner un queryset vide
-        if not user.is_authenticated:
-            return Sortie.objects.none()
-        
-        # Optimisation complète avec inner joins pour tous les objets liés
-        queryset = Sortie.objects.prefetch_related(
+        queryset = super().get_queryset()
+        return queryset.prefetch_related(
             Prefetch(
                 'lignes',
                 queryset=LigneSortie.objects.select_related(
-                    'article__sous_type_article', 
-                    'article__unite', 
+                    'article__sous_type_article',
+                    'article__unite',
                     'devise'
                 )
             )
-        )
-        
-        # SuperAdmin n'a pas accès (IsAdminOrUser le bloque en amont)
-        if user.is_admin() or user.is_agent():
-            # TODO: si le modèle Sortie acquiert un champ entreprise, filtrer par user.entreprise_id
-            return queryset.order_by('-date_creation')
-        return queryset.none()
+        ).order_by('-date_creation')
 
 
     def create(self, request, *args, **kwargs):
@@ -468,16 +567,20 @@ class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.Mod
         serializer.is_valid(raise_exception=True)
         lignes_data = request.data.get('lignes', [])
         user = request.user
-        # Devise par défaut de l'entreprise
-        default_dev = Devise.objects.filter( est_principal=True).first()
+        tenant_id, branch_id = _get_tenant_ids(request)
+        if not tenant_id:
+            raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
+        default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
         with transaction.atomic():
             # Récupérer le client si fourni
             client = serializer.validated_data.get('client')
             
             sortie = Sortie.objects.create(
-                motif=serializer.validated_data.get('motif', ''),     
+                motif=serializer.validated_data.get('motif', ''),
                 statut=serializer.validated_data.get('statut', 'PAYEE'),
-                client=client  # Client optionnel
+                client=client,
+                entreprise_id=tenant_id,
+                succursale_id=branch_id
             )
             total = Decimal('0.00')
             devise_mouvement = None
@@ -539,7 +642,7 @@ class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.Mod
                 devise_id = ligne.get('devise_id') or ligne.get('devise')
                 if devise_id:
                     try:
-                        devise_obj = Devise.objects.get(pk=devise_id)
+                        devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=tenant_id)
                     except Devise.DoesNotExist:
                         raise serializers.ValidationError(f"Devise avec ID {devise_id} non trouvée dans votre entreprise.")
                 else:
@@ -665,7 +768,9 @@ class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.Mod
                         type='ENTREE',
                         motif=f'Vente sortie #{sortie.pk} - {devise_key}' + (' (EN CRÉDIT - montant 0)' if sortie.statut == 'EN_CREDIT' else ''),
                         moyen='Cash' if sortie.statut == 'PAYEE' else 'Crédit',
-                        sortie=sortie
+                        sortie=sortie,
+                        entreprise_id=sortie.entreprise_id,
+                        succursale_id=sortie.succursale_id,
                     )
         return Response(self.get_serializer(sortie).data, status=status.HTTP_201_CREATED)
     
@@ -704,12 +809,19 @@ class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.Mod
         
         # Base queryset : toutes les lignes de sortie
         # Utiliser date_sortie de LigneSortie pour le filtrage
+        tenant_id, branch_id = self.get_tenant_ids()
         lignes_sortie = LigneSortie.objects.select_related(
             'article',
             'article__unite',
             'article__sous_type_article',
             'sortie'
-        ).all()
+        )
+        if tenant_id:
+            lignes_sortie = lignes_sortie.filter(sortie__entreprise_id=tenant_id)
+        else:
+            lignes_sortie = lignes_sortie.none()
+        if branch_id is not None:
+            lignes_sortie = lignes_sortie.filter(sortie__succursale_id=branch_id)
         
         # Filtrage par période
         periode_info = {}
@@ -891,7 +1003,11 @@ class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.Mod
                         continue
                     
                     # Vérifier le solde disponible pour cette devise
-                    solde_devise = self._solde_caisse_par_devise(user.entreprise, devise_obj)
+                    solde_devise = self._solde_caisse_par_devise(
+                        user.get_entreprise(),
+                        devise_obj,
+                        succursale_id=sortie.succursale_id,
+                    )
                     if solde_devise < total_devise:
                         raise serializers.ValidationError(
                             f"Solde caisse insuffisant en {devise_key} pour annuler cette vente. "
@@ -905,7 +1021,9 @@ class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.Mod
                         type='SORTIE',
                         motif=f'Annulation vente sortie #{sortie.pk} - {devise_key}',
                         moyen='Ajustement',
-                        sortie=sortie
+                        sortie=sortie,
+                        entreprise_id=sortie.entreprise_id,
+                        succursale_id=sortie.succursale_id,
                     )
             
             sortie.delete()
@@ -918,18 +1036,15 @@ class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.Mod
             total += pu * Decimal(str(l.quantite))
         return total.quantize(Decimal('0.01'))
 
-    def _solde_caisse_par_devise(self, entreprise, devise):
-        """Calcule le solde de caisse pour une devise spécifique"""
-        entrees = MouvementCaisse.objects.filter(
-            devise=devise,
-            type='ENTREE'
-        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
-        
-        sorties = MouvementCaisse.objects.filter(
-            devise=devise,
-            type='SORTIE'
-        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
-        
+    def _solde_caisse_par_devise(self, entreprise, devise, succursale_id=None):
+        """Calcule le solde de caisse (tenant + devise) pour une devise spécifique."""
+        if not entreprise or not devise:
+            return Decimal('0.00')
+        qs = MouvementCaisse.objects.filter(devise=devise, entreprise_id=entreprise.pk)
+        if succursale_id is not None:
+            qs = qs.filter(succursale_id=succursale_id)
+        entrees = qs.filter(type='ENTREE').aggregate(total=Sum('montant'))['total'] or Decimal('0')
+        sorties = qs.filter(type='SORTIE').aggregate(total=Sum('montant'))['total'] or Decimal('0')
         return (entrees - sorties).quantize(Decimal('0.01'))
 
     def update(self, request, *args, **kwargs):
@@ -1052,7 +1167,7 @@ class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.Mod
                 devise_id = ligne.get('devise_id') or ligne.get('devise')
                 if devise_id:
                     try:
-                        devise_obj = Devise.objects.get(pk=devise_id)
+                        devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=instance.sortie.entreprise_id)
                     except Devise.DoesNotExist:
                         devise_obj = default_dev
                 else:
@@ -1164,34 +1279,49 @@ class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.Mod
             if diff != 0:
                 mouvement_type = 'ENTREE' if diff > 0 else 'SORTIE'
                 montant_abs = abs(diff)
-                if mouvement_type == 'SORTIE':
-                    solde = self._solde_caisse(user.entreprise)
+                tenant_id = instance.entreprise_id or (user.get_entreprise_id() if user.is_authenticated else None)
+                if mouvement_type == 'SORTIE' and tenant_id:
+                    solde = self._solde_caisse_tenant(tenant_id, getattr(self.request, 'branch_id', None))
                     if solde < montant_abs:
                         raise serializers.ValidationError("Solde caisse insuffisant pour ajuster cette vente.")
-                default_dev = Devise.objects.filter(est_principal=True).first()
+                default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first() if tenant_id else Devise.objects.filter(est_principal=True).first()
                 MouvementCaisse.objects.create(
                     montant=montant_abs,
                     devise=default_dev,
                     type=mouvement_type,
                     motif=f'Ajustement sortie #{instance.pk} (total {old_total} -> {new_total})',
                     moyen='Ajustement',
-                    sortie=instance
+                    sortie=instance,
+                    entreprise_id=instance.entreprise_id,
+                    succursale_id=instance.succursale_id,
                 )
         
         return Response(self.get_serializer(instance).data)
 
     def _solde_caisse(self, entreprise):
         from django.db.models import Sum
-        entree = MouvementCaisse.objects.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        sortie = MouvementCaisse.objects.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
+        if not entreprise:
+            return Decimal('0')
+        qs = MouvementCaisse.objects.filter(entreprise_id=entreprise.pk)
+        entree = qs.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
+        sortie = qs.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
+        return entree - sortie
+
+    def _solde_caisse_tenant(self, tenant_id, branch_id=None):
+        from django.db.models import Sum
+        qs = MouvementCaisse.objects.filter(entreprise_id=tenant_id)
+        if branch_id is not None:
+            qs = qs.filter(succursale_id=branch_id)
+        entree = qs.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
+        sortie = qs.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
         return entree - sortie
 
     # === Actions POS (facture & bons de sortie) déplacées depuis RapportViewSet ===
     @action(detail=True, methods=['get'], url_path='facture-pos', permission_classes=[IsAuthenticated])
     def facture_pos_pdf(self, request, pk=None):
         user = request.user
-        sortie = get_object_or_404(Sortie, pk=pk)
-        entreprise = getattr(user, 'entreprise', None)
+        sortie = self.get_object()
+        entreprise = user.get_entreprise()
         POS_WIDTH = 80 * mm
         buffer = io.BytesIO()
         styles = getSampleStyleSheet()
@@ -1341,14 +1471,14 @@ class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.Mod
     @action(detail=True, methods=['get'], url_path='bon-pos', permission_classes=[IsAuthenticated])
     def bon_sortie_pos(self, request, pk=None):
         user = request.user
-        sortie = get_object_or_404(Sortie, pk=pk)
+        sortie = self.get_object()
         POS_WIDTH = 58 * mm
         buffer = io.BytesIO()
         styles = getSampleStyleSheet()
         normal = styles['Normal']; normal.fontSize = 8; normal.wordWrap = 'CJK'
         title_style = ParagraphStyle('TitleMini', fontName='Helvetica-Bold', fontSize=9, alignment=1, spaceAfter=1)
         # Sécurise l'accès à l'entreprise (peut être None pour superadmin)
-        entreprise = getattr(user, 'entreprise', None)
+        entreprise = user.get_entreprise()
         from rapports.utils.entete import get_entete_entreprise
         from rapports.utils.pdf_generator import PDFGenerator
         entete = get_entete_entreprise(entreprise)
@@ -1407,15 +1537,13 @@ class SortieViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.Mod
         return self.bon_sortie_pos(request, pk=pk)
 
 
-class LigneSortieViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
+class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    tenant_lookup = 'sortie__entreprise_id'
     serializer_class = LigneSortieSerializer
-    queryset = LigneSortie.objects.all()  # Base (sera filtrée)
+    queryset = LigneSortie.objects.all()
 
     def get_queryset(self):
-        """Filtre automatique par entreprise de l'utilisateur. Ordre : plus récent en premier."""
-        user = self.request.user
-        # Grâce à la permission, on est sûr que l'utilisateur est connecté + a une entreprise
-        return LigneSortie.objects.select_related('article', 'sortie').all().order_by('-date_sortie', '-id')
+        return super().get_queryset().select_related('article', 'sortie').order_by('-date_sortie', '-id')
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -1591,94 +1719,73 @@ class LigneSortieViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         stock_new.Qte -= new_quantite
         stock_new.save()
 
-class UniteViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
+class UniteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = Unite.objects.all()
     serializer_class = UniteSerializer
 
-
     def get_queryset(self):
-        """Filtre automatique par entreprise de l'utilisateur. Ordre : plus récent en premier."""
-        user = self.request.user
-        # Grâce à la permission, on est sûr que l'utilisateur est connecté + a une entreprise
-        return Unite.objects.all().order_by('-id')
+        return super().get_queryset().order_by('-id')
 
 
-class TypeArticleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
+class TypeArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = TypeArticle.objects.all()
     serializer_class = TypeArticleSerializer
 
-
     def get_queryset(self):
-        """Filtre automatique par entreprise de l'utilisateur. Ordre : plus récent en premier."""
-        user = self.request.user
-        # Grâce à la permission, on est sûr que l'utilisateur est connecté + a une entreprise
-        return TypeArticle.objects.all().order_by('-id')
+        return super().get_queryset().order_by('-id')
 
 
-class ArticleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
+class ArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = Article.objects.all()
     serializer_class = ArticleSerializer
 
-
     def get_queryset(self):
-        """Filtre automatique par entreprise de l'utilisateur. Ordre : plus récent en premier (pk)."""
-        user = self.request.user
-        return Article.objects.all().order_by('-pk')
-
+        return super().get_queryset().order_by('-pk')
 
     def perform_create(self, serializer):
-        user = self.request.user
-        article = serializer.save()
+        super().perform_create(serializer)
+        article = serializer.instance
         Stock.objects.create(article=article, Qte=0, seuilAlert=0)
 
 
-class StockViewSet(BusinessPermissionMixin, viewsets.ReadOnlyModelViewSet):
+class StockViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ReadOnlyModelViewSet):
+    tenant_lookup = 'article__entreprise_id'
     queryset = Stock.objects.all()
     serializer_class = StockSerializer
 
-
     def get_queryset(self):
-        """Filtre automatique par entreprise de l'utilisateur. Ordre : plus récent en premier."""
-        user = self.request.user
-        # Grâce à la permission, on est sûr que l'utilisateur est connecté + a une entreprise
-        return Stock.objects.select_related('article').order_by('-id')
+        return super().get_queryset().select_related('article').order_by('-id')
 
 
-class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
+class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = Entree.objects.all()
     serializer_class = EntreeSerializer
 
     def get_queryset(self):
-        user = self.request.user
-        # Optimisation complète avec inner joins pour tous les objets liés
-        return Entree.objects.prefetch_related(
+        return super().get_queryset().prefetch_related(
             Prefetch(
                 'lignes',
                 queryset=LigneEntree.objects.select_related(
-                    'article__sous_type_article', 
-                    'article__unite', 
+                    'article__sous_type_article',
+                    'article__unite',
                     'devise'
                 )
             )
-        ).all().order_by('-date_op')
+        ).order_by('-date_op')
 
 
-class LigneEntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
+class LigneEntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    tenant_lookup = 'entree__entreprise_id'
     queryset = LigneEntree.objects.all()
     serializer_class = LigneEntreeSerializer
 
-
     def get_queryset(self):
-        """Filtre automatique par entreprise de l'utilisateur. Ordre : plus récent en premier."""
-        user = self.request.user
-        return LigneEntree.objects.all().order_by('-date_entree', '-id')
+        return super().get_queryset().order_by('-date_entree', '-id')
 
     def perform_create(self, serializer):
-        user = self.request.user
         ligne_entree = serializer.save()
-        # Mise à jour du stock
         stock, created = Stock.objects.get_or_create(
-            article=ligne_entree.article, 
+            article=ligne_entree.article,
             defaults={'Qte': 0, 'seuilAlert': 0}
         )
         stock.Qte += ligne_entree.quantite
@@ -1735,70 +1842,39 @@ class LigneEntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         return self.update(request, *args, **kwargs, partial=True)
 
 
-class DeviseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
+class DeviseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     """CRUD pour les devises de l'entreprise avec gestion de la devise principale unique."""
     queryset = Devise.objects.all()
     serializer_class = DeviseSerializer
 
     def get_queryset(self):
-        user = self.request.user
-        return Devise.objects.all().order_by('-id')
+        return super().get_queryset().order_by('-id')
 
     def perform_create(self, serializer):
-        """
-        Création d'une devise avec gestion automatique de la devise principale.
-        Si est_principal=True, désactive automatiquement les autres devises principales.
-        """
-        user = self.request.user
+        tenant_id, _ = self.get_tenant_ids()
+        if not tenant_id:
+            raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
         est_principal = serializer.validated_data.get('est_principal', False)
-        
-        # Si on veut créer une devise principale, désactiver les autres
         if est_principal:
             with transaction.atomic():
-                # Désactiver toutes les autres devises principales de l'entreprise
-                Devise.objects.filter(
-
-                    est_principal=True
-                ).update(est_principal=False)
-                
-                # Créer la nouvelle devise principale
-                serializer.save()
+                Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).update(est_principal=False)
+                serializer.save(entreprise_id=tenant_id)
         else:
-            # Vérifier qu'il existe au moins une devise principale
-            has_principal = Devise.objects.filter(
-         
-                est_principal=True
-            ).exists()
-            
+            has_principal = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).exists()
             if not has_principal:
-                # Si aucune devise principale n'existe, forcer celle-ci à être principale
                 serializer.validated_data['est_principal'] = True
-            
-            serializer.save()
+            serializer.save(entreprise_id=tenant_id)
     
     def perform_update(self, serializer):
-        """
-        Mise à jour d'une devise avec gestion automatique de la devise principale.
-        Si on définit est_principal=True, désactive automatiquement les autres.
-        """
-        user = self.request.user
         instance = self.get_object()
+        tenant_id = instance.entreprise_id
         est_principal = serializer.validated_data.get('est_principal', instance.est_principal)
-        
-        # Si on veut rendre cette devise principale
         if est_principal and not instance.est_principal:
             with transaction.atomic():
-                # Désactiver toutes les autres devises principales
-                Devise.objects.filter(
-
-                    est_principal=True
-                ).exclude(id=instance.id).update(est_principal=False)
-                
+                Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).exclude(id=instance.id).update(est_principal=False)
                 serializer.save()
         elif not est_principal and instance.est_principal:
-            # On veut désactiver la devise principale actuelle
-            # Vérifier qu'il en reste au moins une autre
-            autres_devises = Devise.objects.all().exclude(id=instance.id)
+            autres_devises = self.get_queryset().exclude(id=instance.id)
             
             if not autres_devises.exists():
                 raise serializers.ValidationError({
@@ -1817,16 +1893,7 @@ class DeviseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
             serializer.save()
     
     def perform_destroy(self, instance):
-        """
-        Suppression d'une devise avec vérification de la devise principale.
-        Si on supprime la devise principale, promouvoir automatiquement une autre.
-        """
-        user = self.request.user
-        
-        # Vérifier qu'il reste au moins une autre devise
-        autres_devises = Devise.objects.filter(
-       
-        ).exclude(id=instance.id)
+        autres_devises = self.get_queryset().exclude(id=instance.id)
         
         if not autres_devises.exists():
             raise serializers.ValidationError({
@@ -1949,18 +2016,20 @@ class MouvementCaisseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         return response
 
 
-class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
-    """ViewSet pour gérer les entrées de stock avec support multi-devises."""
+class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    """ViewSet pour gérer les entrées de stock avec support multi-devises (filtré par entreprise/succursale)."""
     queryset = Entree.objects.all()
     serializer_class = EntreeSerializer
 
     def get_queryset(self):
-        user = self.request.user
-        return Entree.objects.all().order_by('-date_op')
+        return super().get_queryset().order_by('-date_op')
 
     def perform_create(self, serializer):
-        user = self.request.user
-        serializer.save()
+        tenant_id, branch_id = self.get_tenant_ids()
+        if tenant_id:
+            serializer.save(entreprise_id=tenant_id, succursale_id=branch_id)
+        else:
+            serializer.save()
 
     def create(self, request, *args, **kwargs):
         """Création d'une entrée avec gestion intelligente des stocks et multi-devises."""
@@ -1973,10 +2042,11 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         
         if not lignes_data:
             raise serializers.ValidationError("Au moins une ligne d'entrée est requise.")
-        
-        # Validation et regroupement des articles (fusionner les doublons)
+        tenant_id, branch_id = _get_tenant_ids(request)
+        if not tenant_id:
+            raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
+        default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
         articles_groupes = {}
-        default_dev = Devise.objects.filter(est_principal=True).first()
         
         for ligne in lignes_data:
             # On accepte article_id comme code produit (ex: "CAPE0001") ou comme clé primaire numérique
@@ -2043,7 +2113,7 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
             pu = ligne_data['prix_unitaire']
             pv = ligne_data.get('prix_vente', Decimal('0.00'))  # Prix de vente
             devise_id = ligne_data['devise']
-            devise_obj = Devise.objects.get(pk=devise_id) if devise_id else default_dev
+            devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=tenant_id) if devise_id else default_dev
             devise_sigle = devise_obj.sigle if devise_obj else 'N/A'
             
             montant_ligne = (q * pu).quantize(Decimal('0.01'))
@@ -2062,7 +2132,7 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
             devise_obj = devise_data['devise_obj']
             total_devise = devise_data['total']
             
-            solde_devise = self._solde_caisse_par_devise(devise_obj)
+            solde_devise = self._solde_caisse_par_devise(tenant_id, branch_id, devise_obj)
             
             if total_devise > solde_devise:
                 devise_nom = devise_obj.nom if devise_obj else 'Non spécifiée'
@@ -2082,7 +2152,8 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         with transaction.atomic():
             entree = Entree.objects.create(
                 libele=serializer.validated_data.get('libele', ''),
-                # description supprimé
+                entreprise_id=tenant_id,
+                succursale_id=branch_id
             )
             
             # Traiter chaque article groupé
@@ -2100,7 +2171,7 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
                 seuil_alerte = ligne_data['seuil_alerte']
                 date_expiration = ligne_data['date_expiration']
                 devise_id = ligne_data['devise']
-                devise_obj = Devise.objects.get(pk=devise_id) if devise_id else None
+                devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=tenant_id) if devise_id else None
 
                 # Créer la ligne d'entrée (quantite_restante sera initialisé automatiquement dans save())
                 ligne_entree = LigneEntree.objects.create(
@@ -2143,13 +2214,14 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
                 
                 if total_devise > 0:
                     MouvementCaisse.objects.create(
-
                         montant=total_devise,
                         devise=devise_obj,
                         type='SORTIE',
                         motif=f"Approvisionnement entrée #{entree.pk}",
                         moyen='Cash',
-                        entree=entree
+                        entree=entree,
+                        entreprise_id=entree.entreprise_id,
+                        succursale_id=entree.succursale_id,
                     )
         
         # Retourner la réponse avec les messages informatifs
@@ -2166,7 +2238,11 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         GET /api/entrees/lots-par-article/{article_id}/
         """
         try:
-            article = Article.objects.get(article_id=article_id)
+            tenant_id, branch_id = self.get_tenant_ids()
+            article_qs = Article.objects.filter(article_id=article_id, entreprise_id=tenant_id) if tenant_id else Article.objects.none()
+            if branch_id is not None:
+                article_qs = article_qs.filter(succursale_id=branch_id)
+            article = article_qs.get()
         except Article.DoesNotExist:
             return Response(
                 {'error': f'Article {article_id} non trouvé'},
@@ -2174,7 +2250,11 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
             )
         
         # Récupérer tous les lots (disponibles et épuisés)
-        lots = LigneEntree.objects.filter(article=article).order_by('date_entree', 'id')
+        tenant_id, branch_id = self.get_tenant_ids()
+        lots = LigneEntree.objects.filter(article=article, entree__entreprise_id=tenant_id)
+        if branch_id is not None:
+            lots = lots.filter(entree__succursale_id=branch_id)
+        lots = lots.order_by('date_entree', 'id')
         
         lots_data = []
         stock_total = 0
@@ -2378,7 +2458,7 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
             
             seuil_alerte = int(ligne.get('seuil_alerte', 0))
             devise_id = ligne.get('devise_id') or ligne.get('devise')
-            devise_obj = Devise.objects.get(pk=devise_id) if devise_id else default_dev
+            devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=entree.entreprise_id) if devise_id else default_dev
             date_expiration = ligne.get('date_expiration')
             
             new_total += (Decimal(str(qte)) * prix_unitaire)
@@ -2402,7 +2482,7 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         # Si augmentation de dépense: vérifier solde
         diff = (new_total - old_total).quantize(Decimal('0.01'))
         if diff > 0:
-            solde = self._solde_caisse()
+            solde = self._solde_caisse(entree.entreprise_id, entree.succursale_id)
             if diff >= solde:
                 raise serializers.ValidationError("Solde de la caisse insuffisant pour augmenter le coût de cette entrée.")
         
@@ -2464,14 +2544,17 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
             # Ajustement caisse (si diff != 0)
             if diff != 0:
                 mouvement_type = 'SORTIE' if diff > 0 else 'ENTREE'
-                default_dev = Devise.objects.filter(est_principal=True).first()
+                tenant_id = entree.entreprise_id
+                default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first() if tenant_id else Devise.objects.filter(est_principal=True).first()
                 MouvementCaisse.objects.create(
                     montant=abs(diff),
                     devise=default_dev,
                     type=mouvement_type,
                     motif=f"Ajustement entrée #{entree.pk} (total {old_total} -> {new_total})",
                     moyen='Ajustement',
-                    entree=entree
+                    entree=entree,
+                    entreprise_id=entree.entreprise_id,
+                    succursale_id=entree.succursale_id,
                 )
         
         return Response(self.get_serializer(entree).data, status=status.HTTP_200_OK)
@@ -2496,15 +2579,17 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
                 stock_obj.save()
             
             if total > 0:
-                default_dev = Devise.objects.filter(est_principal=True).first()
+                tenant_id = entree.entreprise_id
+                default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first() if tenant_id else Devise.objects.filter(est_principal=True).first()
                 MouvementCaisse.objects.create(
-              
                     montant=total,
                     devise=entree.devise or default_dev,
                     type='ENTREE',
                     motif=f"Annulation entrée #{entree.pk}",
                     moyen='Ajustement',
-                    entree=entree
+                    entree=entree,
+                    entreprise_id=entree.entreprise_id,
+                    succursale_id=entree.succursale_id,
                 )
             
             entree.delete()
@@ -2519,46 +2604,52 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
             total += pu * Decimal(str(l.quantite))
         return total.quantize(Decimal('0.01'))
 
-    def _solde_caisse(self):
-        """Calcule le solde global de caisse."""
+    def _solde_caisse(self, tenant_id=None, succursale_id=None):
+        """Calcule le solde global de caisse (tenant + éventuellement succursale)."""
         from django.db.models import Sum
-        entree = MouvementCaisse.objects.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        sortie = MouvementCaisse.objects.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        return entree - sortie
+        qs = MouvementCaisse.objects.all()
+        if tenant_id is not None:
+            qs = qs.filter(entreprise_id=tenant_id)
+        if succursale_id is not None:
+            qs = qs.filter(succursale_id=succursale_id)
+        entree_total = qs.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
+        sortie_total = qs.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
+        return entree_total - sortie_total
 
-    def _solde_caisse_par_devise(self,  devise_obj):
-        """Calcule le solde de caisse pour une devise spécifique."""
+    def _solde_caisse_par_devise(self, tenant_id, succursale_id, devise_obj):
+        """Calcule le solde de caisse (tenant + éventuellement succursale) pour une devise spécifique."""
         from django.db.models import Sum
-        
+
+        if not tenant_id:
+            return Decimal('0.00')
         if not devise_obj:
-            devise_obj = Devise.objects.filter(est_principal=True).first()
+            devise_obj = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
             if not devise_obj:
                 return Decimal('0.00')
-        
-        entrees = MouvementCaisse.objects.filter(
-            type='ENTREE',
-            devise=devise_obj
-        ).aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        
-        sorties = MouvementCaisse.objects.filter(
-    
-            type='SORTIE',
-            devise=devise_obj
-        ).aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        
-        return entrees - sorties
+
+        qs = MouvementCaisse.objects.filter(
+            entreprise_id=tenant_id,
+            devise=devise_obj,
+        )
+        if succursale_id is not None:
+            qs = qs.filter(succursale_id=succursale_id)
+
+        entrees = qs.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
+        sorties = qs.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
+        return (entrees - sorties).quantize(Decimal('0.01'))
 
     @action(detail=True, methods=['get'], url_path='bon-pos')
     def bon_entree_pos(self, request, pk=None):
         """Génère un bon d'entrée au format POS."""
         entree = self.get_object()
         
+        ent_ctx = self.request.user.get_entreprise()
         response_data = {
             'numero_entree': entree.pk,
             'date': entree.date_op.strftime('%d/%m/%Y %H:%M'),
             'libele': entree.libele,
             # 'description': entree.description, supprimé
-            'entreprise': entree.entreprise.nom,
+            'entreprise': ent_ctx.nom if ent_ctx else '',
             'lignes': [],
             'total': Decimal('0.00')
         }
@@ -2581,15 +2672,14 @@ class EntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         return Response(response_data)
 
 
-class LigneEntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
-    """ViewSet pour gérer les lignes d'entrée."""
+class LigneEntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    """ViewSet pour gérer les lignes d'entrée (filtré par entree__entreprise)."""
+    tenant_lookup = 'entree__entreprise_id'
     queryset = LigneEntree.objects.all()
     serializer_class = LigneEntreeSerializer
 
-    
     def get_queryset(self):
-        user = self.request.user
-        return LigneEntree.objects.all().order_by('-date_entree', '-id')
+        return super().get_queryset().order_by('-date_entree', '-id')
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -2648,18 +2738,14 @@ class LigneEntreeViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         stock_new.save()
 
 
-class MouvementCaisseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
+class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = MouvementCaisse.objects.all()
     serializer_class = MouvementCaisseSerializer
 
-
-
     def get_queryset(self):
-        user = self.request.user
-        qs = MouvementCaisse.objects.all()
-        # Filtres simples: ?type=ENTREE|SORTIE & ?date_min=YYYY-MM-DD & date_max
+        qs = super().get_queryset()
         t = self.request.query_params.get('type')
-        if t in ['ENTREE','SORTIE']:
+        if t in ('ENTREE', 'SORTIE'):
             qs = qs.filter(type=t)
         dmin = self.request.query_params.get('date_min')
         dmax = self.request.query_params.get('date_max')
@@ -2670,22 +2756,22 @@ class MouvementCaisseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         return qs.order_by('-date', '-id')
 
     def perform_create(self, serializer):
-        # Si aucune devise fournie via devise_id, utiliser la devise principale de l'entreprise
+        tenant_id, branch_id = self.get_tenant_ids()
+        if not tenant_id:
+            raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
         if not serializer.validated_data.get('devise'):
-            default_dev = Devise.objects.filter(est_principal=True).first()
+            default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
             devise = default_dev
         else:
             devise = serializer.validated_data.get('devise')
 
-        # Validation du solde pour les sorties directes de caisse
         type_mouvement = serializer.validated_data.get('type')
         montant = serializer.validated_data.get('montant', 0)
-        
-        if type_mouvement == 'SORTIE' and montant > 0:
-            # Calculer le solde actuel pour cette devise
-            solde_actuel = MouvementCaisse.objects.filter(
-                devise=devise
-            ).aggregate(
+        if type_mouvement == 'SORTIE' and montant > 0 and devise:
+            solde_qs = MouvementCaisse.objects.filter(devise=devise, entreprise_id=tenant_id)
+            if branch_id is not None:
+                solde_qs = solde_qs.filter(succursale_id=branch_id)
+            solde_actuel = solde_qs.aggregate(
                 total_entrees=models.Sum('montant', filter=models.Q(type='ENTREE')),
                 total_sorties=models.Sum('montant', filter=models.Q(type='SORTIE'))
             )
@@ -2700,11 +2786,10 @@ class MouvementCaisseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
                     'montant': f"Solde insuffisant en {devise_nom}. Solde disponible: {solde_disponible}, Montant demandé: {montant}. Veuillez d'abord effectuer un dépôt en {devise_nom}."
                 })
 
-        # Sauvegarder avec la devise appropriée
         if not serializer.validated_data.get('devise'):
-            serializer.save(devise=devise)
+            serializer.save(devise=devise, entreprise_id=tenant_id, succursale_id=branch_id)
         else:
-            serializer.save()
+            serializer.save(entreprise_id=tenant_id, succursale_id=branch_id)
 
     @action(detail=False, methods=['get'])
     def resume(self, request):
@@ -3212,7 +3297,7 @@ class MouvementCaisseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         writer = csv.writer(response)
         writer.writerow(['Date','Type','Montant','Motif','Moyen','Référence'])
         for m in self.get_queryset():
-            montant_str = _format_amount(m.montant, m.devise if hasattr(m, 'devise') else None, request.user.entreprise)
+            montant_str = _format_amount(m.montant, m.devise if hasattr(m, 'devise') else None, request.user.get_entreprise())
             writer.writerow([
                 m.date.isoformat(), m.type, montant_str, smart_str(m.motif), m.moyen or '', m.reference_piece or ''
             ])
@@ -3226,8 +3311,8 @@ class MouvementCaisseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         - Lié à une entrée → BON D'ENTRÉE avec détail des articles.
         - Sinon → BON CAISSE (entrée/sortie) avec motif et montant.
         """
-        mv = get_object_or_404(MouvementCaisse, pk=pk)
-        entreprise = getattr(request.user, 'entreprise', None) or Entreprise.objects.first()
+        mv = self.get_object()
+        entreprise = request.user.get_entreprise() or Entreprise.objects.first()
 
         POS_WIDTH = 80 * mm
         buffer = io.BytesIO()
@@ -3393,7 +3478,7 @@ class MouvementCaisseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
 
 
 
-class SousTypeArticleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
+class SousTypeArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des sous-types d'articles.
     CRUD complet avec filtrage automatique par type d'article.
@@ -3437,18 +3522,13 @@ class SousTypeArticleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         return Response(dict(grouped))
 
 
-class ClientViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.ModelViewSet):
-    """
-    ViewSet pour la gestion des clients.
-    """
+class ClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    """ViewSet pour la gestion des clients (filtré par entreprise/succursale)."""
     queryset = Client.objects.all()
     serializer_class = ClientSerializer
 
-
     def get_queryset(self):
-        """Filtre les clients par entreprise de l'utilisateur connecté. Ordre : plus récent en premier."""
-        queryset = super().get_queryset()
-        return queryset.order_by('-date_enregistrement', '-id')
+        return super().get_queryset().order_by('-date_enregistrement', '-id')
 
     @action(detail=True, methods=['get'])
     def dettes(self, request, pk=None):
@@ -3495,55 +3575,31 @@ class ClientViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.Mod
         })
 
 
-class DetteClientViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.ModelViewSet):
-    """
-    ViewSet pour la gestion des dettes clients.
-    """
-    queryset = DetteClient.objects.select_related(
-        'client', 'devise', 'sortie'
-    ).prefetch_related('paiements').all()
+class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    """ViewSet pour la gestion des dettes clients (filtré par entreprise/succursale)."""
+    queryset = DetteClient.objects.select_related('client', 'devise', 'sortie').prefetch_related('paiements').all()
     serializer_class = DetteClientSerializer
 
-
     def get_queryset(self):
-        """Filtre les dettes par entreprise de l'utilisateur connecté. Ordre : plus récent en premier."""
-        queryset = super().get_queryset()
-        return queryset.select_related('client', 'devise', 'sortie').prefetch_related('paiements').order_by('-date_creation', '-id')
+        return super().get_queryset().select_related('client', 'devise', 'sortie').prefetch_related('paiements').order_by('-date_creation', '-id')
 
     def perform_create(self, serializer):
-        """
-        Associe automatiquement l'entreprise lors de la création d'une dette.
-        La date d'échéance par défaut est dans 30 jours.
-        VALIDATION IMPORTANTE: Vérifie que la sortie est bien EN_CREDIT avant de créer la dette.
-        """
-        user = self.request.user
-        
-        # Validation supplémentaire au niveau du ViewSet
         sortie = serializer.validated_data.get('sortie')
         if sortie and sortie.statut != 'EN_CREDIT':
             raise serializers.ValidationError({
                 'sortie': f"Impossible de créer une dette pour cette sortie. "
                          f"La sortie #{sortie.pk} (Client: {sortie.client.nom if sortie.client else 'Anonyme'}) a le statut '{sortie.statut}'. "
-                         f"Seules les sorties avec le statut 'EN_CREDIT' peuvent générer une dette. "
-                         f"Pour une vente déjà payée, aucune dette ne doit être créée."
+                         f"Seules les sorties avec le statut 'EN_CREDIT' peuvent générer une dette."
             })
-        
-        # Vérifier qu'une dette n'existe pas déjà pour cette sortie
         if sortie and DetteClient.objects.filter(sortie=sortie).exists():
             raise serializers.ValidationError({
-                'sortie': f"Une dette existe déjà pour la sortie #{sortie.pk}. "
-                         f"Impossible de créer une nouvelle dette pour la même sortie."
+                'sortie': f"Une dette existe déjà pour la sortie #{sortie.pk}."
             })
-        
-        # Date d'échéance par défaut : 1 mois après la création
-        date_echeance = serializer.validated_data.get('date_echeance')
-        if not date_echeance:
-            date_echeance = timezone.now().date() + timezone.timedelta(days=30)
-        
-        serializer.save(
-   
-            date_echeance=date_echeance
-        )
+        date_echeance = serializer.validated_data.get('date_echeance') or (timezone.now().date() + timezone.timedelta(days=30))
+        tenant_id, branch_id = self.get_tenant_ids()
+        if not tenant_id:
+            raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
+        serializer.save(date_echeance=date_echeance, entreprise_id=tenant_id, succursale_id=branch_id)
 
     @action(detail=False, methods=['get'])
     def en_retard(self, request):
@@ -3603,50 +3659,32 @@ class DetteClientViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewset
         return Response(serializer.data)
 
 
-class PaiementDetteViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, viewsets.ModelViewSet):
-    """
-    ViewSet pour la gestion des paiements de dettes.
-    """
-    queryset = PaiementDette.objects.select_related(
-        'dette', 'dette__client', 'devise', 'utilisateur'
-    ).all()
+class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    """ViewSet pour la gestion des paiements de dettes (filtré par entreprise/succursale)."""
+    queryset = PaiementDette.objects.select_related('dette', 'dette__client', 'devise', 'utilisateur').all()
     serializer_class = PaiementDetteSerializer
 
-
     def get_queryset(self):
-        """Filtre les paiements par entreprise de l'utilisateur connecté. Ordre : plus récent en premier."""
-        queryset = super().get_queryset()
-        return queryset.select_related('dette', 'dette__client', 'devise', 'utilisateur').order_by('-date_paiement', '-id')
+        return super().get_queryset().select_related('dette', 'dette__client', 'devise', 'utilisateur').order_by('-date_paiement', '-id')
 
     def perform_create(self, serializer):
-        """
-        Associe automatiquement l'entreprise et l'utilisateur lors de la création d'un paiement.
-        Vérifie que la dette n'est pas déjà payée.
-        """
         user = self.request.user
         dette = serializer.validated_data.get('dette')
-        
-        # Vérification : la dette doit exister et ne pas être déjà payée
         if dette.statut == 'PAYEE':
             raise serializers.ValidationError({
                 'dette': 'Cette dette est déjà entièrement payée. Aucun paiement supplémentaire n\'est autorisé.'
             })
-        
-        # Vérification : le montant du paiement ne doit pas dépasser le solde restant
         montant_paye = serializer.validated_data.get('montant_paye')
         if montant_paye > dette.solde_restant:
             raise serializers.ValidationError({
                 'montant_paye': f'Le montant du paiement ({montant_paye}) dépasse le solde restant ({dette.solde_restant}).'
             })
-        
-        # Si aucune devise n'est fournie, utiliser celle de la dette
-        devise = serializer.validated_data.get('devise')
-        if not devise and dette.devise:
+        if not serializer.validated_data.get('devise') and dette.devise:
             serializer.validated_data['devise'] = dette.devise
-        
-        serializer.save(
-            utilisateur=user
-        )
+        tenant_id, branch_id = self.get_tenant_ids()
+        if not tenant_id:
+            raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
+        serializer.save(utilisateur=user, entreprise_id=tenant_id, succursale_id=branch_id)
 
     @action(detail=True, methods=['get'], url_path='recu-paiement', permission_classes=[IsAuthenticated])
     def recu_paiement_pdf(self, request, pk=None):
@@ -3656,15 +3694,10 @@ class PaiementDetteViewSet(BusinessPermissionMixin, EnterpriseFilterMixin, views
         GET /api/paiements-dettes/{id}/recu-paiement/
         """
         user = request.user
-        paiement = get_object_or_404(
-            PaiementDette.objects.select_related(
-                'dette', 'dette__client', 'dette__sortie', 'devise', 'utilisateur'
-            ).prefetch_related('dette__sortie__lignes__article'),
-            pk=pk
-        )
+        paiement = self.get_object()
         dette = paiement.dette
         client = dette.client
-        entreprise = getattr(user, 'entreprise', None)
+        entreprise = user.get_entreprise()
 
         POS_WIDTH = 80 * mm
         buffer = io.BytesIO()
