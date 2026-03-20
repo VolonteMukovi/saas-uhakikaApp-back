@@ -118,6 +118,7 @@ SIMPLE_JWT = {
     'LEEWAY': 30,
 
     'AUTH_HEADER_TYPES': ('Bearer',),
+
     'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
 
     'USER_ID_FIELD': 'id',
@@ -129,6 +130,30 @@ SIMPLE_JWT = {
     'TOKEN_USER_CLASS': 'rest_framework_simplejwt.models.TokenUser',
 
     'JTI_CLAIM': 'jti',
+}
+
+# Swagger UI / ReDoc (drf-yasg)
+SWAGGER_SETTINGS = {
+    'SECURITY_DEFINITIONS': {
+        'Bearer': {
+            'type': 'apiKey',
+            'name': 'Authorization',
+            'in': 'header',
+            'description': 'JWT : valeur `Bearer <access_token>` (obtenu via POST /api/auth/).',
+        }
+    },
+    'USE_SESSION_AUTH': False,
+    'DOC_EXPANSION': 'list',
+    'OPERATIONS_SORTER': 'alpha',
+    'TAGS_SORTER': 'alpha',
+    'DISPLAY_OPERATION_ID': True,
+    'PERSIST_AUTH': True,
+}
+
+REDOC_SETTINGS = {
+    'lazyRendering': True,
+    'hideDownloadButton': False,
+    'expandResponses': '200,201',
 }
 
 AUTH_PASSWORD_VALIDATORS = [

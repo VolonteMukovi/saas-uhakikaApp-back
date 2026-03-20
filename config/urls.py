@@ -16,7 +16,7 @@ Including another URLconf
 """
 
 from django.contrib import admin
-from django.urls import path, include
+from django.urls import path, include, re_path
 from django.conf import settings
 from django.conf.urls.static import static
 from rest_framework_simplejwt.views import TokenRefreshView
@@ -25,12 +25,14 @@ from drf_yasg import openapi
 from rest_framework import permissions
 from users.views import CustomTokenObtainPairView, CustomTokenRefreshView, select_context
 from config.views_i18n import i18n_test
+from config.openapi_description import API_DESCRIPTION
 
 schema_view = get_schema_view(
     openapi.Info(
         title="API Gestion de Stock",
         default_version='v1',
-        description="Documentation de l'API",
+        description=API_DESCRIPTION,
+        contact=openapi.Contact(name="Support API"),
     ),
     public=True,
     permission_classes=(permissions.AllowAny,),
@@ -50,4 +52,10 @@ urlpatterns = [
     path('api/auth/select-context/', select_context, name='auth_select_context'),
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
+    # Schéma OpenAPI brut : /swagger.json ou /swagger.yaml
+    re_path(
+        r'^swagger(?P<format>\.json|\.yaml)$',
+        schema_view.without_ui(cache_timeout=0),
+        name='schema-json',
+    ),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

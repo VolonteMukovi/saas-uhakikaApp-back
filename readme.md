@@ -7,6 +7,14 @@ Ce document décrit le flux chronologique des scénarios utilisateur (création 
 **Authentification :** JWT. Après login, envoyer le header :
 `Authorization: Bearer <access>`
 
+### Documentation interactive (Swagger & ReDoc)
+
+- **Swagger UI :** `http://127.0.0.1:8000/swagger/` — tester les endpoints, bouton **Authorize** pour coller `Bearer <access_token>`.
+- **ReDoc :** `http://127.0.0.1:8000/redoc/` — même schéma, lecture plus linéaire.
+- **Schéma OpenAPI brut :** `http://127.0.0.1:8000/swagger.json` ou `http://127.0.0.1:8000/swagger.yaml` (import Postman, génération client).
+
+La description générale (flux multi-tenant, auth, rôles) est dans la page d’accueil du schéma ; les actions personnalisées (`select-context`, `assign_entreprise`, `succursales`, `my_entreprise`, `users` sur entreprise, etc.) ont des résumés et corps de requête documentés via **drf-yasg**.
+
 ---
 
 ## 1. Ordre chronologique des scénarios
@@ -253,6 +261,151 @@ Disponible seulement si l’entreprise a `has_branches: true`. Réservé à l’
 
 **Liste des succursales :** `GET /api/succursales/` — retourne les succursales de l’entreprise du contexte.
 
+### CRUD succursale (complete côté API)
+
+- **Lire une succursale (GET détail)** : `GET /api/succursales/{id}/`
+- **Créer (POST)** : `POST /api/succursales/`
+- **Mettre à jour (PATCH/PUT)** : `PATCH /api/succursales/{id}/` ou `PUT /api/succursales/{id}/`
+- **Supprimer (DELETE)** : `DELETE /api/succursales/{id}/`
+  - Implémenté comme une **désactivation** (`is_active = false`) via `perform_destroy`.
+
+Règles d’accès :
+- **Admin** de l’entreprise (Membership.role = `admin`) : peut créer/modifier/supprimer.
+- **Agent** (Membership.role = `user`) : ne voit que sa succursale courante (filtrage côté backend), pas de CRUD.
+
+---
+
+## 7 bis. Associer un utilisateur aux succursales (Membership)
+
+En base, cela repose sur :
+
+- **`Membership.default_succursale`** : succursale par défaut pour le JWT / le filtrage (voir aussi `select-context`).
+- **`UserBranch`** : liste des succursales auxquelles ce **membership** (user + entreprise) est autorisé.
+
+Ce n’était **pas** documenté avant ; les endpoints suivants exposent cette logique.
+
+### Lire les succursales liées à un user pour une entreprise
+
+- **Endpoint :** `GET /api/users/{user_id}/succursales/?entreprise_id={entreprise_id}`  
+- **Auth :** Bearer. **Superadmin** ou **admin** de l’entreprise (même règle que la gestion des utilisateurs).  
+- **Query :** `entreprise_id` **obligatoire**.
+
+**Réponse succès (200) :**
+
+```json
+{
+  "user_id": 3,
+  "entreprise_id": 1,
+  "membership_id": 5,
+  "default_succursale_id": 2,
+  "succursales": [
+    { "id": 2, "nom": "Centre", "adresse": "..." }
+  ]
+}
+```
+
+### Définir la succursale par défaut et/ou la liste des succursales autorisées
+
+- **Endpoint :** `POST /api/users/{user_id}/succursales/`  
+- **Auth :** Bearer. **Superadmin** ou **admin** de l’entreprise.  
+- **Content-Type :** `application/json`
+
+**Payload (exemple complet) :**
+
+```json
+{
+  "entreprise_id": 1,
+  "default_succursale_id": 2,
+  "succursale_ids": [2, 7]
+}
+```
+
+- **`entreprise_id`** : obligatoire. L’utilisateur cible doit avoir un **Membership actif** pour cette entreprise.  
+- **`succursale_ids`** : optionnel. Si la clé est **présente**, elle **remplace** toutes les lignes `UserBranch` pour ce membership (liste vide = aucune succursale autorisée explicitement). Chaque id doit être une succursale **active** de cette entreprise.  
+- **`default_succursale_id`** : optionnel (`null` pour effacer). Doit être une succursale de cette entreprise. Si vous envoyez **à la fois** `succursale_ids` et `default_succursale_id` non null, la valeur par défaut **doit** figurer dans `succursale_ids`. Avec `succursale_ids: []`, la valeur par défaut doit être `null` ou omise.
+
+Vous pouvez aussi n’envoyer **que** `default_succursale_id` (sans clé `succursale_ids`) pour ne mettre à jour que la succursale par défaut, sans toucher aux `UserBranch`.
+
+**Réponse succès (200) :** message + `membership_id`, `default_succursale_id`, liste `succursales` mise à jour.
+
+**Ordre conseillé côté produit :** créer les succursales (`POST /api/succursales/`) → puis appeler ce `POST` pour chaque employé / admin qui doit être limité à certaines succursales.
+
+### CRUD côté frontend : association User ↔ Succursales (UserBranch)
+
+Cette association (User <-> Succursales) est gérée via :
+- **`GET /api/users/{user_id}/succursales/?entreprise_id={entreprise_id}`** (lecture)
+- **`POST /api/users/{user_id}/succursales/`** (création / mise à jour / suppression)
+
+Il n’y a pas d’endpoint séparé “PUT/PATCH UserBranch par id” : le CRUD est fait via `POST`.
+
+#### 1) Lire (GET)
+- **Endpoint :** `GET /api/users/{user_id}/succursales/?entreprise_id=1`
+- **Auth :** Bearer token (superadmin ou admin de l’entreprise)
+
+Réponse (exemple) :
+```json
+{
+  "user_id": 3,
+  "entreprise_id": 1,
+  "membership_id": 5,
+  "default_succursale_id": 2,
+  "succursales": [
+    { "id": 2, "nom": "Centre", "adresse": "..." }
+  ]
+}
+```
+
+#### 2) Écrire (POST) : Create / Update / Delete
+- **Endpoint :** `POST /api/users/{user_id}/succursales/`
+- **Body :** au moins un des champs `succursale_ids` ou `default_succursale_id` doit être fourni.
+
+##### Create / Update complet (remplacer la liste)
+```json
+{
+  "entreprise_id": 1,
+  "default_succursale_id": 2,
+  "succursale_ids": [2, 7]
+}
+```
+Effet :
+- remplace toutes les lignes `UserBranch` de ce membership
+- met à jour `Membership.default_succursale_id`
+
+##### Update “default uniquement” (ne pas toucher aux UserBranch)
+```json
+{ "entreprise_id": 1, "default_succursale_id": 2 }
+```
+
+##### Delete (retirer l’accès à toutes les succursales)
+```json
+{
+  "entreprise_id": 1,
+  "succursale_ids": [],
+  "default_succursale_id": null
+}
+```
+
+#### 3) Cas critique : agent (`Membership.role == "user"`) sans succursale
+
+Règle stricte backend :
+- si un agent n’a **pas** de succursale courante déterminée (JWT / `membership.default_succursale_id`), les endpoints “métier stock/rapports” échouent avec **403 (succursale requise)**.
+
+Guide frontend (côté UI) :
+1. Quand tu affiches la fiche d’un agent, fais un `GET /api/users/{id}/succursales/?entreprise_id=...`.
+2. Si `default_succursale_id == null` ou `succursales` est vide :
+   - affiche : “Affecter des succursales à cet agent”
+   - empêche d’accéder aux écrans stock/rapports pour cet agent tant que l’affectation n’est pas faite.
+3. Pour corriger :
+   - envoie un `POST /api/users/{id}/succursales/` avec `succursale_ids` + `default_succursale_id`
+   - puis côté agent, déclenche `POST /api/auth/select-context/` :
+     ```json
+     { "entreprise_id": 1, "succursale_id": 2 }
+     ```
+     (ou laisse `succursale_id` à `null` si tu veux que le backend utilise le default)
+
+Remarque sécurité :
+- quand tu remplaces `succursale_ids`, le backend met aussi `default_succursale_id` à `null` si l’ancien default n’appartient plus à la nouvelle liste (pour éviter toute fuite d’accès).
+
 ---
 
 ## 8. Récapitulatif des endpoints (ordre chronologique)
@@ -266,13 +419,15 @@ Disponible seulement si l’entreprise a `has_branches: true`. Réservé à l’
 | 5. Lier user ↔ entreprise | `POST` | `/api/users/{id}/assign_entreprise/` | Bearer | Soi‑même ou superadmin |
 | 6. Changer contexte | `POST` | `/api/auth/select-context/` | Bearer | Utilisateur avec Membership |
 | 7. Créer succursale | `POST` | `/api/succursales/` | Bearer | Admin entreprise |
+| 8. Lier user ↔ succursales | `GET` / `POST` | `/api/users/{id}/succursales/` | Bearer | Superadmin ou admin entreprise |
 
 **Utiles en complément :**
 
 - `GET /api/users/me/` — profil de l’utilisateur connecté (GET/PATCH/PUT).  
 - `GET /api/entreprises/my_entreprise/` — entreprise du contexte (pour un admin).  
 - `GET /api/entreprises/` — liste des entreprises (selon droits : une pour admin, toutes pour superadmin).  
-- `GET /api/succursales/` — liste des succursales de l’entreprise du contexte.
+- `GET /api/succursales/` — liste des succursales de l’entreprise du contexte.  
+- `GET /api/entreprises/{id}/users/` — liste des utilisateurs d’une entreprise.
 
 ---
 
@@ -296,7 +451,8 @@ Disponible seulement si l’entreprise a `has_branches: true`. Réservé à l’
 
 5. **Si l’entreprise a `has_branches: true`** :  
    - Proposer “Ajouter une succursale” : formulaire nom, adresse, téléphone, email → `POST /api/succursales/`.  
-   - Après création, l’utilisateur peut choisir la succursale via `POST /api/auth/select-context/` avec `succursale_id`.
+   - Pour **attribuer** des succursales à un employé : `GET` / `POST /api/users/{id}/succursales/` (voir section **7 bis**).  
+   - L’utilisateur peut choisir la succursale active dans le JWT via `POST /api/auth/select-context/` avec `succursale_id`.
 
 6. **Tous les autres appels API** (stock, ventes, rapports, etc.) : envoyer le header `Authorization: Bearer <access>` ; le backend utilise le contexte (entreprise_id / succursale_id) présent dans le JWT ou dans la requête.
 

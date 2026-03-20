@@ -42,6 +42,8 @@ from decimal import Decimal
 import qrcode
 from datetime import datetime
 from rest_framework.decorators import action, api_view, permission_classes
+from drf_yasg import openapi
+from drf_yasg.utils import swagger_auto_schema
 
 # Configuration du logger pour tracer les suppressions automatiques d'articles
 logger = logging.getLogger(__name__)
@@ -71,8 +73,9 @@ def _get_tenant_ids(request):
 
 class TenantFilterMixin:
     """
-    Mixin multi-tenant : filtre le queryset par entreprise (et optionnellement succursale).
-    - Si le modèle a entreprise_id : filtre par request.tenant_id / branch_id.
+    Mixin multi-tenant : filtre le queryset par entreprise (et succursale si connue).
+    - Si le modèle a entreprise_id : filtre par request.tenant_id ; si branch_id est défini (JWT ou défaut membership), filtre aussi par succursale.
+    - Agent sans succursale : filtre uniquement par entreprise (succursale_id laissée libre côté données).
     - Si tenant_lookup est défini (ex. 'entree__entreprise_id') : filtre par ce lookup.
     """
     tenant_lookup = None  # ex. 'entree__entreprise_id' pour LigneEntree
@@ -84,6 +87,7 @@ class TenantFilterMixin:
         tenant_id, branch_id = _get_tenant_ids(self.request)
         if tenant_id is None:
             return queryset.none() if (self.tenant_lookup or hasattr(queryset.model, 'entreprise_id')) else queryset
+        # Agent sans succursale dans le JWT : filtre uniquement par entreprise (pas par succursale).
         if self.tenant_lookup:
             return queryset.filter(**{self.tenant_lookup: tenant_id})
         if not hasattr(queryset.model, 'entreprise_id'):
@@ -397,6 +401,7 @@ class RapportViewSet(viewsets.ViewSet):
 
     # Les actions de bons POS supprimées ici.
 
+@swagger_auto_schema(tags=['Entreprises'])
 class EntrepriseViewSet(viewsets.ModelViewSet):
     """
     Gestion des entreprises.
@@ -465,6 +470,11 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
             Membership.objects.filter(user=user, entreprise=instance).delete()
             instance.delete()
 
+    @swagger_auto_schema(
+        operation_summary="Mon entreprise (contexte JWT / admin)",
+        operation_description="Retourne l'entreprise du contexte courant pour un admin ; message si superadmin.",
+        responses={200: openapi.Response('Détail entreprise ou message'), 400: 'Aucune entreprise'},
+    )
     @action(detail=False, methods=['get'])
     def my_entreprise(self, request):
         """Récupérer l'entreprise de l'utilisateur connecté (pour admin)."""
@@ -477,6 +487,11 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
             return Response({'message': _("Superadmin n'appartient à aucune entreprise")})
         return Response({'error': _("Aucune entreprise associée")}, status=400)
 
+    @swagger_auto_schema(
+        operation_summary="Utilisateurs d'une entreprise",
+        operation_description="Liste paginée des utilisateurs ayant un membership actif sur cette entreprise (`pk` = id entreprise).",
+        responses={200: openapi.Response('Liste UserSerializer ou réponse paginée')},
+    )
     @action(detail=True, methods=['get'])
     def users(self, request, pk=None):
         """Lister tous les utilisateurs d'une entreprise (paginated, via Membership)."""
@@ -505,6 +520,7 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
         return Response(stats)
 
 
+@swagger_auto_schema(tags=['Succursales'])
 class SuccursaleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     """
     Succursales (branches) de l'entreprise courante.
@@ -522,6 +538,10 @@ class SuccursaleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id(self.request)
         if not eid:
             return Succursale.objects.none()
+        # Agent : même visibilité que l'admin sur la liste (entreprise) ; succursale JWT sert au filtrage métier ailleurs.
+        if user.is_agent(self.request):
+            return Succursale.objects.filter(entreprise_id=eid, is_active=True).order_by('nom', 'id')
+        # Admin : peut voir toutes les succursales de son entreprise.
         return Succursale.objects.filter(entreprise_id=eid, is_active=True).order_by('nom', 'id')
 
     def perform_create(self, serializer):

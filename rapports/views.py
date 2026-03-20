@@ -2,6 +2,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import PermissionDenied
 from django.db.models import Sum, Q, F, DecimalField
 from django.db.models.functions import Coalesce
 from django.utils import timezone
@@ -43,6 +44,23 @@ class RapportsViewSet(viewsets.ViewSet):
     def _get_entete_entreprise(self, entreprise, user):
         """Génère l'en-tête simplifié : nom, logo, slogan, téléphone uniquement."""
         return get_entete_entreprise(entreprise)
+
+    def _get_tenant_ids_strict(self, request):
+        """
+        Contexte multi-tenant :
+        - entreprise obligatoire (via membership / JWT).
+        - succursale : depuis JWT ou default_succursale ; peut être None (agent sans succursale).
+        """
+        user = request.user
+        entreprise = user.get_entreprise(request)
+        eid = entreprise.pk if entreprise else None
+        branch_id = getattr(request, 'branch_id', None)
+
+        if branch_id is None and user.is_agent(request):
+            m = user.get_current_membership(request)
+            branch_id = m.default_succursale_id if m else None
+
+        return eid, branch_id
     
     @action(detail=False, methods=['get'], url_path='inventaire')
     def inventaire(self, request):
@@ -74,9 +92,12 @@ class RapportsViewSet(viewsets.ViewSet):
             date_fin = f"{annee_actuelle}-12-31"
         
         # Requête de base: stocks de l'entreprise de l'utilisateur
-        eid = entreprise.pk if entreprise else None
+        eid, branch_id = self._get_tenant_ids_strict(request)
+        base_filter = {'article__entreprise_id': eid} if eid else {}
+        if user.is_agent(request) and branch_id is not None:
+            base_filter['article__succursale_id'] = branch_id
         stocks = Stock.objects.filter(
-            **({'article__entreprise_id': eid} if eid else {})
+            **base_filter
         ).select_related(
             'article',
             'article__sous_type_article',
@@ -171,8 +192,10 @@ class RapportsViewSet(viewsets.ViewSet):
     def _get_bon_entree_queryset_and_stats(self, request):
         """Retourne (queryset stocks, dict statistiques) pour le rapport de réquisition."""
         user = request.user
-        eid = user.get_entreprise_id(request)
+        eid, branch_id = self._get_tenant_ids_strict(request)
         base_filter = {'article__entreprise_id': eid} if eid else {}
+        if user.is_agent(request) and branch_id is not None:
+            base_filter['article__succursale_id'] = branch_id
         inclure_normaux = request.query_params.get('inclure_normaux', 'false').lower() == 'true'
         if inclure_normaux:
             stocks = Stock.objects.filter(**base_filter)
@@ -264,8 +287,10 @@ class RapportsViewSet(viewsets.ViewSet):
             existing_ids = {s.article.article_id for s in stocks_list}
             extra_ids_to_add = [aid for aid in extra_ids if aid not in existing_ids]
             if extra_ids_to_add:
-                eid = user.get_entreprise_id(request)
+                eid, branch_id = self._get_tenant_ids_strict(request)
                 extra_filter = {'article__entreprise_id': eid} if eid else {}
+                if user.is_agent(request) and branch_id is not None:
+                    extra_filter['article__succursale_id'] = branch_id
                 extra_stocks = Stock.objects.filter(
                     article__article_id__in=extra_ids_to_add,
                     **extra_filter
@@ -310,7 +335,8 @@ class RapportsViewSet(viewsets.ViewSet):
         GET /api/rapports/clients-dettes/?client_id=CLI0001
         """
         user = request.user
-        entreprise = getattr(user, 'entreprise', None)
+        entreprise = user.get_entreprise(request)
+        eid, branch_id = self._get_tenant_ids_strict(request)
 
         # Récupérer le client_id depuis les paramètres de requête
         client_id = request.query_params.get('client_id')
@@ -321,10 +347,11 @@ class RapportsViewSet(viewsets.ViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         from stock.models import Client, DetteClient
-        eid = entreprise.pk if entreprise else None
         client_qs = Client.objects.filter(id=client_id)
         if eid:
             client_qs = client_qs.filter(entreprise_id=eid)
+        if user.is_agent(request) and branch_id is not None:
+            client_qs = client_qs.filter(succursale_id=branch_id)
         try:
             client = client_qs.get()
         except Client.DoesNotExist:
@@ -338,6 +365,8 @@ class RapportsViewSet(viewsets.ViewSet):
         # Traiter uniquement ce client
         c = client
         dettes_qs = DetteClient.objects.filter(client=c).select_related('devise', 'sortie')
+        if user.is_agent(request) and branch_id is not None:
+            dettes_qs = dettes_qs.filter(succursale_id=branch_id)
         dettes = []
         # per-client totals for EN_COURS
         tot_montant_encours_client = Decimal('0.00')
@@ -456,7 +485,8 @@ class RapportsViewSet(viewsets.ViewSet):
         GET /api/rapports/clients-dettes-general/?date_debut=2025-01-01&date_fin=2025-12-31
         """
         user = request.user
-        entreprise = getattr(user, 'entreprise', None)
+        entreprise = user.get_entreprise(request)
+        eid, branch_id = self._get_tenant_ids_strict(request)
 
         from stock.models import Client, DetteClient
         from decimal import Decimal
@@ -505,14 +535,17 @@ class RapportsViewSet(viewsets.ViewSet):
         if date_fin_obj:
             filtre_dettes['date_creation__date__lte'] = date_fin_obj
 
-        eid = entreprise.pk if entreprise else None
         base_client_filter = {'entreprise_id': eid} if eid else {}
+        if user.is_agent(request) and branch_id is not None:
+            base_client_filter['succursale_id'] = branch_id
         clients_avec_dettes = Client.objects.filter(
             dettes__solde_restant__gt=0,
             dettes__statut='EN_COURS',
             **base_client_filter
         )
-        
+        if user.is_agent(request) and branch_id is not None:
+            clients_avec_dettes = clients_avec_dettes.filter(dettes__succursale_id=branch_id)
+
         # Appliquer le filtre de date sur les dettes si nécessaire
         if date_debut_obj or date_fin_obj:
             if date_debut_obj:
@@ -543,6 +576,8 @@ class RapportsViewSet(viewsets.ViewSet):
                 client=client,
                 **filtre_dettes
             ).select_related('devise')
+            if user.is_agent(request) and branch_id is not None:
+                dettes_encours = dettes_encours.filter(succursale_id=branch_id)
 
             # Calculer les totaux pour ce client
             tot_montant_client = Decimal('0.00')
@@ -678,8 +713,10 @@ class RapportsViewSet(viewsets.ViewSet):
                 'exemple': '2025-11-01'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        eid = entreprise.pk if entreprise else None
+        eid, branch_id = self._get_tenant_ids_strict(request)
         base_entree_filter = {'entree__entreprise_id': eid} if eid else {}
+        if user.is_agent(request) and branch_id is not None:
+            base_entree_filter['entree__succursale_id'] = branch_id
         lignes_entree = LigneEntree.objects.filter(
             date_entree__date__gte=date_debut_obj,
             date_entree__date__lte=date_fin_obj,
@@ -801,10 +838,12 @@ class RapportsViewSet(viewsets.ViewSet):
         if not user.is_authenticated:
             return Response({'detail': "Utilisateur non authentifié."}, status=status.HTTP_403_FORBIDDEN)
         entreprise = user.get_entreprise(request)
-        eid = user.get_entreprise_id(request)
+        eid, branch_id = self._get_tenant_ids_strict(request)
         article_qs = Article.objects.filter(pk=pk)
         if eid:
             article_qs = article_qs.filter(entreprise_id=eid)
+        if user.is_agent(request) and branch_id is not None:
+            article_qs = article_qs.filter(succursale_id=branch_id)
         article = article_qs.first()
         if not article:
             return Response({'detail': "Article non trouvé ou accès refusé."}, status=status.HTTP_404_NOT_FOUND)
@@ -855,6 +894,9 @@ class RapportsViewSet(viewsets.ViewSet):
         # Récupération des mouvements
         entrees_qs = LigneEntree.objects.filter(article=article)
         sorties_qs = LigneSortie.objects.filter(article=article)
+        if user.is_agent(request) and branch_id is not None:
+            entrees_qs = entrees_qs.filter(entree__succursale_id=branch_id)
+            sorties_qs = sorties_qs.filter(sortie__succursale_id=branch_id)
         
         if date_min:
             entrees_qs = entrees_qs.filter(date_entree__date__gte=date_min)
