@@ -21,50 +21,67 @@ class UserManager(BaseUserManager):
 
 class User(AbstractUser):
     """
-    Modèle utilisateur avec 3 rôles : SuperAdmin, Admin, User (Agent).
-    L'appartenance à une ou plusieurs entreprises se fait via Membership (plus de FK entreprise ici).
+    Utilisateur : SuperAdmin (is_superuser) ou membre d'entreprises via Membership.
+    - SuperAdmin : is_superuser (créé via createsuperuser).
+    - Admin / User (Agent) : déterminé par Membership.role (par entreprise), plus par User.role.
+    Le champ `role` reste en base pour rétrocompatibilité / affichage legacy ; la logique
+    des permissions s'appuie sur is_superuser et sur Membership.role.
     """
     ROLE_CHOICES = (
         ('superadmin', 'Super Administrateur'),
         ('admin', 'Administrateur'),
         ('user', 'Agent / Employé'),
     )
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="admin")
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="user")
 
     objects = UserManager()
 
-    def get_current_membership(self):
-        """Premier membership actif (entreprise courante tant qu'on n'a pas de contexte JWT)."""
+    def get_current_membership(self, request=None):
+        """
+        Membership du contexte courant.
+        Si request est fourni et a current_membership (défini par l'auth JWT), utilise celui-là
+        pour cet utilisateur ; sinon premier membership actif.
+        """
+        if request is not None:
+            m = getattr(request, 'current_membership', None)
+            if m is not None and m.user_id == self.pk:
+                return m
         return self.memberships.filter(is_active=True).select_related('entreprise', 'default_succursale').first()
 
-    def get_entreprise(self):
-        """Entreprise courante (premier membership actif)."""
-        m = self.get_current_membership()
+    def get_entreprise(self, request=None):
+        """Entreprise courante (contexte request ou premier membership actif)."""
+        m = self.get_current_membership(request)
         return m.entreprise if m else None
 
-    def get_entreprise_id(self):
+    def get_entreprise_id(self, request=None):
         """ID de l'entreprise courante ou None."""
-        m = self.get_current_membership()
+        m = self.get_current_membership(request)
         return m.entreprise_id if m else None
 
     def __str__(self):
-        if self.role == 'superadmin':
+        if self.is_superuser:
             return f"{self.username} (Super Admin)"
-        ent = self.get_entreprise()
+        m = self.get_current_membership()
+        ent = m.entreprise if m else None
         nom = ent.nom if ent else 'Aucune entreprise'
-        if self.role == 'admin':
+        role_label = m.role if m else 'user'
+        if role_label == 'admin':
             return f"{self.username} (Admin) - {nom}"
         return f"{self.username} (Agent) - {nom}"
 
     def is_superadmin(self):
-        return self.role == 'superadmin' or self.is_superuser
+        """Super administrateur plateforme (créé via createsuperuser)."""
+        return bool(self.is_superuser)
 
-    def is_admin(self):
-        return self.role == 'admin'
+    def is_admin(self, request=None):
+        """True si l'utilisateur est admin dans le contexte courant (Membership.role)."""
+        m = self.get_current_membership(request)
+        return m is not None and m.role == 'admin'
 
-    def is_agent(self):
-        """Vérifie si l'utilisateur est un agent / employé."""
-        return self.role == 'user'
+    def is_agent(self, request=None):
+        """True si l'utilisateur est agent dans le contexte courant (Membership.role)."""
+        m = self.get_current_membership(request)
+        return m is not None and m.role == 'user'
 
 
 class Membership(models.Model):

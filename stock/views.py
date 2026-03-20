@@ -16,6 +16,7 @@ from rest_framework.exceptions import PermissionDenied, NotFound
 from django.utils.translation import gettext as _, pgettext
 from .serializers import *
 from users.permissions import IsSuperAdmin, IsAdmin, IsSuperAdminOrAdmin, IsSuperAdminOrReadOnlyAdmin, IsOwnerOrSuperAdmin, IsAdminOrUser
+from users.serializers import UserSerializer
 from stock.permissions import EntreprisePermission, IsAdminOrUser as StockIsAdminOrUser
 
 
@@ -59,10 +60,10 @@ def _get_tenant_ids(request):
     Retourne (entreprise_id, succursale_id) depuis le contexte JWT ou le user.
     Utilisé pour isolation stricte multi-tenant sur tous les ViewSets.
     """
-    tenant_id = getattr(request, 'tenant_id', None) or (request.user.get_entreprise_id() if request.user.is_authenticated else None)
+    tenant_id = getattr(request, 'tenant_id', None) or (request.user.get_entreprise_id(request) if request.user.is_authenticated else None)
     branch_id = getattr(request, 'branch_id', None)
     if branch_id is None and request.user.is_authenticated:
-        m = request.user.get_current_membership()
+        m = request.user.get_current_membership(request)
         if m and m.default_succursale_id:
             branch_id = m.default_succursale_id
     return tenant_id, branch_id
@@ -323,7 +324,7 @@ class RapportViewSet(viewsets.ViewSet):
         events.sort(key=lambda x: x['date'])
 
         # Entreprise pour l'en-tête
-        entreprise = user.get_entreprise() or Entreprise.objects.first()
+        entreprise = user.get_entreprise(request) or Entreprise.objects.first()
 
         # PDF
         buffer = io.BytesIO()
@@ -413,11 +414,12 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
             return Entreprise.objects.none()
         if user.is_superadmin():
             return Entreprise.objects.all().order_by('-id')
-        if user.is_admin():
-            eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id()
+        if user.is_admin(self.request):
+            eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id(self.request)
             if eid:
                 return Entreprise.objects.filter(id=eid).order_by('-id')
             return Entreprise.objects.none()
+        # Utilisateur sans entreprise : ne voit aucune entreprise tant qu'il n'en a pas créée
         return Entreprise.objects.none()
 
     def perform_create(self, serializer):
@@ -425,20 +427,21 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if user.is_superadmin():
             raise PermissionDenied(_("Le super administrateur ne peut pas créer d'entreprise. Utilisez un compte Admin."))
-        if user.is_admin():
-            entreprise = serializer.save()
-            Membership.objects.get_or_create(
-                user=user,
-                entreprise=entreprise,
-                defaults={'role': 'admin', 'is_active': True},
-            )
+        # Tout utilisateur authentifié non superadmin peut créer une entreprise.
+        # Il devient automatiquement admin de cette entreprise via Membership.
+        entreprise = serializer.save()
+        Membership.objects.get_or_create(
+            user=user,
+            entreprise=entreprise,
+            defaults={'role': 'admin', 'is_active': True},
+        )
 
     def perform_update(self, serializer):
         user = self.request.user
         entreprise = self.get_object()
         if user.is_superadmin():
             raise PermissionDenied(_("Le super administrateur ne peut pas modifier une entreprise."))
-        if user.is_admin():
+        if user.is_admin(self.request):
             # Admin : autorise uniquement si l'utilisateur a une membership active pour cette entreprise
             is_member = (
                 user.memberships.filter(entreprise=entreprise, is_active=True).exists()
@@ -452,7 +455,7 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if user.is_superadmin():
             instance.delete()
-        elif user.is_admin():
+        elif user.is_admin(self.request):
             # Admin : autorise uniquement si l'utilisateur a une membership active pour cette entreprise
             is_member = (
                 user.memberships.filter(entreprise=instance, is_active=True).exists()
@@ -465,9 +468,9 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def my_entreprise(self, request):
         """Récupérer l'entreprise de l'utilisateur connecté (pour admin)."""
-        eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id()
-        ent = Entreprise.objects.filter(id=eid).first() if eid else request.user.get_entreprise()
-        if request.user.is_admin() and ent:
+        eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id(request)
+        ent = Entreprise.objects.filter(id=eid).first() if eid else request.user.get_entreprise(request)
+        if request.user.is_admin(request) and ent:
             serializer = self.get_serializer(ent)
             return Response(serializer.data)
         if request.user.is_superadmin():
@@ -516,28 +519,28 @@ class SuccursaleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         user = self.request.user
         if not user.is_authenticated:
             return Succursale.objects.none()
-        eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id()
+        eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id(self.request)
         if not eid:
             return Succursale.objects.none()
         return Succursale.objects.filter(entreprise_id=eid, is_active=True).order_by('nom', 'id')
 
     def perform_create(self, serializer):
         user = self.request.user
-        if not user.is_admin():
+        if not user.is_admin(self.request):
             raise PermissionDenied(_("Seul l'administrateur de l'entreprise peut créer une succursale."))
-        eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id()
+        eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id(self.request)
         if not eid:
             raise PermissionDenied(_("Aucune entreprise sélectionnée."))
         entreprise = Entreprise.objects.get(id=eid)
         serializer.save(entreprise=entreprise)
 
     def perform_update(self, serializer):
-        if not self.request.user.is_admin():
+        if not self.request.user.is_admin(self.request):
             raise PermissionDenied(_("Seul l'administrateur peut modifier une succursale."))
         serializer.save()
 
     def perform_destroy(self, instance):
-        if not self.request.user.is_admin():
+        if not self.request.user.is_admin(self.request):
             raise PermissionDenied(_("Seul l'administrateur peut supprimer une succursale."))
         instance.is_active = False
         instance.save()
@@ -1004,7 +1007,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     
                     # Vérifier le solde disponible pour cette devise
                     solde_devise = self._solde_caisse_par_devise(
-                        user.get_entreprise(),
+                        user.get_entreprise(self.request),
                         devise_obj,
                         succursale_id=sortie.succursale_id,
                     )
@@ -1279,7 +1282,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             if diff != 0:
                 mouvement_type = 'ENTREE' if diff > 0 else 'SORTIE'
                 montant_abs = abs(diff)
-                tenant_id = instance.entreprise_id or (user.get_entreprise_id() if user.is_authenticated else None)
+                tenant_id = instance.entreprise_id or (user.get_entreprise_id(self.request) if user.is_authenticated else None)
                 if mouvement_type == 'SORTIE' and tenant_id:
                     solde = self._solde_caisse_tenant(tenant_id, getattr(self.request, 'branch_id', None))
                     if solde < montant_abs:
@@ -1321,7 +1324,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
     def facture_pos_pdf(self, request, pk=None):
         user = request.user
         sortie = self.get_object()
-        entreprise = user.get_entreprise()
+        entreprise = user.get_entreprise(request)
         POS_WIDTH = 80 * mm
         buffer = io.BytesIO()
         styles = getSampleStyleSheet()
@@ -1478,7 +1481,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         normal = styles['Normal']; normal.fontSize = 8; normal.wordWrap = 'CJK'
         title_style = ParagraphStyle('TitleMini', fontName='Helvetica-Bold', fontSize=9, alignment=1, spaceAfter=1)
         # Sécurise l'accès à l'entreprise (peut être None pour superadmin)
-        entreprise = user.get_entreprise()
+        entreprise = user.get_entreprise(request)
         from rapports.utils.entete import get_entete_entreprise
         from rapports.utils.pdf_generator import PDFGenerator
         entete = get_entete_entreprise(entreprise)
@@ -2643,7 +2646,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         """Génère un bon d'entrée au format POS."""
         entree = self.get_object()
         
-        ent_ctx = self.request.user.get_entreprise()
+        ent_ctx = self.request.user.get_entreprise(self.request)
         response_data = {
             'numero_entree': entree.pk,
             'date': entree.date_op.strftime('%d/%m/%Y %H:%M'),
@@ -3297,7 +3300,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         writer = csv.writer(response)
         writer.writerow(['Date','Type','Montant','Motif','Moyen','Référence'])
         for m in self.get_queryset():
-            montant_str = _format_amount(m.montant, m.devise if hasattr(m, 'devise') else None, request.user.get_entreprise())
+            montant_str = _format_amount(m.montant, m.devise if hasattr(m, 'devise') else None, request.user.get_entreprise(request))
             writer.writerow([
                 m.date.isoformat(), m.type, montant_str, smart_str(m.motif), m.moyen or '', m.reference_piece or ''
             ])
@@ -3312,7 +3315,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         - Sinon → BON CAISSE (entrée/sortie) avec motif et montant.
         """
         mv = self.get_object()
-        entreprise = request.user.get_entreprise() or Entreprise.objects.first()
+        entreprise = request.user.get_entreprise(request) or Entreprise.objects.first()
 
         POS_WIDTH = 80 * mm
         buffer = io.BytesIO()
@@ -3697,7 +3700,7 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         paiement = self.get_object()
         dette = paiement.dette
         client = dette.client
-        entreprise = user.get_entreprise()
+        entreprise = user.get_entreprise(request)
 
         POS_WIDTH = 80 * mm
         buffer = io.BytesIO()

@@ -50,7 +50,7 @@ def download_template(request):
         cell.alignment = header_align
         cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
         ws2.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 22
-    tenant_id = request.user.get_entreprise_id() if request.user.is_authenticated else None
+    tenant_id = request.user.get_entreprise_id(request) if request.user.is_authenticated else None
     articles_qs = Article.objects.filter(entreprise_id=tenant_id) if tenant_id else Article.objects.all()
     for article in articles_qs:
         ws2.append([article.article_id, article.nom_scientifique, article.nom_commercial or ''])
@@ -594,7 +594,7 @@ def download_template_sortie(request):
     """Télécharge un fichier Excel modèle pour l'import de sorties (ventes)."""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-    tenant_id = request.user.get_entreprise_id() if request.user.is_authenticated else None
+    tenant_id = request.user.get_entreprise_id(request) if request.user.is_authenticated else None
     articles_qs = Article.objects.filter(entreprise_id=tenant_id) if tenant_id else Article.objects.all()
     devises_qs = Devise.objects.filter(entreprise_id=tenant_id) if tenant_id else Devise.objects.all()
     clients_qs = Client.objects.filter(entreprise_id=tenant_id) if tenant_id else Client.objects.all()

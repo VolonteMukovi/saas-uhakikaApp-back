@@ -217,10 +217,10 @@ class UserViewSet(viewsets.ModelViewSet):
         if self.action == 'create':
             if not self.request.user.is_authenticated:
                 return UserRegistrationSerializer
-            if self.request.user.is_admin():
+            if self.request.user.is_admin(self.request):
                 return SuperAdminUserSerializer
             return UserSerializer
-        if self.action in ('update', 'partial_update') and self.request.user.is_authenticated and self.request.user.is_admin():
+        if self.action in ('update', 'partial_update') and self.request.user.is_authenticated and self.request.user.is_admin(self.request):
             return AdminUserSerializer
         if self.request.user.is_authenticated and self.request.user.is_superadmin():
             return SuperAdminUserSerializer
@@ -229,8 +229,11 @@ class UserViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action == 'create':
             return [permissions.AllowAny()]
-        if self.action in ('assign_entreprise', 'remove_entreprise', 'without_entreprise'):
+        if self.action in ('remove_entreprise', 'without_entreprise'):
             return [IsSuperAdmin()]
+        # assign_entreprise : auto-association par l'utilisateur lui-même (ou par superadmin)
+        if self.action == 'assign_entreprise':
+            return [permissions.IsAuthenticated()]
         # Admin gère entièrement les utilisateurs de son entreprise (séparation stricte entre entreprises)
         if self.action in ('me', 'list', 'retrieve', 'update', 'partial_update', 'destroy'):
             return [IsAdminFullEnterpriseAndUsers()]
@@ -243,12 +246,12 @@ class UserViewSet(viewsets.ModelViewSet):
         base = get_user_model().objects.all().order_by('-date_joined', '-id')
         if user.is_superadmin():
             return base
-        if user.is_admin():
-            eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id()
+        if user.is_admin(self.request):
+            eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id(self.request)
             if eid:
                 return base.filter(memberships__entreprise_id=eid, memberships__is_active=True).distinct()
             return get_user_model().objects.none()
-        if user.is_agent():
+        if user.is_agent(self.request):
             return base.filter(pk=user.pk)
         return get_user_model().objects.none()
 
@@ -260,19 +263,19 @@ class UserViewSet(viewsets.ModelViewSet):
         if request.user.is_superadmin() and obj.pk != request.user.pk:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied(_("Le super administrateur ne peut modifier que son propre compte."))
-        if request.user.is_agent() and obj.pk != request.user.pk:
+        if request.user.is_agent(request) and obj.pk != request.user.pk:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied(_("Vous ne pouvez modifier que votre propre profil."))
-        if request.user.is_admin():
-            eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id()
+        if request.user.is_admin(request):
+            eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id(request)
             if obj.get_entreprise_id() != eid:
                 from rest_framework.exceptions import PermissionDenied
                 raise PermissionDenied(_("Vous ne pouvez gérer que les utilisateurs de votre entreprise."))
     
     def create(self, request, *args, **kwargs):
         """Inscription publique (admin sans entreprise) ou création par un Admin (admin/user de son entreprise)."""
-        if request.user.is_authenticated and request.user.is_admin():
-            entreprise = getattr(request, 'tenant_id', None) and Entreprise.objects.filter(id=request.tenant_id).first() or request.user.get_entreprise()
+        if request.user.is_authenticated and request.user.is_admin(request):
+            entreprise = getattr(request, 'tenant_id', None) and Entreprise.objects.filter(id=request.tenant_id).first() or request.user.get_entreprise(request)
             if not entreprise:
                 return Response(
                     {'error': _("Vous devez être associé à une entreprise pour créer des utilisateurs.")},
@@ -284,13 +287,14 @@ class UserViewSet(viewsets.ModelViewSet):
             serializer = SuperAdminUserSerializer(data=data, context={'request': request, 'entreprise': entreprise})
             if serializer.is_valid():
                 user = serializer.save()
+                m = user.get_current_membership(request)
                 return Response({
                     'message': _('Utilisateur créé avec succès.'),
                     'user_id': user.id,
                     'username': user.username,
                     'email': user.email,
-                    'role': user.role,
-                    'entreprise': user.get_entreprise().nom if user.get_entreprise() else None,
+                    'role': m.role if m else role,
+                    'entreprise': m.entreprise.nom if m else (entreprise.nom if entreprise else None),
                 }, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         serializer = self.get_serializer(data=request.data)
@@ -304,31 +308,64 @@ class UserViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
-    @action(detail=True, methods=['post'], permission_classes=[IsSuperAdmin])
+    @action(detail=True, methods=['post'])
     def assign_entreprise(self, request, pk=None):
-        """Associer un utilisateur à une entreprise via Membership (superadmin seulement)."""
-        user = self.get_object()
+        """
+        Associer un utilisateur à une entreprise via Membership.
+
+        - Superadmin : peut associer n'importe quel utilisateur.
+        - Utilisateur simple : ne peut associer que son propre compte.
+
+        Body attendu :
+        {
+            "entreprise_id": int,          # obligatoire
+            "role": "admin" | "user"       # optionnel, défaut = "admin"
+        }
+        """
+        target_user = self.get_object()
+
+        # Si ce n'est pas un superadmin, il ne peut agir que sur lui-même
+        if not request.user.is_superadmin() and target_user.id != request.user.id:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(_("Vous ne pouvez associer qu'à partir de votre propre compte."))
+
         entreprise_id = request.data.get('entreprise_id')
         if not entreprise_id:
-            return Response({'error': _('entreprise_id est requis')}, status=400)
+            return Response({'error': _('entreprise_id est requis')}, status=status.HTTP_400_BAD_REQUEST)
+
+        role = (request.data.get('role') or 'admin').lower()
+        if role not in ('admin', 'user'):
+            return Response(
+                {'error': _("Le rôle doit être 'admin' ou 'user'.")},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         try:
             entreprise = Entreprise.objects.get(id=entreprise_id)
-            membership, created = Membership.objects.get_or_create(
-                user=user,
-                entreprise=entreprise,
-                defaults={'role': 'admin', 'is_active': True},
-            )
-            if not created:
-                membership.is_active = True
-                membership.save()
-            return Response({
-                'message': _('Utilisateur %(user)s associé à %(ent)s') % {'user': user.username, 'ent': entreprise.nom},
-                'user_id': user.id,
-                'entreprise_id': entreprise.id,
-                'entreprise_nom': entreprise.nom,
-            })
         except Entreprise.DoesNotExist:
-            return Response({'error': _('Entreprise introuvable')}, status=400)
+            return Response({'error': _('Entreprise introuvable')}, status=status.HTTP_400_BAD_REQUEST)
+
+        membership, created = Membership.objects.get_or_create(
+            user=target_user,
+            entreprise=entreprise,
+            defaults={'role': role, 'is_active': True},
+        )
+        if not created:
+            membership.role = role
+            membership.is_active = True
+            membership.save()
+
+        return Response({
+            'message': _('Utilisateur %(user)s associé à %(ent)s avec le rôle %(role)s') % {
+                'user': target_user.username,
+                'ent': entreprise.nom,
+                'role': role,
+            },
+            'user_id': target_user.id,
+            'entreprise_id': entreprise.id,
+            'entreprise_nom': entreprise.nom,
+            'role': membership.role,
+        })
 
     @action(detail=True, methods=['post'], permission_classes=[IsSuperAdmin])
     def remove_entreprise(self, request, pk=None):
@@ -356,7 +393,7 @@ class UserViewSet(viewsets.ModelViewSet):
             serializer = self.get_serializer(user)
             return Response(serializer.data)
         # PUT / PATCH : mise à jour du profil
-        serializer_class = AdminUserSerializer if user.is_admin() else UserSerializer
+        serializer_class = AdminUserSerializer if user.is_admin(request) else UserSerializer
         serializer = serializer_class(user, data=request.data, partial=(request.method == 'PATCH'))
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -374,7 +411,7 @@ class UserViewSet(viewsets.ModelViewSet):
     def without_entreprise(self, request):
         """Lister les utilisateurs sans aucune entreprise (aucun membership actif), pour superadmin."""
         with_membership = Membership.objects.filter(is_active=True).values_list('user_id', flat=True)
-        users = get_user_model().objects.exclude(id__in=with_membership).filter(role='admin').order_by('-date_joined', '-id')
+        users = get_user_model().objects.exclude(id__in=with_membership).order_by('-date_joined', '-id')
         page = self.paginate_queryset(users)
         if page is not None:
             serializer = self.get_serializer(page, many=True)

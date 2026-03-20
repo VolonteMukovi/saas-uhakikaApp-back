@@ -15,19 +15,37 @@ class EntreprisePermission(permissions.BasePermission):
     message = "Vous n'avez pas les droits nécessaires sur les entreprises."
 
     def has_permission(self, request, view):
-        if not request.user or not request.user.is_authenticated:
+        """
+        Règles d'accès globales sur /entreprises/ :
+        - Non authentifié : refusé.
+        - Superadmin : lecture (list/retrieve) + delete uniquement, pas de create/update.
+        - Admin (via Membership) : CRUD complet sur son entreprise.
+        - Utilisateur sans entreprise (aucun Membership) : peut créer sa première entreprise (POST),
+          mais n'a pas accès aux autres opérations sur /entreprises/.
+        """
+        user = request.user
+        if not user or not user.is_authenticated:
             return False
-        if request.user.is_superadmin():
+
+        # Superadmin : pas de create/update, seulement lecture + delete
+        if user.is_superadmin():
             return request.method in ('GET', 'HEAD', 'OPTIONS', 'DELETE')
-        if request.user.is_admin():
+
+        # Admin (Membership.role == 'admin') : accès complet
+        if user.is_admin(request):
             return True
+
+        # Utilisateur connecté sans rôle admin : autoriser seulement la création
+        if request.method == 'POST':
+            return True
+
         return False
 
     def has_object_permission(self, request, view, obj):
         if request.user.is_superadmin():
             return request.method in ('GET', 'HEAD', 'OPTIONS', 'DELETE')
-        if request.user.is_admin() and hasattr(obj, 'id'):
-            eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id()
+        if request.user.is_admin(request) and hasattr(obj, 'id'):
+            eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id(request)
             return eid == obj.id
         return False
 
@@ -56,7 +74,7 @@ class IsAdmin(permissions.BasePermission):
         if not request.user.is_authenticated:
             raise PermissionDenied(_("Vous devez être connecté pour accéder à cette ressource."))
         
-        if not request.user.is_admin():
+        if not request.user.is_admin(request):
             raise PermissionDenied(_("Accès réservé aux administrateurs d'entreprise."))
         
         return True
@@ -67,7 +85,7 @@ class IsSuperAdminOrAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
             raise PermissionDenied(_("Vous devez être connecté pour accéder à cette ressource."))
-        if not (request.user.is_superadmin() or request.user.is_admin()):
+        if not (request.user.is_superadmin() or request.user.is_admin(request)):
             raise PermissionDenied(_("Accès réservé aux administrateurs."))
         return True
 
@@ -77,7 +95,7 @@ class IsAdminOrUser(permissions.BasePermission):
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
             raise PermissionDenied(_("Vous devez être connecté pour accéder à cette ressource."))
-        if not (request.user.is_admin() or request.user.is_agent()):
+        if not (request.user.is_admin(request) or request.user.is_agent(request)):
             raise PermissionDenied(_("Accès réservé aux administrateurs ou aux agents de l'entreprise."))
         return True
 
@@ -96,7 +114,7 @@ class IsSuperAdminOrReadOnlyAdmin(permissions.BasePermission):
             return True
         
         # Admin peut seulement lire
-        if request.user.is_admin() and request.method in permissions.SAFE_METHODS:
+        if request.user.is_admin(request) and request.method in permissions.SAFE_METHODS:
             return True
         
         raise PermissionDenied(_("Accès en écriture réservé aux super administrateurs."))
@@ -110,7 +128,7 @@ class IsOwnerOrSuperAdmin(permissions.BasePermission):
         if not request.user.is_authenticated:
             raise PermissionDenied(_("Vous devez être connecté pour accéder à cette ressource."))
         
-        return request.user.is_superadmin() or request.user.is_admin()
+        return request.user.is_superadmin() or request.user.is_admin(request)
     
     def has_object_permission(self, request, view, obj):
         # Super admin peut accéder à tout
@@ -118,8 +136,8 @@ class IsOwnerOrSuperAdmin(permissions.BasePermission):
             return True
         
         # Admin peut accéder seulement aux objets de son entreprise
-        if request.user.is_admin():
-            user_ent = request.user.get_entreprise()
+        if request.user.is_admin(request):
+            user_ent = request.user.get_entreprise(request)
             if not user_ent:
                 return False
             if hasattr(obj, 'entreprise_id'):

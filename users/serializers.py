@@ -16,11 +16,13 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ['role', 'date_joined']
 
     def get_entreprise_nom(self, obj):
-        ent = obj.get_entreprise()
+        request = self.context.get('request')
+        ent = obj.get_entreprise(request)
         return ent.nom if ent else None
 
     def get_entreprise_id(self, obj):
-        return obj.get_entreprise_id()
+        request = self.context.get('request')
+        return obj.get_entreprise_id(request)
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -65,7 +67,8 @@ class AdminUserSerializer(serializers.ModelSerializer):
         read_only_fields = ['date_joined', 'entreprise_nom']
 
     def get_entreprise_nom(self, obj):
-        ent = obj.get_entreprise()
+        request = self.context.get('request')
+        ent = obj.get_entreprise(request)
         return ent.nom if ent else None
 
     def validate_role(self, value):
@@ -96,7 +99,8 @@ class SuperAdminUserSerializer(serializers.ModelSerializer):
         read_only_fields = ['date_joined']
 
     def get_entreprise_nom(self, obj):
-        ent = obj.get_entreprise()
+        request = self.context.get('request')
+        ent = obj.get_entreprise(request)
         return ent.nom if ent else None
 
     def create(self, validated_data):

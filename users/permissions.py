@@ -1,13 +1,13 @@
 from rest_framework import permissions
 
 
-def is_authenticated_role(user):
-    """Utilisateur authentifié avec un rôle reconnu (superadmin, admin, user)."""
-    return (
-        user
-        and user.is_authenticated
-        and getattr(user, 'role', None) in ('superadmin', 'admin', 'user')
-    )
+def is_authenticated_role(user, request=None):
+    """Utilisateur authentifié avec un rôle : superadmin (is_superuser) ou au moins un Membership actif."""
+    if not user or not user.is_authenticated:
+        return False
+    if user.is_superuser:
+        return True
+    return user.get_current_membership(request) is not None
 
 
 class IsSuperAdmin(permissions.BasePermission):
@@ -23,14 +23,14 @@ class IsSuperAdmin(permissions.BasePermission):
 
 
 class IsAdmin(permissions.BasePermission):
-    """Administrateur d'entreprise uniquement."""
+    """Administrateur d'entreprise uniquement (Membership.role == 'admin')."""
     message = "Seuls les administrateurs peuvent effectuer cette action."
 
     def has_permission(self, request, view):
         return (
             request.user
             and request.user.is_authenticated
-            and request.user.is_admin()
+            and request.user.is_admin(request)
         )
 
 
@@ -45,7 +45,7 @@ class IsAdminOrUser(permissions.BasePermission):
         return (
             request.user
             and request.user.is_authenticated
-            and (request.user.is_admin() or request.user.is_agent())
+            and (request.user.is_admin(request) or request.user.is_agent(request))
         )
 
 
@@ -57,7 +57,7 @@ class IsSuperAdminOrAdmin(permissions.BasePermission):
         return (
             request.user
             and request.user.is_authenticated
-            and (request.user.is_superadmin() or request.user.is_admin())
+            and (request.user.is_superadmin() or request.user.is_admin(request))
         )
 
 
@@ -73,15 +73,15 @@ class IsAdminFullEnterpriseAndUsers(permissions.BasePermission):
         return (
             request.user
             and request.user.is_authenticated
-            and (request.user.is_superadmin() or request.user.is_admin())
+            and (request.user.is_superadmin() or request.user.is_admin(request))
         )
 
     def has_object_permission(self, request, view, obj):
         if request.user.is_superadmin():
             return True
-        if request.user.is_admin():
+        if request.user.is_admin(request):
             obj_eid = obj.get_entreprise_id() if hasattr(obj, 'get_entreprise_id') else getattr(obj, 'entreprise_id', None)
-            return obj_eid == request.user.get_entreprise_id()
+            return obj_eid == request.user.get_entreprise_id(request)
         return False
 
 
@@ -94,7 +94,7 @@ class IsSuperAdminOrReadOnlyAdmin(permissions.BasePermission):
             return False
         if request.user.is_superadmin():
             return True
-        if request.user.is_admin() and request.method in permissions.SAFE_METHODS:
+        if request.user.is_admin(request) and request.method in permissions.SAFE_METHODS:
             return True
         return False
 
@@ -126,10 +126,10 @@ class IsOwnerOrSameEnterprise(permissions.BasePermission):
     def has_object_permission(self, request, view, obj):
         if request.user.is_superadmin():
             return True
-        user_ent = request.user.get_entreprise()
+        user_ent = request.user.get_entreprise(request)
         if not user_ent:
             return False
-        if request.user.is_admin() or request.user.is_agent():
+        if request.user.is_admin(request) or request.user.is_agent(request):
             if hasattr(obj, 'get_entreprise_id'):
                 return obj.get_entreprise_id() == user_ent.id
             if hasattr(obj, 'entreprise'):
