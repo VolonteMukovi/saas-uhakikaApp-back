@@ -538,18 +538,28 @@ class UserViewSet(viewsets.ModelViewSet):
 
         if request.method == 'GET':
             entreprise_id = request.query_params.get('entreprise_id')
-            if not entreprise_id:
-                return Response(
-                    {'error': _('entreprise_id est requis (query param).')},
-                    status=status.HTTP_400_BAD_REQUEST,
+            if entreprise_id not in (None, ''):
+                try:
+                    entreprise_id = int(entreprise_id)
+                except (TypeError, ValueError):
+                    return Response(
+                        {'error': _('entreprise_id doit être un entier.')},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            else:
+                # Fallback : on utilise l'entreprise du premier membership actif de l'utilisateur
+                m_tmp = (
+                    Membership.objects.filter(user=target_user, is_active=True)
+                    .select_related('entreprise')
+                    .order_by('entreprise_id', 'id')
+                    .first()
                 )
-            try:
-                entreprise_id = int(entreprise_id)
-            except (TypeError, ValueError):
-                return Response(
-                    {'error': _('entreprise_id doit être un entier.')},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                if not m_tmp:
+                    return Response(
+                        {'error': _("Aucun membership actif pour cet utilisateur.")},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+                entreprise_id = m_tmp.entreprise_id
         else:
             entreprise_id = request.data.get('entreprise_id')
             if entreprise_id is None or entreprise_id == '':
@@ -586,19 +596,42 @@ class UserViewSet(viewsets.ModelViewSet):
                 .select_related('succursale')
                 .order_by('succursale_id')
             )
+            succursales_list = [
+                {
+                    'id': b.succursale_id,
+                    'nom': b.succursale.nom,
+                    'adresse': b.succursale.adresse,
+                }
+                for b in branches
+            ]
+
+            # Si default_succursale est renseignée mais qu'aucune UserBranch n'existe,
+            # on l'ajoute pour aider le frontend à simuler le cas "default".
+            default_sid = membership.default_succursale_id
+            if default_sid is not None and not any(s['id'] == default_sid for s in succursales_list):
+                default_succ = (
+                    Succursale.objects.filter(
+                        id=default_sid,
+                        entreprise_id=entreprise_id,
+                        is_active=True,
+                    )
+                    .first()
+                )
+                if default_succ:
+                    succursales_list.append(
+                        {
+                            'id': default_succ.id,
+                            'nom': default_succ.nom,
+                            'adresse': default_succ.adresse,
+                        }
+                    )
+
             return Response({
                 'user_id': target_user.id,
                 'entreprise_id': entreprise_id,
                 'membership_id': membership.id,
                 'default_succursale_id': membership.default_succursale_id,
-                'succursales': [
-                    {
-                        'id': b.succursale_id,
-                        'nom': b.succursale.nom,
-                        'adresse': b.succursale.adresse,
-                    }
-                    for b in branches
-                ],
+                'succursales': succursales_list,
             })
 
         # POST
