@@ -25,6 +25,9 @@ API_DESCRIPTION = """
 - `GET /api/entreprises/my_entreprise/` — entreprise du contexte.
 - `GET /api/entreprises/{id}/users/` — utilisateurs d’une entreprise.
 
+### Branding (logo, slogan) — une seule forme de lecture
+Le payload entreprise est le même partout : **`EntrepriseSerializer`** (champ `logo` en URL absolue si requête HTTP, `slogan`, etc.) sur `POST /api/auth/`, `POST /api/auth/select-context/`, `GET /api/users/me/`, `GET /api/entreprises/{id}/` et `GET /api/entreprises/my_entreprise/`. Les **agents** (`Membership.role=user`) ont **lecture seule** sur leur entreprise (pas de PATCH entreprise).
+
 ### Rôles
 - **Superadmin** : `is_superuser` (createsuperuser).
 - **Admin / Agent** : via `Membership.role` (`admin` ou `user`) pour chaque entreprise.

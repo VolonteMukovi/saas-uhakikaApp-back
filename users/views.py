@@ -17,6 +17,7 @@ from drf_yasg.utils import swagger_auto_schema
 from .serializers import UserSerializer, UserRegistrationSerializer, SuperAdminUserSerializer, AdminUserSerializer
 from .permissions import IsSuperAdmin, IsSuperAdminOrAdmin, IsAdminFullEnterpriseAndUsers
 from stock.models import Entreprise, Succursale
+from stock.serializers import entreprise_public_read_dict
 from .models import Membership, UserBranch
 
 # Durée max de la session (24 h) en secondes ; au-delà, l'utilisateur doit se reconnecter
@@ -33,6 +34,60 @@ def _add_context_to_token(refresh, membership):
     refresh["entreprise_id"] = membership.entreprise_id
     refresh["succursale_id"] = membership.default_succursale_id
     refresh["membership_id"] = membership.id
+
+
+def _succursales_for_membership(membership):
+    """
+    Succursales visibles pour ce membership :
+    - **admin** : toutes les succursales actives de l'entreprise (les admins n'ont en général pas de UserBranch).
+    - **user** (agent) : UserBranch actifs + default_succursale si absente de la liste.
+    Même forme que GET /api/users/{id}/succursales/ (liste d'objets {id, nom, adresse}).
+    """
+    if not membership:
+        return []
+    entreprise_id = membership.entreprise_id
+    if membership.role == 'admin':
+        return [
+            {
+                'id': s.id,
+                'nom': s.nom,
+                'adresse': s.adresse,
+            }
+            for s in Succursale.objects.filter(
+                entreprise_id=entreprise_id, is_active=True
+            ).order_by('id', 'nom')
+        ]
+    branches = (
+        UserBranch.objects.filter(membership=membership, is_active=True)
+        .select_related('succursale')
+        .order_by('succursale_id')
+    )
+    succursales_list = [
+        {
+            'id': b.succursale_id,
+            'nom': b.succursale.nom,
+            'adresse': b.succursale.adresse,
+        }
+        for b in branches
+    ]
+    default_sid = membership.default_succursale_id
+    if default_sid is not None and not any(s['id'] == default_sid for s in succursales_list):
+        default_succ = (
+            Succursale.objects.filter(
+                id=default_sid,
+                entreprise_id=entreprise_id,
+                is_active=True,
+            ).first()
+        )
+        if default_succ:
+            succursales_list.append(
+                {
+                    'id': default_succ.id,
+                    'nom': default_succ.nom,
+                    'adresse': default_succ.adresse,
+                }
+            )
+    return succursales_list
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -71,28 +126,27 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             .filter(user_id=self.user.id, is_active=True)
             .order_by('entreprise_id', 'id')
         )
+        req = self.context.get('request')
         entreprises = []
         for m in memberships:
             e = m.entreprise
             entreprises.append({
                 "membership_id": m.id,
-                "entreprise": {
-                    "id": e.id,
-                    "nom": e.nom,
-                    "secteur": e.secteur,
-                    "adresse": e.adresse,
-                    "telephone": e.telephone,
-                    "email": e.email,
-                    "responsable": e.responsable,
-                    "has_branches": getattr(e, "has_branches", False),
-                },
+                # Même payload lecture que GET /api/entreprises/{id}/ (logo URL absolue, slogan, etc.)
+                "entreprise": entreprise_public_read_dict(e, req),
                 "role": m.role,
                 "default_branch_id": m.default_succursale_id,
+                "succursales": _succursales_for_membership(m),
             })
 
         primary_entreprise = entreprises[0]["entreprise"] if entreprises else None
         user_data["entreprise"] = primary_entreprise
         user_data["enterprises"] = entreprises
+        # Succursales du premier membership (contexte JWT initial) — même structure que GET .../succursales/
+        user_data["succursales"] = (
+            _succursales_for_membership(first_m) if first_m else []
+        )
+        user_data["default_succursale_id"] = first_m.default_succursale_id if first_m else None
         data["user"] = user_data
         return data
 
@@ -105,7 +159,10 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         operation_summary="Connexion (JWT + profil utilisateur + contexte tenant)",
         operation_description=(
             "Retourne `access`, `refresh` et un objet `user` avec `entreprise`, `enterprises` "
-            "(memberships actifs). Les claims du refresh incluent entreprise_id / succursale_id / membership_id."
+            "(memberships actifs, chacun avec `succursales`), plus `succursales` / `default_succursale_id` "
+            "pour le premier membership (contexte initial). Chaque `entreprise` reprend le même schéma lecture que "
+            "`GET /api/entreprises/{id}/` (logo en URL absolue, slogan, etc.). Les claims du refresh incluent "
+            "entreprise_id / succursale_id / membership_id."
         ),
         tags=['Authentification'],
         responses={
@@ -262,11 +319,9 @@ def select_context(request):
             'entreprise_id': entreprise_id,
             'succursale_id': succursale_id,
             'membership_id': membership.id,
-            'entreprise': {
-                'id': membership.entreprise.id,
-                'nom': membership.entreprise.nom,
-                'has_branches': getattr(membership.entreprise, 'has_branches', False),
-            },
+            'default_succursale_id': membership.default_succursale_id,
+            'succursales': _succursales_for_membership(membership),
+            'entreprise': entreprise_public_read_dict(membership.entreprise, request),
         },
     }
     return Response(data, status=status.HTTP_200_OK)
@@ -591,47 +646,12 @@ class UserViewSet(viewsets.ModelViewSet):
             )
 
         if request.method == 'GET':
-            branches = (
-                UserBranch.objects.filter(membership=membership, is_active=True)
-                .select_related('succursale')
-                .order_by('succursale_id')
-            )
-            succursales_list = [
-                {
-                    'id': b.succursale_id,
-                    'nom': b.succursale.nom,
-                    'adresse': b.succursale.adresse,
-                }
-                for b in branches
-            ]
-
-            # Si default_succursale est renseignée mais qu'aucune UserBranch n'existe,
-            # on l'ajoute pour aider le frontend à simuler le cas "default".
-            default_sid = membership.default_succursale_id
-            if default_sid is not None and not any(s['id'] == default_sid for s in succursales_list):
-                default_succ = (
-                    Succursale.objects.filter(
-                        id=default_sid,
-                        entreprise_id=entreprise_id,
-                        is_active=True,
-                    )
-                    .first()
-                )
-                if default_succ:
-                    succursales_list.append(
-                        {
-                            'id': default_succ.id,
-                            'nom': default_succ.nom,
-                            'adresse': default_succ.adresse,
-                        }
-                    )
-
             return Response({
                 'user_id': target_user.id,
                 'entreprise_id': entreprise_id,
                 'membership_id': membership.id,
                 'default_succursale_id': membership.default_succursale_id,
-                'succursales': succursales_list,
+                'succursales': _succursales_for_membership(membership),
             })
 
         # POST

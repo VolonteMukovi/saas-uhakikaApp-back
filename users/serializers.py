@@ -1,19 +1,25 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.utils.translation import gettext as _
-from stock.serializers import EntrepriseSerializer
+from stock.serializers import EntrepriseSerializer, entreprise_public_read_dict
 
 
 class UserSerializer(serializers.ModelSerializer):
     """Serializer de base pour les utilisateurs (entreprise via Membership)."""
     entreprise_nom = serializers.SerializerMethodField()
     entreprise_id = serializers.SerializerMethodField()
+    entreprise = serializers.SerializerMethodField()
 
     class Meta:
         model = get_user_model()
         fields = ['id', 'username', 'email', 'first_name', 'last_name', 'role',
-                  'entreprise_id', 'entreprise_nom', 'is_active', 'date_joined']
+                  'entreprise_id', 'entreprise_nom', 'entreprise', 'is_active', 'date_joined']
         read_only_fields = ['role', 'date_joined']
+
+    def get_entreprise(self, obj):
+        request = self.context.get('request')
+        ent = obj.get_entreprise(request)
+        return entreprise_public_read_dict(ent, request)
 
     def get_entreprise_nom(self, obj):
         request = self.context.get('request')
@@ -58,13 +64,19 @@ class AdminUserSerializer(serializers.ModelSerializer):
     Serializer pour l'Admin : gestion des utilisateurs de son entreprise.
     """
     entreprise_nom = serializers.SerializerMethodField()
+    entreprise = serializers.SerializerMethodField()
     password = serializers.CharField(write_only=True, required=False, min_length=8)
 
     class Meta:
         model = get_user_model()
         fields = ['id', 'username', 'email', 'first_name', 'last_name', 'role',
-                  'entreprise_nom', 'is_active', 'date_joined', 'password']
+                  'entreprise_nom', 'entreprise', 'is_active', 'date_joined', 'password']
         read_only_fields = ['date_joined', 'entreprise_nom']
+
+    def get_entreprise(self, obj):
+        request = self.context.get('request')
+        ent = obj.get_entreprise(request)
+        return entreprise_public_read_dict(ent, request)
 
     def get_entreprise_nom(self, obj):
         request = self.context.get('request')

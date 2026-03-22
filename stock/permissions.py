@@ -9,7 +9,8 @@ class EntreprisePermission(permissions.BasePermission):
     entreprise), tout en respectant la séparation entre entreprises.
     - SuperAdmin : Read (list, retrieve) + Delete uniquement. Pas de Create ni Update.
     - Admin : CRUD complet sur sa propre entreprise uniquement (get_queryset restreint à son entreprise).
-    - User (Agent) : aucun accès.
+    - User (Agent) : lecture seule (GET/HEAD/OPTIONS) sur **son** entreprise (JWT / membership),
+      pour le branding (logo, slogan, etc.) — pas de create/update/delete.
     """
 
     message = "Vous n'avez pas les droits nécessaires sur les entreprises."
@@ -35,6 +36,10 @@ class EntreprisePermission(permissions.BasePermission):
         if user.is_admin(request):
             return True
 
+        # Agent : lecture seule sur le viewset (retrieve/list filtré par get_queryset)
+        if user.is_agent(request) and request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return user.get_current_membership(request) is not None
+
         # Utilisateur connecté sans rôle admin : autoriser seulement la création
         if request.method == 'POST':
             return True
@@ -44,8 +49,12 @@ class EntreprisePermission(permissions.BasePermission):
     def has_object_permission(self, request, view, obj):
         if request.user.is_superadmin():
             return request.method in ('GET', 'HEAD', 'OPTIONS', 'DELETE')
+        eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id(request)
+        # Membre (admin ou agent) : lecture de sa propre entreprise uniquement
+        if request.method in ('GET', 'HEAD', 'OPTIONS') and eid is not None and getattr(obj, 'id', None) == eid:
+            if request.user.is_admin(request) or request.user.is_agent(request):
+                return True
         if request.user.is_admin(request) and hasattr(obj, 'id'):
-            eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id(request)
             return eid == obj.id
         return False
 

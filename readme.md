@@ -431,6 +431,34 @@ Remarque sécurité :
 
 ---
 
+## 8 bis. Bénéfices totaux (`GET /api/entrees/benefices-totaux/`) — **obligatoirement contextualisé**
+
+Cet endpoint agrège les enregistrements `BeneficeLot` **uniquement** pour :
+
+- l’**`entreprise_id`** portée par le JWT (`login` / `select-context`) ;
+- et, si le token contient une **`succursale_id`**, **uniquement** les lots dont l’**entrée** (`Entree`) est rattachée à cette succursale.
+
+**Sans contexte entreprise** (pas de `entreprise_id` / membership utilisable) → **400** avec un message explicite.
+
+### Appel frontend
+
+1. S’assurer que l’utilisateur a un **access token** valide **après** `POST /api/auth/` et idéalement **`POST /api/auth/select-context/`** avec `entreprise_id` (et `succursale_id` si vous voulez un périmètre succursale).
+2. Requête :
+
+```http
+GET /api/entrees/benefices-totaux/?year=2026&month=3
+Authorization: Bearer <access>
+```
+
+3. Interpréter la réponse :
+   - `resume` : totaux du mois **pour le tenant courant uniquement** ;
+   - `benefices_par_article` : top 10 articles (déjà filtré) ;
+   - `details.entreprise_id` / `details.succursale_id` : rappel du **périmètre** appliqué (le front peut l’afficher ou le logger pour debug).
+
+**Important :** ne pas appeler cet URL sans token ni avec un utilisateur sans entreprise : vous obtiendrez **400**, pas des données “globales”.
+
+---
+
 ## 9. Flux recommandé côté frontend (nouvel utilisateur)
 
 1. **Inscription**  

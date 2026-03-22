@@ -65,10 +65,42 @@ class EntrepriseSerializer(serializers.ModelSerializer):
     """
     CRUD entreprise. Tous les champs sont éditables par l'Admin (logo, email, slogan, etc.).
     Les mises à jour partielles (PATCH) sont supportées pour modifier un ou plusieurs champs.
+    En lecture, `logo` est une URL absolue si `request` est dans le contexte (branding UI).
     """
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        if request is not None:
+            if getattr(instance, 'logo', None) and instance.logo:
+                try:
+                    url = instance.logo.url
+                    data['logo'] = (
+                        request.build_absolute_uri(url)
+                        if url and not url.startswith('http')
+                        else url
+                    )
+                except ValueError:
+                    data['logo'] = None
+            else:
+                data['logo'] = None
+        return data
+
     class Meta:
         model = Entreprise
         fields = '__all__'
+
+
+def entreprise_public_read_dict(entreprise, request=None):
+    """
+    Représentation lecture unique pour branding / auth / profil :
+    même payload que GET /api/entreprises/{id}/ (EntrepriseSerializer + URL logo).
+    """
+    if entreprise is None:
+        return None
+    return EntrepriseSerializer(
+        entreprise, context={'request': request} if request else {}
+    ).data
 
 
 class SuccursaleSerializer(serializers.ModelSerializer):

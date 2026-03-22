@@ -407,7 +407,7 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
     Gestion des entreprises.
     - SuperAdmin : Read (list, retrieve) + Delete uniquement. Pas de Create ni Update.
     - Admin : CRUD sur sa propre entreprise.
-    - User (Agent) : aucun accès.
+    - User (Agent) : lecture seule (retrieve/list) sur son entreprise (branding : logo, slogan, etc.).
     """
     queryset = Entreprise.objects.all()
     serializer_class = EntrepriseSerializer
@@ -419,7 +419,7 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
             return Entreprise.objects.none()
         if user.is_superadmin():
             return Entreprise.objects.all().order_by('-id')
-        if user.is_admin(self.request):
+        if user.is_admin(self.request) or user.is_agent(self.request):
             eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id(self.request)
             if eid:
                 return Entreprise.objects.filter(id=eid).order_by('-id')
@@ -471,16 +471,16 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
             instance.delete()
 
     @swagger_auto_schema(
-        operation_summary="Mon entreprise (contexte JWT / admin)",
-        operation_description="Retourne l'entreprise du contexte courant pour un admin ; message si superadmin.",
+        operation_summary="Mon entreprise (contexte JWT / admin ou agent)",
+        operation_description="Retourne l'entreprise du contexte courant (admin ou agent) ; message si superadmin.",
         responses={200: openapi.Response('Détail entreprise ou message'), 400: 'Aucune entreprise'},
     )
     @action(detail=False, methods=['get'])
     def my_entreprise(self, request):
-        """Récupérer l'entreprise de l'utilisateur connecté (pour admin)."""
+        """Récupérer l'entreprise de l'utilisateur connecté (admin ou agent, lecture)."""
         eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id(request)
         ent = Entreprise.objects.filter(id=eid).first() if eid else request.user.get_entreprise(request)
-        if request.user.is_admin(request) and ent:
+        if (request.user.is_admin(request) or request.user.is_agent(request)) and ent:
             serializer = self.get_serializer(ent)
             return Response(serializer.data)
         if request.user.is_superadmin():
@@ -2317,12 +2317,26 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
     def benefices_totaux(self, request):
         """
         Retourne les bénéfices totaux des lots vendus, avec filtre optionnel par mois/année.
+        **Isolation multi-tenant :** uniquement les `BeneficeLot` dont le lot d'entrée appartient à
+        l'entreprise du JWT ; si `succursale_id` est présent dans le token, filtre aussi par cette succursale.
         Par défaut : mois et année en cours.
         GET /api/entrees/benefices-totaux/
         Query params: month (1-12), year (ex: 2026). Omis = mois et année courants.
         """
-        from django.db.models import Sum, Count, Q
-        
+        from django.db.models import Sum, Count
+
+        tenant_id, branch_id = self.get_tenant_ids()
+        if tenant_id is None:
+            return Response(
+                {
+                    'error': _(
+                        'Contexte entreprise manquant. Utilisez un JWT avec entreprise_id / membership_id '
+                        '(ex. login puis select-context).'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         now = timezone.now()
         try:
             year = int(request.query_params.get('year', now.year))
@@ -2333,21 +2347,24 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             month = now.month
         if year < 1900 or year > 2100:
             year = now.year
-        
-        # Bénéfices totaux filtrés par mois/année (sur date_calcul = date d'enregistrement du bénéfice)
+
+        # Base : période + entreprise (via le lot → entrée) ; succursale si contexte JWT défini
         benefices = BeneficeLot.objects.filter(
             date_calcul__year=year,
-            date_calcul__month=month
+            date_calcul__month=month,
+            lot_entree__entree__entreprise_id=tenant_id,
         )
-        
+        if branch_id is not None:
+            benefices = benefices.filter(lot_entree__entree__succursale_id=branch_id)
+
         total_benefice = benefices.aggregate(
             total=Sum('benefice_total')
         )['total'] or Decimal('0.00')
-        
+
         total_gain = benefices.filter(benefice_total__gte=0).aggregate(
             total=Sum('benefice_total')
         )['total'] or Decimal('0.00')
-        
+
         # Pertes : on n'inclut PAS les ventes à crédit (EN_CREDIT) car ce n'est pas une perte définitive ;
         # le client doit rembourser ; la perte ne sera éventuellement considérée qu'au remboursement.
         benefices_perte = benefices.filter(benefice_total__lt=0).exclude(
@@ -2356,36 +2373,36 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         total_perte = abs(benefices_perte.aggregate(
             total=Sum('benefice_total')
         )['total'] or Decimal('0.00'))
-        
+
         nombre_lots_gagnants = benefices.filter(benefice_total__gte=0).count()
         nombre_lots_perdants = benefices_perte.count()
         nombre_lots_total = benefices.count()
-        
-        # Bénéfices par article
-        benefices_par_article = {}
-        for benefice in benefices.select_related('lot_entree__article'):
-            article_id = benefice.lot_entree.article.article_id
-            if article_id not in benefices_par_article:
-                benefices_par_article[article_id] = {
-                    'article_id': article_id,
-                    'nom': benefice.lot_entree.article.nom_scientifique,
-                    'benefice_total': Decimal('0.00'),
-                    'nombre_lots': 0
-                }
-            benefices_par_article[article_id]['benefice_total'] += benefice.benefice_total
-            benefices_par_article[article_id]['nombre_lots'] += 1
-        
-        # Convertir en liste
+
+        # Top 10 articles par bénéfice (agrégation SQL, pas de boucle Python sur tous les lots)
+        par_article_qs = (
+            benefices.values(
+                'lot_entree__article_id',
+                'lot_entree__article__nom_scientifique',
+            )
+            .annotate(
+                benefice_total_agg=Sum('benefice_total'),
+                nombre_lots=Count('id'),
+            )
+            .order_by('-benefice_total_agg')[:10]
+        )
         benefices_par_article_list = [
             {
-                **data,
-                'benefice_total': str(data['benefice_total'])
+                'article_id': row['lot_entree__article_id'],
+                'nom': row['lot_entree__article__nom_scientifique'] or '',
+                'benefice_total': str(row['benefice_total_agg'] or Decimal('0')),
+                'nombre_lots': row['nombre_lots'],
             }
-            for data in benefices_par_article.values()
+            for row in par_article_qs
         ]
-        
-        # Trier par bénéfice décroissant
-        benefices_par_article_list.sort(key=lambda x: Decimal(x['benefice_total']), reverse=True)
+
+        nombre_articles_distincts = (
+            benefices.values('lot_entree__article_id').distinct().count()
+        )
         
         # Évaluation de la performance
         if total_benefice > 0:
@@ -2416,14 +2433,16 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 'message': message,
                 'benefice_total': str(total_benefice)
             },
-            'benefices_par_article': benefices_par_article_list[:10],  # Top 10
+            'benefices_par_article': benefices_par_article_list,
             'details': {
-                'nombre_articles': len(benefices_par_article_list),
+                'entreprise_id': tenant_id,
+                'succursale_id': branch_id,
+                'nombre_articles': nombre_articles_distincts,
                 'date_calcul': timezone.now().isoformat(),
                 'mois': month,
                 'annee': year,
-                'periode': f"{year}-{month:02d}"
-            }
+                'periode': f"{year}-{month:02d}",
+            },
         })
 
     def update(self, request, *args, **kwargs):
