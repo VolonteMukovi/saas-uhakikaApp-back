@@ -215,6 +215,11 @@ class Client(models.Model):
     telephone = models.CharField(max_length=50, blank=True, null=True)
     adresse = models.CharField(max_length=255, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
+    is_special = models.BooleanField(
+        default=False,
+        verbose_name='Client spécial',
+        help_text='Si vrai, client priorisé dans les rapports (ex. dettes) par défaut.',
+    )
     date_enregistrement = models.DateTimeField(auto_now_add=True)
     entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='clients', null=True, blank=True)
     succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='clients', null=True, blank=True)
@@ -225,6 +230,7 @@ class Client(models.Model):
             models.Index(fields=['entreprise_id']),
             models.Index(fields=['succursale_id']),
             models.Index(fields=['entreprise_id', 'succursale_id']),
+            models.Index(fields=['entreprise_id', 'is_special']),
         ]
 
     def __str__(self):

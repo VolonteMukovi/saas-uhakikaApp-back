@@ -7,7 +7,7 @@ Ce document décrit le flux chronologique des scénarios utilisateur (création 
 **Authentification :** JWT. Après login, envoyer le header :
 `Authorization: Bearer <access>`
 
-### Documentation interactive (Swagger & ReDoc)
+### Documentation interactive (Swagger & ReDoc)h
 
 - **Swagger UI :** `http://127.0.0.1:8000/swagger/` — tester les endpoints, bouton **Authorize** pour coller `Bearer <access_token>`.
 - **ReDoc :** `http://127.0.0.1:8000/redoc/` — même schéma, lecture plus linéaire.
@@ -456,6 +456,53 @@ Authorization: Bearer <access>
    - `details.entreprise_id` / `details.succursale_id` : rappel du **périmètre** appliqué (le front peut l’afficher ou le logger pour debug).
 
 **Important :** ne pas appeler cet URL sans token ni avec un utilisateur sans entreprise : vous obtiendrez **400**, pas des données “globales”.
+
+---
+
+## 8 ter. Clients `is_special` et rapports **dettes** (multi-tenant inchangé)
+
+### Modèle & CRUD `/api/clients/`
+
+- Champ **`is_special`** (booléen, défaut **`false`**) : `true` = client spécial, `false` = client standard.
+- **Création / mise à jour** : inclure dans le JSON body, ex. `{ "nom": "…", "is_special": true, … }` (les autres champs habituels inchangés ; `id` reste généré côté serveur en création).
+- **Liste / détail** : le champ est renvoyé dans la réponse. Les objets `client` imbriqués (ex. sorties, dettes) utilisent le même serializer et exposent aussi `is_special`.
+- **Filtre liste (optionnel)** :  
+  `GET /api/clients/?is_special=true` ou `?is_special=false`  
+  Sans ce paramètre, la liste retourne **tous** les clients du tenant (comportement API classique).
+
+Le filtrage **entreprise** / **succursale** reste celui du `TenantFilterMixin` (comme ailleurs).
+
+### Rapports dettes — paramètre query `is_special`
+
+Endpoints concernés :  
+`GET /api/rapports/clients-dettes-general/` (et PDF),  
+`GET /api/rapports/clients-dettes/` (et PDF) avec `client_id`.
+
+Comportement **métier** (toujours limité à l’entreprise / succursale courante) :
+
+| Situation | Effet |
+|-----------|--------|
+| **Pas de paramètre** `is_special` | Uniquement les clients **spéciaux** (`is_special=true`) |
+| `is_special=true` | Idem : uniquement clients spéciaux |
+| `is_special=false` | Uniquement clients **non** spéciaux |
+| `is_special=all` (ou `both`, `*`, `any`, `tous`) | **Tous** les clients du tenant (avec dettes selon les autres filtres) |
+
+- **clients-dettes détail** : si le client demandé ne correspond pas au filtre (ex. client standard alors que le défaut = spéciaux seulement), réponse **404** avec message explicite — utiliser `is_special=all` pour consulter n’importe quel client du tenant.
+- Les objets client dans le JSON incluent **`is_special`** pour affichage / tri côté UI.
+
+**Exemples front :**
+
+```http
+# Rapport général : priorité clients spéciaux (défaut)
+GET /api/rapports/clients-dettes-general/?date_debut=2025-01-01
+Authorization: Bearer <access>
+
+# Tous les clients avec dettes
+GET /api/rapports/clients-dettes-general/?is_special=all
+
+# Fiche dettes d’un client standard (sinon 404 avec filtre par défaut)
+GET /api/rapports/clients-dettes/?client_id=CLI0005&is_special=all
+```
 
 ---
 

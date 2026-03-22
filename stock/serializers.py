@@ -716,6 +716,6 @@ class ClientDettesTotalSerializer(serializers.ModelSerializer):
     total_dettes = serializers.SerializerMethodField()
     class Meta:
         model = Client
-        fields = ['id', 'nom', 'telephone', 'total_dettes']
+        fields = ['id', 'nom', 'telephone', 'is_special', 'total_dettes']
     def get_total_dettes(self, obj):
         return sum([d.solde_restant for d in obj.dettes.all()])

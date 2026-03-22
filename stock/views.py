@@ -3570,7 +3570,17 @@ class ClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
     serializer_class = ClientSerializer
 
     def get_queryset(self):
-        return super().get_queryset().order_by('-date_enregistrement', '-id')
+        qs = super().get_queryset().order_by('-date_enregistrement', '-id')
+        # Liste : filtre optionnel ?is_special=true|false (strictement sur la liste)
+        if getattr(self, 'action', None) == 'list':
+            raw = self.request.query_params.get('is_special')
+            if raw is not None:
+                v = str(raw).strip().lower()
+                if v in ('true', '1', 'yes', 'oui'):
+                    qs = qs.filter(is_special=True)
+                elif v in ('false', '0', 'no', 'non'):
+                    qs = qs.filter(is_special=False)
+        return qs
 
     @action(detail=True, methods=['get'])
     def dettes(self, request, pk=None):

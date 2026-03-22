@@ -34,6 +34,35 @@ from .utils.pdf_generator import PDFGenerator
 from .utils.entete import get_entete_entreprise
 
 
+def _dettes_rapport_is_special_filter(request):
+    """
+    Filtre « client spécial » pour les rapports dettes (query string, pas body).
+    - Param absent : uniquement clients spéciaux (is_special=True), comme demandé métier.
+    - is_special=true : spéciaux uniquement.
+    - is_special=false : clients standards uniquement.
+    - is_special=all (ou both, *, any, tous) : tous les clients (sans filtre sur is_special).
+
+    Returns:
+        dict: {'is_special': bool} à passer à Client.objects.filter(**dict)
+        None: aucun filtre sur is_special
+    Raises:
+        ValueError: paramètre non reconnu
+    """
+    raw = request.query_params.get('is_special')
+    if raw is None:
+        return {'is_special': True}
+    raw_l = str(raw).strip().lower()
+    if raw_l in ('all', 'both', '*', 'any', 'tous'):
+        return None
+    if raw_l in ('true', '1', 'yes', 'oui'):
+        return {'is_special': True}
+    if raw_l in ('false', '0', 'no', 'non'):
+        return {'is_special': False}
+    raise ValueError(
+        _('Paramètre is_special invalide pour ce rapport. Utilisez: true, false, ou all.')
+    )
+
+
 class RapportsViewSet(viewsets.ViewSet):
     """
     ViewSet pour la génération des différents rapports.
@@ -333,10 +362,19 @@ class RapportsViewSet(viewsets.ViewSet):
         - client_id: ID du client (ex: CLI0001)
         
         GET /api/rapports/clients-dettes/?client_id=CLI0001
+
+        Filtre is_special (query) — même logique que clients-dettes-general :
+        par défaut (param absent) seuls les clients spéciaux sont visibles ;
+        is_special=all pour tout client du tenant ; true / false pour forcer le périmètre.
         """
         user = request.user
         entreprise = user.get_entreprise(request)
         eid, branch_id = self._get_tenant_ids_strict(request)
+
+        try:
+            special_kw = _dettes_rapport_is_special_filter(request)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         # Récupérer le client_id depuis les paramètres de requête
         client_id = request.query_params.get('client_id')
@@ -357,6 +395,13 @@ class RapportsViewSet(viewsets.ViewSet):
         except Client.DoesNotExist:
             return Response({
                 'error': f'Client avec ID "{client_id}" non trouvé'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        if special_kw is not None and client.is_special != special_kw['is_special']:
+            return Response({
+                'error': _(
+                    'Client non trouvé ou hors du périmètre du filtre is_special pour ce rapport.'
+                )
             }, status=status.HTTP_404_NOT_FOUND)
 
         clients_data = []
@@ -428,6 +473,7 @@ class RapportsViewSet(viewsets.ViewSet):
             'telephone': c.telephone,
             'adresse': c.adresse,
             'email': c.email,
+            'is_special': c.is_special,
             'date_enregistrement': c.date_enregistrement.strftime('%Y-%m-%d %H:%M') if c.date_enregistrement else None,
             'dettes': dettes,
             'totaux_encours': {
@@ -483,10 +529,20 @@ class RapportsViewSet(viewsets.ViewSet):
         GET /api/rapports/clients-dettes-general/
         GET /api/rapports/clients-dettes-general/?date_debut=2025-01-01
         GET /api/rapports/clients-dettes-general/?date_debut=2025-01-01&date_fin=2025-12-31
+
+        Filtre is_special (query) :
+        - absent → uniquement clients spéciaux (is_special=true) ;
+        - is_special=true / false → périmètre explicite ;
+        - is_special=all → tous les clients (spéciaux + standards), toujours scoping entreprise/succursale.
         """
         user = request.user
         entreprise = user.get_entreprise(request)
         eid, branch_id = self._get_tenant_ids_strict(request)
+
+        try:
+            special_kw = _dettes_rapport_is_special_filter(request)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         from stock.models import Client, DetteClient
         from decimal import Decimal
@@ -546,6 +602,9 @@ class RapportsViewSet(viewsets.ViewSet):
         if user.is_agent(request) and branch_id is not None:
             clients_avec_dettes = clients_avec_dettes.filter(dettes__succursale_id=branch_id)
 
+        if special_kw is not None:
+            clients_avec_dettes = clients_avec_dettes.filter(**special_kw)
+
         # Appliquer le filtre de date sur les dettes si nécessaire
         if date_debut_obj or date_fin_obj:
             if date_debut_obj:
@@ -597,6 +656,7 @@ class RapportsViewSet(viewsets.ViewSet):
                     'telephone': client.telephone or '',
                     'adresse': client.adresse or '',
                     'email': client.email or '',
+                    'is_special': client.is_special,
                     'totaux_encours': {
                         'montant_total': str(tot_montant_client.quantize(Decimal('0.01'))),
                         'montant_paye': str(tot_paye_client.quantize(Decimal('0.01'))),
