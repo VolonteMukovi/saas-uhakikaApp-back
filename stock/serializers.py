@@ -1,9 +1,12 @@
 from rest_framework import serializers
 from .models import (
-    Entreprise, Succursale, Devise, TypeArticle, SousTypeArticle, Unite, Article, Entree, LigneEntree, Stock, Sortie, LigneSortie, LigneSortieLot, BeneficeLot, MouvementCaisse, Client, DetteClient, PaiementDette
+    Entreprise, Succursale, Devise, TypeArticle, SousTypeArticle, Unite, Article, Entree, LigneEntree, Stock, Sortie, LigneSortie, LigneSortieLot, BeneficeLot, MouvementCaisse, Client, DetteClient, TypeCaisse, DetailMouvementCaisse,
 )
 from django.db import transaction, models
 from django.utils.translation import gettext as _
+
+from stock.services.article_names import article_duplicate_exists, normalize_nom_scientifique
+from stock.services.tenant_context import get_tenant_ids
 
 
 class DeviseSerializer(serializers.ModelSerializer):
@@ -48,6 +51,38 @@ class ArticleSerializer(serializers.ModelSerializer):
             return TypeArticleSerializer(obj.sous_type_article.type_article).data
         return None
 
+    def validate_nom_scientifique(self, value):
+        if value is None or not str(value).strip():
+            raise serializers.ValidationError(_('Le nom scientifique est obligatoire.'))
+        return ' '.join(str(value).split())
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        nom = attrs.get('nom_scientifique')
+        if self.instance is not None and nom is None:
+            nom = self.instance.nom_scientifique
+        if not nom:
+            return attrs
+        norm = normalize_nom_scientifique(nom)
+        if not norm:
+            raise serializers.ValidationError({
+                'nom_scientifique': _('Le nom scientifique ne peut pas être vide ou ne contenir que des espaces.'),
+            })
+        if not request or not getattr(request, 'user', None) or not request.user.is_authenticated:
+            return attrs
+        tenant_id, branch_id = get_tenant_ids(request)
+        if tenant_id is None:
+            return attrs
+        exclude_id = self.instance.pk if self.instance is not None else None
+        if article_duplicate_exists(tenant_id, branch_id, norm, exclude_article_id=exclude_id):
+            raise serializers.ValidationError({
+                'nom_scientifique': _(
+                    'Un article portant ce nom scientifique existe déjà pour votre entreprise '
+                    'ou cette succursale. Modifiez le nom ou utilisez l’article existant.'
+                ),
+            })
+        return attrs
+
     class Meta:
         model = Article
         fields = [
@@ -60,6 +95,16 @@ class ArticleSerializer(serializers.ModelSerializer):
             'unite',
             'unite_id',
         ]
+
+
+class ArticleSearchSerializer(ArticleSerializer):
+    """Article + score de pertinence (recherche FULLTEXT / fallback)."""
+
+    relevance = serializers.FloatField(read_only=True)
+
+    class Meta(ArticleSerializer.Meta):
+        fields = ArticleSerializer.Meta.fields + ['relevance']
+
 
 class EntrepriseSerializer(serializers.ModelSerializer):
     """
@@ -210,6 +255,15 @@ class ClientSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+class ClientSearchSerializer(ClientSerializer):
+    """Client + score de pertinence (recherche FULLTEXT / fallback)."""
+
+    relevance = serializers.FloatField(read_only=True)
+
+    class Meta(ClientSerializer.Meta):
+        fields = [f.name for f in Client._meta.fields] + ['relevance']
+
+
 class SortieSerializer(serializers.ModelSerializer):
     """
     Serializer pour Sortie.
@@ -238,6 +292,8 @@ class SortieSerializer(serializers.ModelSerializer):
 
         sortie = Sortie.objects.create(
             motif=validated_data.get('motif', ''),
+            statut=validated_data.get('statut', 'PAYEE'),
+            client=validated_data.get('client'),
         )
 
         for ligne in lignes_data:
@@ -570,59 +626,120 @@ class EntreeSerializer(serializers.ModelSerializer):
 
 
 
+class TypeCaisseSerializer(serializers.ModelSerializer):
+    """CRUD types de caisse (canal d'encaissement)."""
+
+    class Meta:
+        model = TypeCaisse
+        fields = ['id', 'libelle', 'description', 'image', 'entreprise', 'succursale', 'is_active', 'created_at']
+        read_only_fields = ['created_at', 'entreprise']
+
+
+class DetailMouvementCaisseSerializer(serializers.ModelSerializer):
+    type_caisse = TypeCaisseSerializer(read_only=True)
+    type_caisse_id = serializers.PrimaryKeyRelatedField(
+        queryset=TypeCaisse.objects.all(), source='type_caisse', write_only=True, required=False, allow_null=True
+    )
+
+    class Meta:
+        model = DetailMouvementCaisse
+        fields = ['id', 'type_caisse', 'type_caisse_id', 'montant', 'motif_explicite', 'reference_piece']
+
+
 class MouvementCaisseSerializer(serializers.ModelSerializer):
     """
-    Serializer pour MouvementCaisse.
-    En lecture, le champ devise retourne l'objet complet (sérialisé),
-    en écriture il accepte l'id via devise_id OU devise (pour compatibilité frontend).
+    Mouvement de caisse : montant, devise, type, ``motif``, ``moyen`` (logique simple, sans ventilation obligatoire).
+    ``details`` en lecture seulement si d'anciennes lignes multicaisse existent encore en base.
+    ``resume`` = même texte que ``motif_affiche`` (motif, ou anciens détails concaténés).
     """
     devise = DeviseSerializer(read_only=True)
     devise_id = serializers.PrimaryKeyRelatedField(
-        queryset=Devise.objects.all(), 
-        source='devise', 
-        write_only=True, 
-        required=False, 
-        allow_null=False
+        queryset=Devise.objects.all(),
+        source='devise',
+        write_only=True,
+        required=False,
+        allow_null=False,
     )
+    details = DetailMouvementCaisseSerializer(many=True, read_only=True)
+    resume = serializers.SerializerMethodField(read_only=True)
+    content_type_modele = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = MouvementCaisse
         fields = [
-            'id','date','montant','devise','devise_id','type','motif','moyen','reference_piece','sortie','entree'
+            'id', 'date', 'montant', 'devise', 'devise_id', 'type', 'motif', 'moyen', 'resume',
+            'content_type_modele', 'object_id', 'utilisateur', 'reference_piece', 'sortie', 'entree',
+            'details',
         ]
-        read_only_fields = ['id','date']
+        read_only_fields = ['id', 'date', 'object_id', 'utilisateur']
+
+    def get_resume(self, obj):
+        return obj.motif_affiche()
+
+    def get_content_type_modele(self, obj):
+        return obj.content_type.model if obj.content_type_id else None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Filtrer les devises par entreprise si on a accès au request
-        if 'request' in self.context and hasattr(self.context['request'], 'user'):
-            user = self.context['request'].user
-            self.fields['devise_id'].queryset = Devise.objects.filter(est_principal=True)
+        req = self.context.get('request')
+        if req and getattr(req.user, 'is_authenticated', False):
+            eid = getattr(req, 'tenant_id', None) or (
+                req.user.get_entreprise_id(req) if hasattr(req.user, 'get_entreprise_id') else None
+            )
+            if eid:
+                self.fields['devise_id'].queryset = Devise.objects.filter(entreprise_id=eid)
 
     def validate(self, attrs):
-        if attrs.get('montant') and attrs['montant'] <= 0:
-            raise serializers.ValidationError(_('Le montant doit être > 0'))
-        
-        # Après to_internal_value, la devise devrait être dans attrs['devise']
-        if not attrs.get('devise'):
+        m = attrs.get('montant')
+        if m is not None and m < 0:
+            raise serializers.ValidationError(_('Le montant ne peut pas être négatif.'))
+        if not attrs.get('devise') and not self.instance:
             raise serializers.ValidationError(_('Le champ devise est obligatoire pour le mouvement de caisse.'))
-        
         return attrs
 
     def to_internal_value(self, data):
-        # Si le frontend envoie 'devise' au lieu de 'devise_id', on fait la conversion
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        else:
+            data = dict(data)
         if 'devise' in data and 'devise_id' not in data:
-            # Créer une copie modifiable des données
-            if hasattr(data, 'copy'):
-                data = data.copy()
-            else:
-                # Si c'est un dict normal ou QueryDict non mutable
-                data = dict(data)
-            
-            # Convertir 'devise' en 'devise_id'
             data['devise_id'] = data.pop('devise')
-        
         return super().to_internal_value(data)
+
+    @transaction.atomic
+    def create(self, validated_data):
+        from stock.services.caisse import creer_mouvement_caisse
+
+        tenant_id = validated_data.pop('entreprise_id', None)
+        branch_id = validated_data.pop('succursale_id', None)
+        devise = validated_data.pop('devise')
+        type_m = validated_data.pop('type')
+        montant = validated_data.pop('montant')
+        motif = (validated_data.pop('motif', None) or '').strip()
+        moyen = validated_data.pop('moyen', None)
+        if moyen is not None:
+            moyen = (moyen or '').strip() or None
+        ref = (validated_data.pop('reference_piece', None) or '') or ''
+
+        req = self.context.get('request')
+        if tenant_id is None and req and req.user.is_authenticated and hasattr(req.user, 'get_entreprise_id'):
+            tenant_id = getattr(req, 'tenant_id', None) or req.user.get_entreprise_id(req)
+        if branch_id is None and req:
+            branch_id = getattr(req, 'branch_id', None)
+        user = req.user if req and req.user.is_authenticated else None
+
+        return creer_mouvement_caisse(
+            montant=montant,
+            devise=devise,
+            type_mouvement=type_m,
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            content_object=None,
+            utilisateur=user,
+            reference_piece=ref,
+            motif=motif,
+            moyen=moyen,
+        )
 
 
 class DetteClientSerializer(serializers.ModelSerializer):
@@ -655,61 +772,143 @@ class DetteClientSerializer(serializers.ModelSerializer):
         return value
 
     def get_paiements(self, obj):
-        # Only fetch paiements if explicitly requested in context to avoid unnecessary queries
-        if self.context.get('include_paiements', True):
-            try:
-                # Use prefetch_related if available, otherwise fetch normally
-                if hasattr(obj, '_prefetched_objects_cache') and 'paiements' in obj._prefetched_objects_cache:
-                    paiements = obj.paiements.all()
-                else:
-                    paiements = obj.paiements.select_related('devise').all()[:50]  # Limit to 50 to prevent huge responses
-                
-                return [{
-                    'id': p.id,
-                    'montant_paye': str(p.montant_paye),
-                    'date_paiement': p.date_paiement.isoformat() if p.date_paiement else None,
-                    'moyen': p.moyen,
-                    'reference': p.reference,
-                    'devise': {'id': p.devise.id, 'sigle': p.devise.sigle, 'symbole': p.devise.symbole} if p.devise else None
-                } for p in paiements]
-            except Exception as e:
-                # If there's any error fetching paiements, return empty list to prevent recursion
-                return []
-        return []
-
-class PaiementDetteSerializer(serializers.ModelSerializer):
-    # Remove dette_info to avoid recursion, use simple fields instead
-    dette_id = serializers.PrimaryKeyRelatedField(queryset=DetteClient.objects.all(), source='dette', write_only=True)
-    dette = serializers.SerializerMethodField(read_only=True)
-    devise = DeviseSerializer(read_only=True)
-    devise_id = serializers.PrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise', write_only=True, required=False, allow_null=True)
-
-    class Meta:
-        model = PaiementDette
-        fields = [
-            'id', 'dette', 'dette_id', 'montant_paye', 'date_paiement', 'moyen', 'reference', 'utilisateur', 'devise', 'devise_id'
-        ]
-        read_only_fields = ['date_paiement', 'utilisateur']
-    
-    def get_dette(self, obj):
-        # Return minimal dette info to avoid circular reference
+        if not self.context.get('include_paiements', True):
+            return []
         try:
+            from stock.services.caisse import mouvement_moyen_affiche
+
+            qs = (
+                obj._paiements_mouvements_qs()
+                .select_related('devise', 'utilisateur')
+                .prefetch_related('details__type_caisse')
+                .order_by('-date')[:50]
+            )
+            out = []
+            for p in qs:
+                out.append({
+                    'id': p.id,
+                    'montant_paye': str(p.montant),
+                    'date_paiement': p.date.isoformat() if p.date else None,
+                    'moyen': mouvement_moyen_affiche(p),
+                    'reference': p.reference_piece or '',
+                    'mouvement_caisse_id': p.id,
+                    'devise': (
+                        {'id': p.devise.id, 'sigle': p.devise.sigle, 'symbole': p.devise.symbole}
+                        if p.devise
+                        else None
+                    ),
+                })
+            return out
+        except Exception:
+            return []
+
+
+class PaiementDetteReadSerializer(serializers.Serializer):
+    """Représente un MouvementCaisse lié à une DetteClient (entrée de caisse, compat. API historique)."""
+
+    def to_representation(self, mc):
+        from stock.services.caisse import mouvement_moyen_affiche
+
+        dette = None
+        if mc.content_type_id and mc.object_id:
+            from django.contrib.contenttypes.models import ContentType
+
+            if ContentType.objects.get_for_model(DetteClient).id == mc.content_type_id:
+                dette = DetteClient.objects.filter(pk=mc.object_id).select_related('client').first()
+        moyen = mouvement_moyen_affiche(mc)
+        dette_payload = None
+        if dette:
             if self.context.get('include_dette_details', False):
-                return {
-                    'id': obj.dette.id,
-                    'client_nom': obj.dette.client.nom if obj.dette.client else None,
-                    'montant_total': str(obj.dette.montant_total),
-                    'solde_restant': str(obj.dette.solde_restant),
-                    'statut': obj.dette.statut
+                dette_payload = {
+                    'id': dette.id,
+                    'client_nom': dette.client.nom if dette.client else None,
+                    'montant_total': str(dette.montant_total),
+                    'solde_restant': str(dette.solde_restant),
+                    'statut': dette.statut,
                 }
             else:
-                # Minimal info by default
-                return {
-                    'id': obj.dette.id,
-                    'client_nom': obj.dette.client.nom if obj.dette.client else None,
+                dette_payload = {
+                    'id': dette.id,
+                    'client_nom': dette.client.nom if dette.client else None,
                 }
-        except Exception:
-            return None
+        return {
+            'id': mc.id,
+            'dette': dette_payload,
+            'montant_paye': str(mc.montant),
+            'date_paiement': mc.date.isoformat() if mc.date else None,
+            'moyen': moyen,
+            'reference': mc.reference_piece or '',
+            'utilisateur': mc.utilisateur_id,
+            'devise': DeviseSerializer(mc.devise).data if mc.devise else None,
+            'mouvement_caisse_id': mc.id,
+        }
+
+
+class PaiementDetteWriteSerializer(serializers.Serializer):
+    dette_id = serializers.PrimaryKeyRelatedField(queryset=DetteClient.objects.all(), source='dette')
+    montant_paye = serializers.DecimalField(max_digits=12, decimal_places=2)
+    devise_id = serializers.PrimaryKeyRelatedField(
+        queryset=Devise.objects.all(), source='devise', required=False, allow_null=True
+    )
+    moyen = serializers.CharField(required=False, allow_blank=True, default='')
+    reference = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        dette = attrs['dette']
+        if dette.statut == 'PAYEE':
+            raise serializers.ValidationError({'dette': _('Cette dette est déjà entièrement payée.')})
+        montant = attrs['montant_paye']
+        if montant > dette.solde_restant:
+            raise serializers.ValidationError(
+                {
+                    'montant_paye': _(
+                        'Le montant (%(m)s) dépasse le solde restant (%(s)s).'
+                    )
+                    % {'m': montant, 's': dette.solde_restant}
+                }
+            )
+        if montant <= 0:
+            raise serializers.ValidationError({'montant_paye': _('Le montant doit être positif.')})
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        from stock.services.caisse import creer_mouvement_caisse
+
+        dette = validated_data['dette']
+        montant = validated_data['montant_paye']
+        devise = validated_data.get('devise') or dette.devise
+        moyen = validated_data.get('moyen') or ''
+        reference = validated_data.get('reference') or ''
+        req = self.context.get('request')
+        tenant_id = getattr(req, 'tenant_id', None) if req else None
+        branch_id = getattr(req, 'branch_id', None) if req else None
+        if not tenant_id and req and req.user.is_authenticated and hasattr(req.user, 'get_entreprise_id'):
+            tenant_id = req.user.get_entreprise_id(req)
+        user = req.user if req and req.user.is_authenticated else None
+        if not devise:
+            raise serializers.ValidationError({'devise_id': _('Devise requise (dette sans devise).')})
+
+        motif = moyen.strip() or (
+            f"Paiement dette — {dette.client.nom if dette.client else ''} — {montant}"
+        )
+
+        return creer_mouvement_caisse(
+            montant=montant,
+            devise=devise,
+            type_mouvement='ENTREE',
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            content_object=dette,
+            utilisateur=user,
+            reference_piece=reference,
+            motif=motif,
+            moyen=moyen.strip() or None,
+        )
+
+
+# Alias pour les imports existants (liste / détail lecture)
+PaiementDetteSerializer = PaiementDetteReadSerializer
 
 # Méthode utilitaire pour total des dettes d'un client
 class ClientDettesTotalSerializer(serializers.ModelSerializer):

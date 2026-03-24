@@ -1,5 +1,9 @@
 from django.db import models
 from django.conf import settings
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
+from django.db.models import Sum, F, OuterRef, Subquery, DecimalField, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from decimal import Decimal
 # Modèle Entreprise
@@ -110,15 +114,33 @@ class Article(models.Model):
         return self.nom_scientifique
 
     def save(self, *args, **kwargs):
+        if self.nom_scientifique is not None:
+            self.nom_scientifique = ' '.join(self.nom_scientifique.split())
         if not self.article_id:
-            type_code = self.sous_type_article.type_article.libelle[:2].upper()
-            sous_type_code = self.sous_type_article.libelle[:2].upper()
-            qs = Article.objects.filter(sous_type_article=self.sous_type_article)
+            # Préfixe 4 lettres (2 type + 2 sous-type) : plusieurs sous-types peuvent partager le même
+            # préfixe → l'ancien comptage par sous-type seul provoquait des 1062 (FOAG0001 deux fois).
+            ta = (self.sous_type_article.type_article.libelle or 'XX')[:2].upper()
+            st = (self.sous_type_article.libelle or 'XX')[:2].upper()
+            prefix = f'{ta}{st}'
+            qs = Article.objects.filter(article_id__startswith=prefix)
             if self.entreprise_id:
                 qs = qs.filter(entreprise_id=self.entreprise_id)
-            count = qs.count() + 1
-            numero = str(count).zfill(4)
-            self.article_id = f"{type_code}{sous_type_code}{numero}"
+            max_num = 0
+            plen = len(prefix)
+            for aid in qs.values_list('article_id', flat=True):
+                if not aid or len(aid) <= plen:
+                    continue
+                try:
+                    max_num = max(max_num, int(aid[plen:]))
+                except ValueError:
+                    continue
+            next_n = max_num + 1
+            if next_n > 9999:
+                raise ValueError(
+                    'Limite de codes article atteinte pour ce préfixe (9999). '
+                    'Renommez un libellé de type ou sous-type pour obtenir un autre préfixe.'
+                )
+            self.article_id = f'{prefix}{str(next_n).zfill(4)}'
         super().save(*args, **kwargs)
 
 
@@ -182,7 +204,11 @@ class Stock(models.Model):
 
 # Sortie et LigneSortie
 class Sortie(models.Model):
-    motif = models.CharField(max_length=255, blank=True)
+    motif = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Motif / commentaire de la sortie (hors caisse).",
+    )
     client = models.ForeignKey('Client', on_delete=models.SET_NULL, related_name='sorties', null=True, blank=True, help_text="Client associé à cette sortie (optionnel)")
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='sorties', null=True, blank=True)
     statut = models.CharField(
@@ -236,12 +262,34 @@ class Client(models.Model):
     def __str__(self):
         return f"{self.id} - {self.nom}"
 
+class DetteClientQuerySet(models.QuerySet):
+    """Annotations pour filtres / rapports (montants depuis MouvementCaisse)."""
+
+    def with_paiements_aggregate(self):
+        ct = ContentType.objects.get_for_model(DetteClient)
+        paye_sq = (
+            MouvementCaisse.objects.filter(
+                content_type=ct,
+                object_id=OuterRef('pk'),
+                type='ENTREE',
+            )
+            .values('object_id')
+            .annotate(total=Sum('montant'))
+            .values('total')[:1]
+        )
+        return self.annotate(
+            montant_paye_agg=Coalesce(
+                Subquery(paye_sq, output_field=DecimalField(max_digits=14, decimal_places=2)),
+                Value(Decimal('0.00')),
+            ),
+            solde_restant_agg=F('montant_total') - F('montant_paye_agg'),
+        )
+
+
 class DetteClient(models.Model):
     client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='dettes')
     sortie = models.OneToOneField('Sortie', on_delete=models.CASCADE, related_name='dette')
     montant_total = models.DecimalField(max_digits=12, decimal_places=2)
-    montant_paye = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    solde_restant = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='dettes', null=True, blank=True)
     date_creation = models.DateTimeField(auto_now_add=True)
     date_echeance = models.DateField(blank=True, null=True, help_text="Date limite de paiement")
@@ -258,6 +306,8 @@ class DetteClient(models.Model):
     entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='dettes_clients', null=True, blank=True)
     succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='dettes_clients', null=True, blank=True)
 
+    objects = DetteClientQuerySet.as_manager()
+
     class Meta:
         ordering = ['-date_creation']
         verbose_name = "Dette client"
@@ -271,86 +321,116 @@ class DetteClient(models.Model):
         return f"Dette {self.client.nom} - {self.montant_total}{self.devise.sigle if self.devise else ''}"
 
     def save(self, *args, **kwargs):
-        # Définir la date d'échéance par défaut si non fournie (1 mois après création)
         if not self.date_echeance:
             from datetime import timedelta
             self.date_echeance = timezone.now().date() + timedelta(days=30)
-        
-        # Recalcul automatique du solde et du statut
-        self.solde_restant = self.montant_total - self.montant_paye
-        if self.solde_restant <= 0:
-            self.statut = 'PAYEE'
-        else:
-            # Vérifie si la date d'échéance est dépassée
-            if self.date_echeance and self.date_echeance < timezone.now().date():
-                self.statut = 'RETARD'
-            else:
-                self.statut = 'EN_COURS'
         super().save(*args, **kwargs)
 
+    def _paiements_mouvements_qs(self):
+        ct = ContentType.objects.get_for_model(DetteClient)
+        return MouvementCaisse.objects.filter(
+            content_type=ct,
+            object_id=self.pk,
+            type='ENTREE',
+        )
+
+    @property
+    def montant_paye(self) -> Decimal:
+        agg = self._paiements_mouvements_qs().aggregate(t=Sum('montant'))['t']
+        return agg or Decimal('0.00')
+
+    @property
+    def solde_restant(self) -> Decimal:
+        return (self.montant_total or Decimal('0.00')) - self.montant_paye
 
 
-class PaiementDette(models.Model):
-    dette = models.ForeignKey(DetteClient, on_delete=models.CASCADE, related_name='paiements')
-    montant_paye = models.DecimalField(max_digits=12, decimal_places=2)
-    date_paiement = models.DateTimeField(auto_now_add=True)
-    moyen = models.CharField(max_length=50, blank=True, null=True, help_text="Ex: Cash, Mobile Money, Chèque")
-    reference = models.CharField(max_length=100, blank=True, null=True)
-    utilisateur = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='paiements_dettes_effectues')
-    devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='paiements_dettes', null=True, blank=True)
-    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='paiements_dettes', null=True, blank=True)
-    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='paiements_dettes', null=True, blank=True)
+class TypeCaisse(models.Model):
+    """Référentiel des canaux (Airtel Money, espèces, banque, …)."""
+
+    libelle = models.CharField(max_length=120)
+    description = models.TextField(blank=True, default='')
+    image = models.ImageField(upload_to='types_caisse/', blank=True, null=True)
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='types_caisse')
+    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, null=True, blank=True, related_name='types_caisse')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ['-date_paiement']
-        verbose_name = "Paiement de dette"
-        verbose_name_plural = "Paiements de dettes"
+        ordering = ['entreprise_id', 'libelle']
         indexes = [
             models.Index(fields=['entreprise_id']),
             models.Index(fields=['entreprise_id', 'succursale_id']),
         ]
+        verbose_name = 'Type de caisse'
+        verbose_name_plural = 'Types de caisse'
 
     def __str__(self):
-        return f"Paiement {self.montant_paye}{self.devise.sigle if self.devise else ''} - Dette #{self.dette.id}"
+        return self.libelle
 
-    def save(self, *args, **kwargs):
-        # Check if this is a new paiement to avoid duplicate updates on subsequent saves
-        is_new = self.pk is None
-        super().save(*args, **kwargs)
-        
-        if is_new:
-            # Only update dette and create mouvement on first save
-            # Use update() to avoid triggering dette.save() which could cause recursion
-            from django.db.models import F
-            DetteClient.objects.filter(pk=self.dette.pk).update(
-                montant_paye=F('montant_paye') + self.montant_paye
-            )
-            # Refresh dette instance to get updated values
-            self.dette.refresh_from_db()
-            # Recalculate solde and status
-            self.dette.solde_restant = self.dette.montant_total - self.dette.montant_paye
-            if self.dette.solde_restant <= 0:
-                self.dette.statut = 'PAYEE'
-            else:
-                if self.dette.date_echeance and self.dette.date_echeance < timezone.now().date():
-                    self.dette.statut = 'RETARD'
-                else:
-                    self.dette.statut = 'EN_COURS'
-            # Save dette with update_fields to avoid full save() logic
-            self.dette.save(update_fields=['solde_restant', 'statut'])
 
-            # Enregistrer automatiquement le mouvement de caisse (même entreprise/succursale que la dette)
-            from .models import MouvementCaisse
-            MouvementCaisse.objects.create(
-                type='ENTREE',
-                montant=self.montant_paye,
-                devise=self.devise or self.dette.devise,
-                motif=f"Paiement dette client {self.dette.client.nom}",
-                moyen=self.moyen or "Inconnu",
-                reference_piece=f"DET-{self.dette.id}",
-                entreprise_id=self.dette.entreprise_id,
-                succursale_id=self.dette.succursale_id,
-            )
+class MouvementCaisse(models.Model):
+    TYPE_CHOICES = [('ENTREE', 'Entrée'), ('SORTIE', 'Sortie')]
+    date = models.DateTimeField(auto_now_add=True)
+    montant = models.DecimalField(max_digits=12, decimal_places=2)
+    devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
+    type = models.CharField(max_length=10, choices=TYPE_CHOICES)
+    motif = models.TextField(blank=True, default='', help_text='Libellé / motif du mouvement.')
+    moyen = models.CharField(
+        max_length=30,
+        blank=True,
+        null=True,
+        help_text='Ex. : Cash, Mobile Money, Chèque (optionnel).',
+    )
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE, null=True, blank=True)
+    object_id = models.PositiveIntegerField(null=True, blank=True)
+    content_object = GenericForeignKey('content_type', 'object_id')
+    utilisateur = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='mouvements_caisse_effectues',
+    )
+    reference_piece = models.CharField(max_length=100, blank=True, default='')
+    sortie = models.ForeignKey('Sortie', null=True, blank=True, on_delete=models.SET_NULL, related_name='mouvement_caisse')
+    entree = models.ForeignKey('Entree', null=True, blank=True, on_delete=models.SET_NULL, related_name='mouvement_caisse')
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
+    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
+
+    class Meta:
+        ordering = ['-date']
+        indexes = [
+            models.Index(fields=['entreprise_id']),
+            models.Index(fields=['succursale_id']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+            models.Index(fields=['content_type', 'object_id']),
+        ]
+
+    def __str__(self):
+        sens = '+' if self.type == 'ENTREE' else '-'
+        return f"{self.date.strftime('%Y-%m-%d %H:%M')} {sens}{self.montant}"
+
+    def motif_affiche(self) -> str:
+        from stock.services.caisse import motif_mouvement_concatene
+        return motif_mouvement_concatene(self)
+
+
+class DetailMouvementCaisse(models.Model):
+    """Ventilation d'un mouvement sur plusieurs types de caisse."""
+
+    mouvement = models.ForeignKey(MouvementCaisse, on_delete=models.CASCADE, related_name='details')
+    type_caisse = models.ForeignKey(TypeCaisse, on_delete=models.SET_NULL, null=True, blank=True, related_name='details_mouvements')
+    montant = models.DecimalField(max_digits=12, decimal_places=2)
+    motif_explicite = models.TextField(blank=True, default='', help_text="Si pas de type_caisse, motif obligatoire ou généré automatiquement.")
+    reference_piece = models.CharField(max_length=100, blank=True, default='')
+
+    class Meta:
+        ordering = ['id']
+        verbose_name = 'Détail mouvement caisse'
+        verbose_name_plural = 'Détails mouvements caisse'
+
+    def __str__(self):
+        return f"{self.montant} ({self.type_caisse or 'sans type'})"
 
 
 
@@ -442,34 +522,6 @@ class BeneficeLot(models.Model):
         self.benefice_unitaire = self.prix_vente - self.prix_achat
         self.benefice_total = self.benefice_unitaire * Decimal(str(self.quantite_vendue))
         super().save(*args, **kwargs)
-
-# Ajout du modèle de suivi des bénéfices par vente
-
-class MouvementCaisse(models.Model):
-    TYPE_CHOICES = [('ENTREE', 'Entrée'), ('SORTIE', 'Sortie')]
-    date = models.DateTimeField(auto_now_add=True)
-    montant = models.DecimalField(max_digits=12, decimal_places=2)
-    devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
-    type = models.CharField(max_length=10, choices=TYPE_CHOICES)
-    motif = models.TextField()
-    moyen = models.CharField(max_length=30, blank=True, null=True, help_text='Ex: Cash, Mobile Money, Chèque')
-    reference_piece = models.CharField(max_length=100, blank=True, null=True)
-    sortie = models.ForeignKey('Sortie', null=True, blank=True, on_delete=models.SET_NULL, related_name='mouvement_caisse')
-    entree = models.ForeignKey('Entree', null=True, blank=True, on_delete=models.SET_NULL, related_name='mouvement_caisse')
-    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
-    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
-
-    class Meta:
-        ordering = ['-date']
-        indexes = [
-            models.Index(fields=['entreprise_id']),
-            models.Index(fields=['succursale_id']),
-            models.Index(fields=['entreprise_id', 'succursale_id']),
-        ]
-
-    def __str__(self):
-        sens = '+' if self.type == 'ENTREE' else '-'
-        return f"{self.date.strftime('%Y-%m-%d %H:%M')} {sens}{self.montant} ({self.motif[:20]}...)"
 
 class Devise(models.Model):
     sigle = models.CharField(max_length=10)

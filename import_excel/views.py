@@ -1,5 +1,7 @@
 import io
+import re
 import openpyxl
+from django.db import IntegrityError
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -9,7 +11,18 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from stock.models import Article, Devise, SousTypeArticle, Unite, Stock, Client
 from stock.serializers import EntreeSerializer, ArticleSerializer
+from stock.services.article_names import normalize_nom_scientifique
 import json
+
+# Colonne optionnelle type export inventaire / listing (ex. FOAG0001) — non utilisée à la création.
+_ARTICLE_CODE_RE = re.compile(r'^[A-Z]{4}\d{4}$')
+
+
+def _leading_column_is_article_code(val) -> bool:
+    if val is None:
+        return False
+    s = str(val).strip().upper().replace(' ', '')
+    return bool(_ARTICLE_CODE_RE.match(s))
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -148,7 +161,7 @@ def import_approvisionnement(request):
     ws = wb['Approvisionnement']
     lignes = []
     from datetime import datetime
-    from stock.views import _get_tenant_ids
+    from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
     from stock.models import Devise
     tenant_id, branch_id = _get_tenant_ids(request)
     if not tenant_id:
@@ -302,22 +315,25 @@ def import_approvisionnement(request):
     serializer = EntreeSerializer(data=data, context={'request': request})
     if serializer.is_valid():
         entree = serializer.save(entreprise_id=tenant_id, succursale_id=branch_id)
-        from stock.models import MouvementCaisse
+        from stock.services.caisse import creer_mouvement_caisse
         for devise_id, total in totaux_par_devise.items():
             if total <= 0:
                 continue
             devise_obj = Devise.objects.filter(pk=devise_id).first()
             if not devise_obj:
                 continue
-            MouvementCaisse.objects.create(
+            creer_mouvement_caisse(
                 montant=total,
                 devise=devise_obj,
-                type='SORTIE',
-                motif=f"Approvisionnement entrée #{entree.pk} (Import Excel)",
-                moyen='Cash',
-                entree=entree,
+                type_mouvement='SORTIE',
                 entreprise_id=tenant_id,
                 succursale_id=branch_id,
+                entree=entree,
+                content_object=None,
+                utilisateur=request.user if request.user.is_authenticated else None,
+                reference_piece='',
+                details=None,
+                motif='',
             )
         return JsonResponse(serializer.data, status=201)
     else:
@@ -457,7 +473,7 @@ def download_template_articles(request):
 @permission_classes([IsAuthenticated])
 def import_articles(request):
     """Importe un fichier Excel d'articles et crée les articles + un Stock à 0 pour chacun."""
-    from stock.views import _get_tenant_ids
+    from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
     tenant_id, branch_id = _get_tenant_ids(request)
     if not tenant_id:
         return JsonResponse(
@@ -478,6 +494,7 @@ def import_articles(request):
     ws = wb['Articles']
     created = []
     errors = []
+    seen_norm_in_file = set()
 
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         if not row or all(
@@ -485,17 +502,22 @@ def import_articles(request):
         ):
             continue
 
-        if len(row) < 4:
+        row = list(row)
+        off = 1 if (row and _leading_column_is_article_code(row[0])) else 0
+        if len(row) < 4 + off:
             errors.append(
-                f'Ligne {row_idx}: au moins nom_scientifique, sous_type_article_id, unite_id requis.'
+                f'Ligne {row_idx}: colonnes insuffisantes. Modèle officiel : '
+                f'nom_scientifique | nom_commercial | sous_type_article_id | unite_id '
+                f'[| emplacement]. Si la 1re colonne est un code (ex. FOAG0001), '
+                f'decalez : code (ignoré) | nom | commercial | sous_type_id | unite_id.'
             )
             continue
 
-        nom_scientifique_raw = row[0]
-        nom_commercial_raw = row[1] if len(row) > 1 else None
-        sous_type_id_raw = row[2] if len(row) > 2 else None
-        unite_id_raw = row[3] if len(row) > 3 else None
-        emplacement_raw = row[4] if len(row) > 4 else None
+        nom_scientifique_raw = row[0 + off]
+        nom_commercial_raw = row[1 + off] if len(row) > 1 + off else None
+        sous_type_id_raw = row[2 + off] if len(row) > 2 + off else None
+        unite_id_raw = row[3 + off] if len(row) > 3 + off else None
+        emplacement_raw = row[4 + off] if len(row) > 4 + off else None
 
         nom_scientifique = (
             str(nom_scientifique_raw).strip()
@@ -504,6 +526,22 @@ def import_articles(request):
         )
         if not nom_scientifique:
             errors.append(f'Ligne {row_idx}: nom_scientifique obligatoire.')
+            continue
+
+        if _leading_column_is_article_code(nom_scientifique):
+            errors.append(
+                f'Ligne {row_idx}: la colonne « nom » ressemble à un code article ({nom_scientifique!r}). '
+                f'Utilisez le fichier « modele_articles.xlsx » : 1re colonne = nom du produit, '
+                f'ou bien une 1re colonne code + 2e colonne = nom.'
+            )
+            continue
+
+        norm_batch = normalize_nom_scientifique(nom_scientifique)
+        if norm_batch in seen_norm_in_file:
+            errors.append(
+                f'Ligne {row_idx}: nom scientifique dupliqué dans ce fichier '
+                f'(même nom normalisé qu’une ligne précédente).'
+            )
             continue
 
         nom_commercial = None
@@ -557,6 +595,7 @@ def import_articles(request):
 
         try:
             article = serializer.save(entreprise_id=tenant_id, succursale_id=branch_id)
+            seen_norm_in_file.add(norm_batch)
             if emplacement != '1':
                 article.emplacement = emplacement
                 article.save(update_fields=['emplacement'])
@@ -570,6 +609,16 @@ def import_articles(request):
                 'nom_scientifique': article.nom_scientifique,
                 'nom_commercial': article.nom_commercial,
             })
+        except IntegrityError as e:
+            err = str(e)
+            if 'Duplicate entry' in err and ('stock_article' in err or 'PRIMARY' in err):
+                errors.append(
+                    f'Ligne {row_idx}: code article déjà existant en base (clé primaire). '
+                    f'Après mise à jour du serveur, les nouveaux codes évitent les collisions entre sous-types ; '
+                    f'sinon supprimez le doublon en base ou utilisez un fichier sans colonne code en double.'
+                )
+            else:
+                errors.append(f'Ligne {row_idx}: {err}')
         except Exception as e:
             errors.append(f'Ligne {row_idx}: {str(e)}')
 
@@ -718,7 +767,7 @@ def download_template_sortie(request):
 @permission_classes([IsAuthenticated])
 def import_sortie(request):
     """Importe un fichier Excel de sortie (vente) et crée une Sortie avec ses lignes (FIFO, caisse, etc.)."""
-    from stock.views import _get_tenant_ids
+    from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
     tenant_id, branch_id = _get_tenant_ids(request)
     if not tenant_id:
         return JsonResponse({'error': _('Contexte entreprise manquant. Connectez-vous et sélectionnez une entreprise.')}, status=400)

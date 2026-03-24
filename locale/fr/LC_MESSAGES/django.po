@@ -113,3 +113,63 @@ msgstr ""
 #: .\users\views.py:129
 msgid "Entreprise introuvable"
 msgstr ""
+
+#: .\stock\views.py (ArticleViewSet.search)
+msgid ""
+"Indiquez ce que vous cherchez avec le paramètre « q ». Exemple : GET "
+"/api/articles/search/?q=café"
+msgstr ""
+"Indiquez ce que vous cherchez avec le paramètre « q ». Exemple : GET "
+"/api/articles/search/?q=café"
+
+#, python-format
+#: .\stock\views.py (ArticleViewSet.search)
+msgid ""
+"Aucun article ne correspond à « %(term)s » pour cette succursale. Essayez un "
+"autre mot-clé (nom scientifique, nom commercial ou code article), vérifiez "
+"l’orthographe ou élargissez la recherche (autre succursale si votre rôle le permet)."
+msgstr ""
+"Aucun article ne correspond à « %(term)s » pour cette succursale. Essayez un "
+"autre mot-clé (nom scientifique, nom commercial ou code article), vérifiez "
+"l’orthographe ou élargissez la recherche (autre succursale si votre rôle le permet)."
+
+#, python-format
+#: .\stock\views.py (ArticleViewSet.search)
+msgid ""
+"Aucun article ne correspond à « %(term)s » dans votre entreprise. Essayez un "
+"autre mot-clé (nom scientifique, nom commercial ou code article) ou vérifiez "
+"l’orthographe."
+msgstr ""
+"Aucun article ne correspond à « %(term)s » dans votre entreprise. Essayez un "
+"autre mot-clé (nom scientifique, nom commercial ou code article) ou vérifiez "
+"l’orthographe."
+
+#: .\stock\views.py (ClientViewSet.search)
+msgid ""
+"Indiquez ce que vous cherchez avec le paramètre « q ». Exemple : GET "
+"/api/clients/search/?q=dupont"
+msgstr ""
+"Indiquez ce que vous cherchez avec le paramètre « q ». Exemple : GET "
+"/api/clients/search/?q=dupont"
+
+#, python-format
+#: .\stock\views.py (ClientViewSet.search)
+msgid ""
+"Aucun client ne correspond à « %(term)s » pour cette succursale. Essayez un "
+"autre mot-clé (nom, téléphone, adresse, e-mail ou code client), vérifiez "
+"l’orthographe ou élargissez la recherche (autre succursale si votre rôle le permet)."
+msgstr ""
+"Aucun client ne correspond à « %(term)s » pour cette succursale. Essayez un "
+"autre mot-clé (nom, téléphone, adresse, e-mail ou code client), vérifiez "
+"l’orthographe ou élargissez la recherche (autre succursale si votre rôle le permet)."
+
+#, python-format
+#: .\stock\views.py (ClientViewSet.search)
+msgid ""
+"Aucun client ne correspond à « %(term)s » dans votre entreprise. Essayez un "
+"autre mot-clé (nom, téléphone, adresse, e-mail ou code client) ou vérifiez "
+"l’orthographe."
+msgstr ""
+"Aucun client ne correspond à « %(term)s » dans votre entreprise. Essayez un "
+"autre mot-clé (nom, téléphone, adresse, e-mail ou code client) ou vérifiez "
+"l’orthographe."

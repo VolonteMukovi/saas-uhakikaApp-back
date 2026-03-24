@@ -5,6 +5,7 @@ Marges: 20mm de chaque côté
 """
 from io import BytesIO
 from datetime import datetime
+from decimal import Decimal
 from django.utils.translation import gettext as _
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -573,6 +574,131 @@ class PDFGenerator:
         table.setStyle(TableStyle(table_style))
         elements.append(table)
         
+        doc.build(elements)
+        buffer.seek(0)
+        return buffer
+
+    def generate_ventes_pdf(self, data):
+        """
+        Rapport des ventes : Article, PU achat, PU vente, Qté, Référence + ligne TOTAL (noir et blanc).
+        Attendu `data` : entete, titre, periode, lignes_ventes, total_quantite, total_montant_vente.
+        """
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            rightMargin=self.margin,
+            leftMargin=self.margin,
+            topMargin=self.margin,
+            bottomMargin=self.margin,
+        )
+        elements = []
+        elements.extend(self._create_entete(data['entete']))
+        elements.append(Paragraph(data['titre'], self.styles['TitrePrincipal']))
+        elements.append(Spacer(1, 10))
+        if 'periode' in data:
+            periode_text = _('<b>Période :</b> du %(debut)s au %(fin)s') % {
+                'debut': data['periode']['date_debut'],
+                'fin': data['periode']['date_fin'],
+            }
+            elements.append(Paragraph(periode_text, self.styles['TexteNormal']))
+            elements.append(Spacer(1, 8))
+
+        rows = data.get('lignes_ventes') or []
+        table_data = [
+            [
+                _('Article'),
+                _('PU achat'),
+                _('PU vente'),
+                _('Qté'),
+                _('Référence'),
+            ]
+        ]
+
+        for row in rows:
+            art = row.get('article') or row.get('nom_scientifique') or '—'
+            q = row.get('quantite')
+            q_s = str(q) if q is not None else '—'
+            pua = row.get('pu_achat') or row.get('prix_achat_unitaire') or '—'
+            puv = row.get('pu_vente') or row.get('prix_vente_unitaire') or '—'
+            ref = str(row.get('reference', ''))[:48]
+            table_data.append(
+                [
+                    str(art)[:40] + ('...' if len(str(art)) > 40 else ''),
+                    str(pua),
+                    str(puv),
+                    q_s,
+                    ref,
+                ]
+            )
+
+        tot_q = data.get('total_quantite')
+        tot_mv = data.get('total_montant_vente')
+        if tot_q is None or tot_mv is None:
+            tq = 0
+            tsum = Decimal('0.00')
+            for r in rows:
+                q = int(r.get('quantite') or 0)
+                tq += q
+                puv = r.get('pu_vente') or r.get('prix_vente_unitaire') or '0'
+                tsum += (Decimal(q) * Decimal(str(puv))).quantize(Decimal('0.01'))
+            if tot_q is None:
+                tot_q = tq
+            if tot_mv is None:
+                tot_mv = str(tsum.quantize(Decimal('0.01')))
+        tot_q = tot_q if tot_q is not None else 0
+        tot_mv = tot_mv if tot_mv is not None else '0.00'
+
+        table_data.append(
+            [
+                Paragraph(f"<b>{_('TOTAL')}</b>", self.styles['Normal']),
+                '—',
+                str(tot_mv),
+                str(tot_q),
+                '—',
+            ]
+        )
+
+        col_widths = [
+            self.usable_width * 0.28,
+            self.usable_width * 0.14,
+            self.usable_width * 0.14,
+            self.usable_width * 0.08,
+            self.usable_width * 0.36,
+        ]
+        last_row = len(table_data) - 1
+        table = Table(table_data, colWidths=col_widths, repeatRows=1)
+        table_style = [
+            ('BACKGROUND', (0, 0), (-1, 0), colors.white),
+            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 9),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+            ('TOPPADDING', (0, 0), (-1, -1), 5),
+        ]
+        if last_row > 1:
+            table_style.extend(
+                [
+                    ('ALIGN', (1, 1), (4, last_row - 1), 'RIGHT'),
+                    ('ALIGN', (0, 1), (0, last_row - 1), 'LEFT'),
+                    ('FONTNAME', (0, 1), (-1, last_row - 1), 'Helvetica'),
+                    ('FONTSIZE', (0, 1), (-1, last_row - 1), 8),
+                ]
+            )
+        table_style.extend(
+            [
+                ('FONTNAME', (0, last_row), (-1, last_row), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, last_row), (-1, last_row), 9),
+                ('ALIGN', (0, last_row), (0, last_row), 'LEFT'),
+                ('ALIGN', (1, last_row), (4, last_row), 'RIGHT'),
+                ('LINEABOVE', (0, last_row), (-1, last_row), 0.75, colors.black),
+            ]
+        )
+        table.setStyle(TableStyle(table_style))
+        elements.append(table)
         doc.build(elements)
         buffer.seek(0)
         return buffer

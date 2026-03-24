@@ -682,3 +682,55 @@ msgstr "Company not found"
 
 #~ msgid "Non définie"
 #~ msgstr "Not defined"
+
+#: .\stock\views.py (ArticleViewSet.search)
+msgid ""
+"Indiquez ce que vous cherchez avec le paramètre « q ». Exemple : GET "
+"/api/articles/search/?q=café"
+msgstr ""
+"Enter what you are looking for using the \"q\" query parameter. Example: GET "
+"/api/articles/search/?q=coffee"
+
+#, python-format
+#: .\stock\views.py (ArticleViewSet.search)
+msgid ""
+"Aucun article ne correspond à « %(term)s » pour cette succursale. Essayez un "
+"autre mot-clé (nom scientifique, nom commercial ou code article), vérifiez "
+"l’orthographe ou élargissez la recherche (autre succursale si votre rôle le permet)."
+msgstr ""
+"No product matches “%(term)s” for this branch. Try another keyword (scientific name, trade name, or product code), check spelling, or broaden your search (another branch if your role allows)."
+
+#, python-format
+#: .\stock\views.py (ArticleViewSet.search)
+msgid ""
+"Aucun article ne correspond à « %(term)s » dans votre entreprise. Essayez un "
+"autre mot-clé (nom scientifique, nom commercial ou code article) ou vérifiez "
+"l’orthographe."
+msgstr ""
+"No product matches “%(term)s” in your company. Try another keyword (scientific name, trade name, or product code) or check spelling."
+
+#: .\stock\views.py (ClientViewSet.search)
+msgid ""
+"Indiquez ce que vous cherchez avec le paramètre « q ». Exemple : GET "
+"/api/clients/search/?q=dupont"
+msgstr ""
+"Enter what you are looking for using the \"q\" query parameter. Example: GET "
+"/api/clients/search/?q=smith"
+
+#, python-format
+#: .\stock\views.py (ClientViewSet.search)
+msgid ""
+"Aucun client ne correspond à « %(term)s » pour cette succursale. Essayez un "
+"autre mot-clé (nom, téléphone, adresse, e-mail ou code client), vérifiez "
+"l’orthographe ou élargissez la recherche (autre succursale si votre rôle le permet)."
+msgstr ""
+"No customer matches “%(term)s” for this branch. Try another keyword (name, phone, address, email, or customer code), check spelling, or broaden your search (another branch if your role allows)."
+
+#, python-format
+#: .\stock\views.py (ClientViewSet.search)
+msgid ""
+"Aucun client ne correspond à « %(term)s » dans votre entreprise. Essayez un "
+"autre mot-clé (nom, téléphone, adresse, e-mail ou code client) ou vérifiez "
+"l’orthographe."
+msgstr ""
+"No customer matches “%(term)s” in your company. Try another keyword (name, phone, address, email, or customer code) or check spelling."

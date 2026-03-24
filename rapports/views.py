@@ -2,8 +2,8 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import PermissionDenied
-from django.db.models import Sum, Q, F, DecimalField
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from django.db.models import Sum, Q, F, DecimalField, OuterRef, Subquery, Value, Exists
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.translation import gettext as _
@@ -16,13 +16,43 @@ import io
 
 from config.pagination import StandardResultsSetPagination
 
+
+class InventaireResultsSetPagination(StandardResultsSetPagination):
+    """Pagination uniquement si complet=false : plafond élevé pour les gros inventaires."""
+    max_page_size = 5000
+
+
+class InventaireStockLine:
+    """Ligne d'inventaire : article + quantités (stock réel ou 0 si aucune fiche Stock)."""
+    __slots__ = ('article', 'Qte', 'seuilAlert')
+
+    def __init__(self, article, qte=0, seuil=0):
+        self.article = article
+        self.Qte = qte
+        self.seuilAlert = seuil
+
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
-from stock.models import Stock, LigneEntree, LigneSortie, Article, Entree, Entreprise
+from django.contrib.contenttypes.models import ContentType
+
+from stock.db_compat import (
+    build_mouvementcaisse_queryset,
+    mouvementcaisse_column_names,
+    mouvementcaisse_has_content_type_id,
+)
+from stock.models import (
+    Stock,
+    LigneEntree,
+    LigneSortie,
+    Article,
+    Entree,
+    Entreprise,
+    DetteClient,
+)
 from .serializers import (
     InventaireArticleSerializer,
     BonEntreeArticleSerializer,
@@ -90,122 +120,235 @@ class RapportsViewSet(viewsets.ViewSet):
             branch_id = m.default_succursale_id if m else None
 
         return eid, branch_id
-    
-    @action(detail=False, methods=['get'], url_path='inventaire')
-    def inventaire(self, request):
+
+    @staticmethod
+    def _default_exercice_dates(request):
         """
-        Rapport d'inventaire des produits en stock.
-        
-        Paramètres optionnels:
-        - date_debut: Date de début (format: YYYY-MM-DD)
-        - date_fin: Date de fin (format: YYYY-MM-DD, par défaut: 31 décembre de l'année en cours)
-        - type_article: Filtrer par type d'article
-        - statut: Filtrer par statut (NORMAL, ALERTE, RUPTURE)
-        
-        GET /api/rapports/inventaire/
-        GET /api/rapports/inventaire/?date_debut=2025-01-01&date_fin=2025-12-31
-        GET /api/rapports/inventaire/?statut=ALERTE
+        Période d'exercice par défaut (comptabilité courante) : 1er janv. → 31 déc.
+        de l'année de référence (année courante si date_fin absente, sinon année de date_fin).
+        """
+        date_debut = request.query_params.get('date_debut')
+        date_fin = request.query_params.get('date_fin')
+        y_now = timezone.now().year
+        if not date_fin:
+            date_fin = f'{y_now}-12-31'
+        if not date_debut:
+            try:
+                y = int(str(date_fin).strip()[:4])
+            except (ValueError, TypeError):
+                y = y_now
+            date_debut = f'{y}-01-01'
+        return date_debut, date_fin
+
+    @staticmethod
+    def _parse_inventaire_date_bounds(request):
+        """Valide date_debut / date_fin (YYYY-MM-DD) et retourne (str, str, date, date)."""
+        date_debut_s, date_fin_s = RapportsViewSet._default_exercice_dates(request)
+        try:
+            d0 = date.fromisoformat(str(date_debut_s).strip()[:10])
+            d1 = date.fromisoformat(str(date_fin_s).strip()[:10])
+        except ValueError:
+            raise ValidationError(
+                {
+                    'detail': _(
+                        'date_debut et date_fin doivent être au format ISO YYYY-MM-DD '
+                        '(ex. 2026-01-01).'
+                    )
+                }
+            )
+        if d0 > d1:
+            raise ValidationError(
+                {'detail': _('date_debut doit être antérieure ou égale à date_fin.')}
+            )
+        return date_debut_s, date_fin_s, d0, d1
+
+    def _filter_articles_mouvements_periode(self, article_qs, request, d_debut: date, d_fin: date):
+        """
+        Garde les articles ayant au moins une ligne d'entrée ou de sortie sur la période
+        (date du bon d'entrée / de la sortie, partie date uniquement, bornes inclusives).
+        """
+        user = request.user
+        eid, branch_id = self._get_tenant_ids_strict(request)
+        if not eid:
+            return article_qs.none()
+
+        le = LigneEntree.objects.filter(
+            article_id=OuterRef('article_id'),
+            entree__entreprise_id=eid,
+            entree__date_op__date__gte=d_debut,
+            entree__date_op__date__lte=d_fin,
+        )
+        if user.is_agent(request) and branch_id is not None:
+            le = le.filter(entree__succursale_id=branch_id)
+
+        ls = LigneSortie.objects.filter(
+            article_id=OuterRef('article_id'),
+            sortie__entreprise_id=eid,
+            sortie__date_creation__date__gte=d_debut,
+            sortie__date_creation__date__lte=d_fin,
+        )
+        if user.is_agent(request) and branch_id is not None:
+            ls = ls.filter(sortie__succursale_id=branch_id)
+
+        return article_qs.filter(Q(Exists(le)) | Q(Exists(ls)))
+
+    def _inventaire_article_queryset(self, request):
+        """
+        Tous les articles du tenant (entreprise + succursale si agent avec branche),
+        avec quantités issues de Stock (0 si aucune fiche Stock pour l'article).
+        """
+        user = request.user
+        eid, branch_id = self._get_tenant_ids_strict(request)
+        if not eid:
+            return Article.objects.none()
+
+        stock_sq = Stock.objects.filter(article_id=OuterRef('article_id'))
+        qs = (
+            Article.objects.filter(entreprise_id=eid)
+            .annotate(
+                inv_qte=Coalesce(Subquery(stock_sq.values('Qte')[:1]), Value(0)),
+                inv_seuil=Coalesce(Subquery(stock_sq.values('seuilAlert')[:1]), Value(0)),
+            )
+            .select_related(
+                'sous_type_article',
+                'sous_type_article__type_article',
+                'unite',
+            )
+            .order_by('nom_scientifique', 'article_id')
+        )
+        if user.is_agent(request) and branch_id is not None:
+            qs = qs.filter(succursale_id=branch_id)
+        return qs
+
+    def _serialize_inventaire(self, request, *, force_complet: bool = False):
+        """
+        Corps du rapport d'inventaire (dict prêt pour JSON ou PDF).
+        Par défaut (complet=true) : tous les articles, sans pagination.
+        complet=false : pagination (page_size jusqu'à 5000).
+        Si filtrer_mouvements=true : seuls les articles avec au moins une entrée ou une sortie
+        dont la date tombe dans [date_debut, date_fin] (tenant-scopé). Sinon : catalogue complet.
         """
         user = request.user
         entreprise = user.get_entreprise(request)
-        
-        # Récupération des paramètres
-        date_debut = request.query_params.get('date_debut')
-        date_fin = request.query_params.get('date_fin')
+        date_debut, date_fin, d0, d1 = self._parse_inventaire_date_bounds(request)
         type_article = request.query_params.get('type_article')
         statut_filtre = request.query_params.get('statut')
-        
-        # Date de fin par défaut: 31 décembre de l'année en cours
-        if not date_fin:
-            annee_actuelle = timezone.now().year
-            date_fin = f"{annee_actuelle}-12-31"
-        
-        # Requête de base: stocks de l'entreprise de l'utilisateur
-        eid, branch_id = self._get_tenant_ids_strict(request)
-        base_filter = {'article__entreprise_id': eid} if eid else {}
-        if user.is_agent(request) and branch_id is not None:
-            base_filter['article__succursale_id'] = branch_id
-        stocks = Stock.objects.filter(
-            **base_filter
-        ).select_related(
-            'article',
-            'article__sous_type_article',
-            'article__sous_type_article__type_article',
-            'article__unite'
-        ).order_by('-id')
-        
-        # Filtrage par type d'article si spécifié
-        if type_article:
-            stocks = stocks.filter(
-                article__sous_type_article__type_article__libelle__icontains=type_article
+        filtrer_mouvements = request.query_params.get('filtrer_mouvements', 'false').lower() in (
+            'true',
+            '1',
+            'yes',
+            'oui',
+        )
+        if force_complet:
+            complet = True
+        else:
+            complet = request.query_params.get('complet', 'true').lower() not in (
+                'false',
+                '0',
+                'no',
+                'non',
             )
-        
-        # Filtrage par statut en base (pour permettre la pagination)
+
+        qs = self._inventaire_article_queryset(request)
+        if filtrer_mouvements:
+            qs = self._filter_articles_mouvements_periode(qs, request, d0, d1)
+        if type_article:
+            qs = qs.filter(
+                sous_type_article__type_article__libelle__icontains=type_article
+            )
         if statut_filtre:
             statut_upper = statut_filtre.upper()
             if statut_upper == 'RUPTURE':
-                stocks = stocks.filter(Qte=0)
+                qs = qs.filter(inv_qte=0)
             elif statut_upper == 'ALERTE':
-                stocks = stocks.filter(Qte__gt=0, Qte__lte=F('seuilAlert'))
+                qs = qs.filter(inv_qte__gt=0, inv_qte__lte=F('inv_seuil'))
             elif statut_upper == 'NORMAL':
-                stocks = stocks.filter(Qte__gt=F('seuilAlert'))
-        
-        # Statistiques sur l'ensemble (sans tout charger)
-        total_articles = stocks.count()
-        en_rupture = stocks.filter(Qte=0).count()
-        en_alerte = stocks.filter(Qte__gt=0, Qte__lte=F('seuilAlert')).count()
-        normaux = stocks.filter(Qte__gt=F('seuilAlert')).count()
-        
-        # Pagination
-        paginator = StandardResultsSetPagination()
-        page_stocks = paginator.paginate_queryset(stocks, request)
-        serializer = InventaireArticleSerializer(page_stocks, many=True)
-        
-        # Générer l'en-tête complet
+                qs = qs.filter(inv_qte__gt=F('inv_seuil'))
+
+        lines = [
+            InventaireStockLine(a, a.inv_qte, a.inv_seuil) for a in qs
+        ]
+        total_articles = len(lines)
+        en_rupture = sum(1 for L in lines if L.Qte == 0)
+        en_alerte = sum(1 for L in lines if L.Qte > 0 and L.Qte <= L.seuilAlert)
+        normaux = sum(1 for L in lines if L.Qte > L.seuilAlert)
+
         entete = self._get_entete_entreprise(entreprise, user)
-        
         resp = {
             'entete': entete,
             'titre': _("RAPPORT D'INVENTAIRE"),
             'periode': {
-                'date_debut': date_debut or 'Début de l\'exercice',
-                'date_fin': date_fin
+                'date_debut': date_debut,
+                'date_fin': date_fin,
+            },
+            'filtres': {
+                'filtrer_mouvements': filtrer_mouvements,
+                'description': _(
+                    'Si filtrer_mouvements=true : articles ayant au moins une entrée '
+                    '(date du bon) ou une sortie (date de création) dans l’intervalle.'
+                )
+                if filtrer_mouvements
+                else _('Catalogue complet du tenant : la période sert uniquement à l’affichage.'),
             },
             'statistiques': {
                 'total_articles': total_articles,
                 'en_alerte': en_alerte,
                 'en_rupture': en_rupture,
-                'normaux': normaux
+                'normaux': normaux,
             },
-            'articles': serializer.data
+            'complet': complet,
         }
-        if page_stocks is not None:
+
+        if complet:
+            resp['articles'] = InventaireArticleSerializer(lines, many=True).data
+            return resp
+
+        paginator = InventaireResultsSetPagination()
+        page_lines = paginator.paginate_queryset(lines, request)
+        resp['articles'] = InventaireArticleSerializer(page_lines, many=True).data
+        if page_lines is not None:
             resp['count'] = paginator.page.paginator.count
             resp['next'] = paginator.get_next_link()
             resp['previous'] = paginator.get_previous_link()
             resp['page_size'] = paginator.get_page_size(request)
-        return Response(resp)
-    
+        return resp
+
+    @action(detail=False, methods=['get'], url_path='inventaire')
+    def inventaire(self, request):
+        """
+        Rapport d'inventaire : **tous** les articles catalogue du tenant (entreprise / succursale),
+        avec stock et seuils (0 si aucune fiche Stock).
+
+        Paramètres optionnels:
+        - date_debut, date_fin: YYYY-MM-DD (validés). Défaut exercice : 01-01 → 31-12 (année courante ou année de date_fin).
+        - filtrer_mouvements: false (défaut) = tout le catalogue du tenant (période = libellé + validation des dates) ;
+          true = ne garder que les articles avec au moins une entrée ou une sortie dans l’intervalle.
+        - type_article: Filtrer par type d'article (libellé)
+        - statut: Filtrer par statut (NORMAL, ALERTE, RUPTURE)
+        - complet: true (défaut) = liste intégrale sans pagination ; false = pagination (page_size jusqu'à 5000)
+
+        GET /api/rapports/inventaire/
+        GET /api/rapports/inventaire/?date_debut=2026-01-01&date_fin=2026-12-31
+        GET /api/rapports/inventaire/?filtrer_mouvements=false
+        GET /api/rapports/inventaire/?statut=ALERTE&complet=false
+        """
+        return Response(self._serialize_inventaire(request))
+
     @action(detail=False, methods=['get'], url_path='inventaire/pdf')
     def inventaire_pdf(self, request):
         """
         Export PDF du rapport d'inventaire.
         Format A4, prêt pour l'impression.
-        
-        Paramètres: mêmes que l'action inventaire
-        
+        Liste **complète** (tous les articles du tenant), sans pagination.
+
+        Paramètres: mêmes que l'action inventaire (dates, filtrer_mouvements, type_article, statut).
+
         GET /api/rapports/inventaire/pdf/
-        GET /api/rapports/inventaire/pdf/?statut=ALERTE
+        GET /api/rapports/inventaire/pdf/?date_debut=2026-01-01&date_fin=2026-06-30
+        GET /api/rapports/inventaire/pdf/?filtrer_mouvements=false
         """
-        # Récupérer les données JSON du rapport
-        json_response = self.inventaire(request)
-        
-        if json_response.status_code != 200:
-            return json_response
-        
-        data = json_response.data
-        
-        # Générer le PDF
+        data = self._serialize_inventaire(request, force_complet=True)
+
         pdf_generator = PDFGenerator()
         pdf_buffer = pdf_generator.generate_inventaire_pdf(data)
         
@@ -450,7 +593,7 @@ class RapportsViewSet(viewsets.ViewSet):
                     })
                 sortie_info = {
                     'id': d.sortie.id,
-                    'motif': getattr(d.sortie, 'motif', ''),
+                    'motif': getattr(d.sortie, 'motif', '') or '',
                     'produits': produits
                 }
 
@@ -878,7 +1021,149 @@ class RapportsViewSet(viewsets.ViewSet):
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         
         return response
-    
+
+    def _parse_ventes_dates(self, request):
+        """Période stricte obligatoire : date_debut et date_fin (YYYY-MM-DD)."""
+        ds = request.query_params.get('date_debut')
+        df = request.query_params.get('date_fin')
+        if not ds or not df:
+            raise ValidationError(
+                {
+                    'detail': _(
+                        'Les paramètres date_debut et date_fin (format YYYY-MM-DD) sont obligatoires '
+                        'pour le rapport des ventes.'
+                    )
+                }
+            )
+        try:
+            d0 = date.fromisoformat(str(ds).strip()[:10])
+            d1 = date.fromisoformat(str(df).strip()[:10])
+        except ValueError:
+            raise ValidationError(
+                {'detail': _('Formats date_debut / date_fin invalides (YYYY-MM-DD).')}
+            )
+        if d0 > d1:
+            raise ValidationError(
+                {'detail': _('date_debut doit être antérieure ou égale à date_fin.')}
+            )
+        return d0, d1
+
+    def _build_ventes_report(self, request):
+        """Construit le JSON du rapport des ventes (lignes de sortie : article, qté, PU, référence)."""
+        user = request.user
+        entreprise = user.get_entreprise(request)
+        d0, d1 = self._parse_ventes_dates(request)
+        eid, branch_id = self._get_tenant_ids_strict(request)
+        if not eid:
+            raise ValidationError({'detail': _('Contexte entreprise manquant.')})
+
+        base_sortie = {'sortie__entreprise_id': eid}
+        if user.is_agent(request) and branch_id is not None:
+            base_sortie['sortie__succursale_id'] = branch_id
+
+        lignes_qs = (
+            LigneSortie.objects.filter(
+                sortie__date_creation__date__gte=d0,
+                sortie__date_creation__date__lte=d1,
+                **base_sortie,
+            )
+            .select_related('sortie', 'sortie__client', 'article', 'devise')
+            .prefetch_related('lots_utilises__lot_entree')
+            .order_by('sortie__date_creation', 'sortie_id', 'id')
+        )
+
+        sortie_ids = list(lignes_qs.values_list('sortie_id', flat=True).distinct())
+        ref_ventes = {}
+        mc_cols = mouvementcaisse_column_names()
+        mc_qs = build_mouvementcaisse_queryset(mc_cols)
+        ct_dette_ref = ContentType.objects.get_for_model(DetteClient)
+        if sortie_ids:
+            q_ref = mc_qs.filter(
+                sortie_id__in=sortie_ids,
+                type='ENTREE',
+            ).exclude(reference_piece='')
+            if mouvementcaisse_has_content_type_id(mc_cols):
+                q_ref = q_ref.exclude(content_type=ct_dette_ref)
+            for mv in q_ref:
+                if mv.sortie_id not in ref_ventes:
+                    ref_ventes[mv.sortie_id] = mv.reference_piece
+
+        lignes_ventes = []
+        tot_qte = 0
+        tot_m_vente = Decimal('0.00')
+
+        for ligne in lignes_qs:
+            s = ligne.sortie
+            pu_achat = ligne.get_cout_achat_unitaire()
+            if not isinstance(pu_achat, Decimal):
+                pu_achat = Decimal(str(pu_achat))
+            pu_vente = ligne.prix_unitaire
+            if not isinstance(pu_vente, Decimal):
+                pu_vente = Decimal(str(pu_vente))
+            q = ligne.quantite
+            tot_qte += q
+            tot_m_vente += (Decimal(q) * pu_vente).quantize(Decimal('0.01'))
+
+            ref = f'Sortie #{s.id}'
+            if s.id in ref_ventes:
+                ref += f' ({ref_ventes[s.id]})'
+
+            lignes_ventes.append(
+                {
+                    'article': ligne.article.nom_scientifique,
+                    'pu_achat': str(pu_achat.quantize(Decimal('0.01'))),
+                    'pu_vente': str(pu_vente),
+                    'quantite': q,
+                    'reference': ref,
+                }
+            )
+
+        return {
+            'entete': self._get_entete_entreprise(entreprise, user),
+            'titre': _("RAPPORT DES VENTES"),
+            'periode': {'date_debut': str(d0), 'date_fin': str(d1)},
+            'lignes_ventes': lignes_ventes,
+            'total_quantite': tot_qte,
+            'total_montant_vente': str(tot_m_vente.quantize(Decimal('0.01'))),
+        }
+
+    @action(detail=False, methods=['get'], url_path='ventes')
+    def ventes(self, request):
+        """
+        Rapport des ventes sur une période stricte.
+
+        Paramètres obligatoires:
+        - date_debut, date_fin : YYYY-MM-DD (bornes inclusives).
+
+        Contenu:
+        - Lignes : article, quantité, PU achat (FIFO), PU vente, référence (sortie + pièce caisse si présente).
+
+        GET /api/rapports/ventes/?date_debut=2026-01-01&date_fin=2026-01-31
+        """
+        try:
+            return Response(self._build_ventes_report(request))
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'], url_path='ventes/pdf')
+    def ventes_pdf(self, request):
+        """
+        Export PDF du rapport des ventes (mêmes paramètres que /ventes/).
+
+        GET /api/rapports/ventes/pdf/?date_debut=2026-01-01&date_fin=2026-01-31
+        """
+        try:
+            data = self._build_ventes_report(request)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        pdf_generator = PDFGenerator()
+        pdf_buffer = pdf_generator.generate_ventes_pdf(data)
+        response = HttpResponse(pdf_buffer, content_type='application/pdf')
+        filename = f"rapport_ventes_{timezone.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
     @action(detail=True, methods=['get'], url_path='fiche-stock')
     def fiche_stock_article_pdf(self, request, pk=None):
         """
@@ -981,7 +1266,7 @@ class RapportsViewSet(viewsets.ViewSet):
         for s in sorties:
             mouvements.append({
                 'datetime': s['date_sortie'],
-                'designation': s['sortie__motif'] or _("Sortie"),
+                'designation': s.get('sortie__motif') or _("Sortie"),
                 'q_in': 0,
                 'pu_in': 0.0,
                 'q_out': s['quantite']

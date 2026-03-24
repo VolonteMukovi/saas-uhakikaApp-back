@@ -4,6 +4,8 @@ from .models import *
 admin.site.register(Unite)
 admin.site.register(TypeArticle)
 admin.site.register(Article)
+admin.site.register(TypeCaisse)
+admin.site.register(DetailMouvementCaisse)
 admin.site.register(MouvementCaisse)
 admin.site.register(Devise)
 admin.site.register(Entreprise)

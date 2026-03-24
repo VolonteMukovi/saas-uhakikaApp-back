@@ -8,10 +8,13 @@ from rest_framework import viewsets, status, serializers, permissions
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .models import (
-    Entreprise, Succursale, Devise, TypeArticle, SousTypeArticle, Unite, Article, Entree, LigneEntree, Stock, Sortie, LigneSortie, LigneSortieLot, BeneficeLot, MouvementCaisse, Client, DetteClient, PaiementDette
+    Entreprise, Succursale, Devise, TypeArticle, SousTypeArticle, Unite, Article, Entree, LigneEntree, Stock, Sortie, LigneSortie, LigneSortieLot, BeneficeLot, MouvementCaisse, Client, DetteClient, TypeCaisse,
 )
+from stock.services.caisse import creer_mouvement_caisse, mouvement_moyen_affiche
+from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
 from django.db import transaction, models
 from django.db.models import Prefetch, Sum
+from django.contrib.contenttypes.models import ContentType
 from rest_framework.exceptions import PermissionDenied, NotFound
 from django.utils.translation import gettext as _, pgettext
 from .serializers import *
@@ -55,20 +58,6 @@ class EnterpriseFilterMixin:
     def get_queryset(self):
         queryset = super().get_queryset()
         return queryset
-
-
-def _get_tenant_ids(request):
-    """
-    Retourne (entreprise_id, succursale_id) depuis le contexte JWT ou le user.
-    Utilisé pour isolation stricte multi-tenant sur tous les ViewSets.
-    """
-    tenant_id = getattr(request, 'tenant_id', None) or (request.user.get_entreprise_id(request) if request.user.is_authenticated else None)
-    branch_id = getattr(request, 'branch_id', None)
-    if branch_id is None and request.user.is_authenticated:
-        m = request.user.get_current_membership(request)
-        if m and m.default_succursale_id:
-            branch_id = m.default_succursale_id
-    return tenant_id, branch_id
 
 
 class TenantFilterMixin:
@@ -257,14 +246,19 @@ class RapportViewSet(viewsets.ViewSet):
         if date_max:
             qs_caisse = qs_caisse.filter(date__date__lte=date_max)
 
-        # 4) Paiements de dettes
-        qs_paiements = PaiementDette.objects.filter(entreprise_id=tenant_id).select_related('dette', 'dette__client', 'devise')
+        # 4) Paiements de dettes (liés à DetteClient)
+        ct_dette = ContentType.objects.get_for_model(DetteClient)
+        qs_paiements = MouvementCaisse.objects.filter(
+            entreprise_id=tenant_id,
+            content_type=ct_dette,
+            type='ENTREE',
+        ).select_related('devise', 'content_type')
         if branch_id is not None:
             qs_paiements = qs_paiements.filter(succursale_id=branch_id)
         if date_min:
-            qs_paiements = qs_paiements.filter(date_paiement__date__gte=date_min)
+            qs_paiements = qs_paiements.filter(date__date__gte=date_min)
         if date_max:
-            qs_paiements = qs_paiements.filter(date_paiement__date__lte=date_max)
+            qs_paiements = qs_paiements.filter(date__date__lte=date_max)
 
         # Construire la liste unifiée d'événements (date, type, désignation, montant_texte, ref)
         events = []
@@ -308,20 +302,25 @@ class RapportViewSet(viewsets.ViewSet):
                 'date': mv.date,
                 'type': f'CAISSE_{mv.type}',
                 'type_display': caisse_type_label,
-                'designation': (mv.motif or '')[:80].replace('\n', ' '),
+                'designation': (mv.motif_affiche() or '')[:80].replace('\n', ' '),
                 'montant_texte': _format_amount(mv.montant, mv.devise),
                 'ref': mv.reference_piece or f"MC#{mv.id}",
             })
 
+        from django.contrib.contenttypes.models import ContentType as CT
+        ct_dette = CT.objects.get_for_model(DetteClient)
         for p in qs_paiements:
-            client_nom = (p.dette.client.nom if p.dette and p.dette.client else '')[:40]
+            dette = None
+            if p.content_type_id == ct_dette.id and p.object_id:
+                dette = DetteClient.objects.filter(pk=p.object_id).select_related('client').first()
+            client_nom = (dette.client.nom if dette and dette.client else '')[:40]
             events.append({
-                'date': p.date_paiement,
+                'date': p.date,
                 'type': 'PAIEMENT_DETTE',
                 'type_display': _('Paiement dette'),
                 'designation': f"{_('Paiement dette')} - {client_nom}".strip()[:80],
-                'montant_texte': _format_amount(p.montant_paye, p.devise),
-                'ref': p.reference or f"Paiement#{p.id}",
+                'montant_texte': _format_amount(p.montant, p.devise),
+                'ref': p.reference_piece or f"Paiement#{p.id}",
             })
 
         # Tri chronologique
@@ -598,8 +597,9 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             # Récupérer le client si fourni
             client = serializer.validated_data.get('client')
             
+            lib = serializer.validated_data.get('motif', '')
             sortie = Sortie.objects.create(
-                motif=serializer.validated_data.get('motif', ''),
+                motif=lib,
                 statut=serializer.validated_data.get('statut', 'PAYEE'),
                 client=client,
                 entreprise_id=tenant_id,
@@ -785,15 +785,16 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 montant_caisse = Decimal('0.00') if sortie.statut == 'EN_CREDIT' else total_devise
                 
                 if total_devise > 0:
-                    MouvementCaisse.objects.create(
+                    creer_mouvement_caisse(
                         montant=montant_caisse.quantize(Decimal('0.01')),
                         devise=devise_obj or default_dev,
-                        type='ENTREE',
-                        motif=f'Vente sortie #{sortie.pk} - {devise_key}' + (' (EN CRÉDIT - montant 0)' if sortie.statut == 'EN_CREDIT' else ''),
-                        moyen='Cash' if sortie.statut == 'PAYEE' else 'Crédit',
-                        sortie=sortie,
+                        type_mouvement='ENTREE',
                         entreprise_id=sortie.entreprise_id,
                         succursale_id=sortie.succursale_id,
+                        content_object=sortie,
+                        sortie=sortie,
+                        reference_piece=f'VENT-{sortie.pk}-{devise_key}',
+                        motif='',
                     )
         return Response(self.get_serializer(sortie).data, status=status.HTTP_201_CREATED)
     
@@ -1038,15 +1039,16 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         )
                     
                     # Créer le mouvement de caisse inverse (SORTIE)
-                    MouvementCaisse.objects.create(
+                    creer_mouvement_caisse(
                         montant=total_devise.quantize(Decimal('0.01')),
                         devise=devise_obj or default_dev,
-                        type='SORTIE',
-                        motif=f'Annulation vente sortie #{sortie.pk} - {devise_key}',
-                        moyen='Ajustement',
-                        sortie=sortie,
+                        type_mouvement='SORTIE',
                         entreprise_id=sortie.entreprise_id,
                         succursale_id=sortie.succursale_id,
+                        content_object=sortie,
+                        sortie=sortie,
+                        reference_piece=f'ANN-VENT-{sortie.pk}-{devise_key}',
+                        motif='Annulation vente',
                     )
             
             sortie.delete()
@@ -1308,15 +1310,16 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     if solde < montant_abs:
                         raise serializers.ValidationError("Solde caisse insuffisant pour ajuster cette vente.")
                 default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first() if tenant_id else Devise.objects.filter(est_principal=True).first()
-                MouvementCaisse.objects.create(
+                creer_mouvement_caisse(
                     montant=montant_abs,
                     devise=default_dev,
-                    type=mouvement_type,
-                    motif=f'Ajustement sortie #{instance.pk} (total {old_total} -> {new_total})',
-                    moyen='Ajustement',
-                    sortie=instance,
+                    type_mouvement=mouvement_type,
                     entreprise_id=instance.entreprise_id,
                     succursale_id=instance.succursale_id,
+                    content_object=instance,
+                    sortie=instance,
+                    reference_piece=f'AJ-VENT-{instance.pk}',
+                    motif='Ajustement vente',
                 )
         
         return Response(self.get_serializer(instance).data)
@@ -1765,6 +1768,95 @@ class ArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelV
     def get_queryset(self):
         return super().get_queryset().order_by('-pk')
 
+    @swagger_auto_schema(
+        operation_summary='Recherche d\'articles (tenant)',
+        manual_parameters=[
+            openapi.Parameter(
+                'q',
+                openapi.IN_QUERY,
+                description='Texte recherché (obligatoire) : nom scientifique, commercial ou code article. Ex. ?q=café',
+                type=openapi.TYPE_STRING,
+                required=True,
+            ),
+            openapi.Parameter(
+                'limit',
+                openapi.IN_QUERY,
+                description='Nombre max de résultats (défaut 25, max 100).',
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                'offset',
+                openapi.IN_QUERY,
+                description='Pagination (décalage).',
+                type=openapi.TYPE_INTEGER,
+            ),
+        ],
+        responses={
+            200: openapi.Response(
+                'Résultats + meta ; champ « message » si aucun article ne correspond.',
+                schema=openapi.Schema(type=openapi.TYPE_OBJECT),
+            ),
+        },
+    )
+    @action(detail=False, methods=['get'], url_path='search')
+    def search(self, request):
+        """Recherche scoping entreprise/succursale ; index FULLTEXT MySQL + repli jetons courts."""
+        from stock.services.article_search import DEFAULT_LIMIT, MAX_LIMIT, search_articles
+
+        tenant_id, branch_id = _get_tenant_ids(request)
+        if tenant_id is None:
+            return Response(
+                {'detail': 'Contexte entreprise manquant.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        q = (request.query_params.get('q') or '').strip()
+        if not q:
+            return Response(
+                {
+                    'detail': _(
+                        'Indiquez ce que vous cherchez avec le paramètre « q ». '
+                        'Exemple : GET /api/articles/search/?q=café'
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            limit = int(request.query_params.get('limit', DEFAULT_LIMIT))
+        except (TypeError, ValueError):
+            limit = DEFAULT_LIMIT
+        try:
+            offset = int(request.query_params.get('offset', 0))
+        except (TypeError, ValueError):
+            offset = 0
+        limit = min(max(1, limit), MAX_LIMIT)
+        offset = max(0, offset)
+
+        articles, meta = search_articles(
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
+        ser = ArticleSearchSerializer(articles, many=True, context={'request': request})
+        payload = {'results': ser.data, 'meta': meta}
+        if meta.get('total', 0) == 0:
+            q_display = (q[:200] + '…') if len(q) > 200 else q
+            if branch_id is not None:
+                msg = _(
+                    'Aucun article ne correspond à « %(term)s » pour cette succursale. '
+                    'Essayez un autre mot-clé (nom scientifique, nom commercial ou code article), '
+                    'vérifiez l’orthographe ou élargissez la recherche (autre succursale si votre rôle le permet).'
+                ) % {'term': q_display}
+            else:
+                msg = _(
+                    'Aucun article ne correspond à « %(term)s » dans votre entreprise. '
+                    'Essayez un autre mot-clé (nom scientifique, nom commercial ou code article) '
+                    'ou vérifiez l’orthographe.'
+                ) % {'term': q_display}
+            payload['message'] = msg
+        return Response(payload)
+
     def perform_create(self, serializer):
         super().perform_create(serializer)
         article = serializer.instance
@@ -1779,22 +1871,104 @@ class StockViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ReadOnly
     def get_queryset(self):
         return super().get_queryset().select_related('article').order_by('-id')
 
+    @swagger_auto_schema(
+        operation_summary='Statistiques stocks par statut (tenant)',
+        operation_description=(
+            'Statuts (1 requête agrégée sur Stock) : NORMAL (Qte > seuilAlert), '
+            'ALERTE / faible (0 < Qte ≤ seuilAlert), RUPTURE (Qte = 0). '
+            'Expiration proche : deux comptages distincts d’articles (lots LigneEntree avec '
+            'quantite_restante > 0, date_expiration entre aujourd’hui et la fin de fenêtre) : '
+            '**expiration_sous_30_jours** (+30 jours glissants), **expiration_sous_3_mois** '
+            '(+3 mois calendaires). Lots déjà expirés exclus. '
+            'Hors pagination. Périmètre : entreprise JWT ; succursale si présente dans le contexte.'
+        ),
+        responses={
+            200: openapi.Response(
+                'Totaux par statut',
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'total': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'normal': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'alerte': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'faible': openapi.Schema(
+                            type=openapi.TYPE_INTEGER,
+                            description='Identique à alerte (libellé métier)',
+                        ),
+                        'rupture': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'by_code': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            description='Mêmes valeurs, clés NORMAL / ALERTE / RUPTURE',
+                        ),
+                        'sum_statuts': openapi.Schema(
+                            type=openapi.TYPE_INTEGER,
+                            description='normal + alerte + rupture (identique à total si cohérent)',
+                        ),
+                        'expiration_sous_30_jours': openapi.Schema(
+                            type=openapi.TYPE_INTEGER,
+                            description=(
+                                'Articles distincts avec au moins un lot non épuisé '
+                                'dont la date d’expiration est dans les 30 prochains jours'
+                            ),
+                        ),
+                        'expiration_periode_30_jours': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            description='Fenêtre [date_debut, date_fin] pour expiration_sous_30_jours',
+                            properties={
+                                'date_debut': openapi.Schema(type=openapi.TYPE_STRING, format='date'),
+                                'date_fin': openapi.Schema(type=openapi.TYPE_STRING, format='date'),
+                            },
+                        ),
+                        'expiration_sous_3_mois': openapi.Schema(
+                            type=openapi.TYPE_INTEGER,
+                            description=(
+                                'Articles distincts avec au moins un lot non épuisé '
+                                'dont la date d’expiration est dans les 3 prochains mois (calendaires)'
+                            ),
+                        ),
+                        'expiration_periode': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            description='Fenêtre [date_debut, date_fin] pour expiration_sous_3_mois',
+                            properties={
+                                'date_debut': openapi.Schema(type=openapi.TYPE_STRING, format='date'),
+                                'date_fin': openapi.Schema(type=openapi.TYPE_STRING, format='date'),
+                            },
+                        ),
+                    },
+                ),
+            ),
+        },
+    )
+    @action(detail=False, methods=['get'], url_path='stats')
+    def stats(self, request):
+        """Agrégation SQL des stocks par statut (hors pagination)."""
+        from stock.services.stock_stats import aggregate_stock_stats
 
-class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
-    queryset = Entree.objects.all()
-    serializer_class = EntreeSerializer
-
-    def get_queryset(self):
-        return super().get_queryset().prefetch_related(
-            Prefetch(
-                'lignes',
-                queryset=LigneEntree.objects.select_related(
-                    'article__sous_type_article',
-                    'article__unite',
-                    'devise'
-                )
+        tenant_id, branch_id = _get_tenant_ids(request)
+        if tenant_id is None:
+            return Response(
+                {'detail': _('Contexte entreprise manquant.')},
+                status=status.HTTP_403_FORBIDDEN,
             )
-        ).order_by('-date_op')
+        payload = aggregate_stock_stats(
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+        )
+        return Response(
+            {
+                'total': payload['total'],
+                'normal': payload['normal'],
+                'alerte': payload['alerte'],
+                'faible': payload['faible'],
+                'rupture': payload['rupture'],
+                'sum_statuts': payload['sum_statuts'],
+                'by_code': payload['by_code'],
+                'expiration_sous_30_jours': payload['expiration_sous_30_jours'],
+                'expiration_periode_30_jours': payload['expiration_periode_30_jours'],
+                'expiration_sous_3_mois': payload['expiration_sous_3_mois'],
+                'expiration_periode': payload['expiration_periode'],
+            }
+        )
 
 
 class LigneEntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
@@ -1936,116 +2110,22 @@ class DeviseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
 
 
 
-class MouvementCaisseViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
-    """CRUD pour les mouvements de caisse."""
-    queryset = MouvementCaisse.objects.all()
-    serializer_class = MouvementCaisseSerializer
-
-
-    def get_queryset(self):
-        user = self.request.user
-        return MouvementCaisse.objects.all().order_by('-date')
-
-    def perform_create(self, serializer):
-        user = self.request.user
-        serializer.save()
-
-    @action(detail=False, methods=['get'], url_path='solde-global')
-    def solde_global(self, request):
-        """Retourne le solde global de caisse pour l'entreprise."""
-        user = request.user
-        mouvements = MouvementCaisse.objects.all()
-        
-        entrees = mouvements.filter(type='ENTREE').aggregate(
-            total=Sum('montant')
-        )['total'] or Decimal('0')
-        
-        sorties = mouvements.filter(type='SORTIE').aggregate(
-            total=Sum('montant')
-        )['total'] or Decimal('0')
-        
-        solde = entrees - sorties
-        
-        return Response({
-            'solde': solde,
-            'entrees': entrees,
-            'sorties': sorties,
-            'devise': 'CDF'  # Supposons CDF par défaut, à adapter selon votre logique
-        })
-
-    @action(detail=False, methods=['get'], url_path='soldes-par-devise')
-    def soldes_par_devise(self, request):
-        """Retourne les soldes de caisse par devise."""
-        user = request.user
-        
-        # Grouper par devise
-        devises = Devise.objects.all()
-        soldes = {}
-        
-        for devise in devises:
-            mouvements = MouvementCaisse.objects.filter(
-                devise=devise
-            )
-            
-            entrees = mouvements.filter(type='ENTREE').aggregate(
-                total=Sum('montant')
-            )['total'] or Decimal('0')
-            
-            sorties = mouvements.filter(type='SORTIE').aggregate(
-                total=Sum('montant')
-            )['total'] or Decimal('0')
-            
-            solde = entrees - sorties
-            
-            soldes[devise.sigle] = {
-                'solde': solde,
-                'entrees': entrees,
-                'sorties': sorties,
-                'devise_id': devise.id,
-                'devise_nom': devise.nom
-            }
-        
-        return Response(soldes)
-
-    @action(detail=False, methods=['get'], url_path='export-csv')
-    def export_csv(self, request):
-        """Export des mouvements de caisse en CSV."""
-        user = request.user
-        mouvements = self.get_queryset()
-        
-        response = HttpResponse(content_type='text/csv')
-        response['Content-Disposition'] = 'attachment; filename="mouvements_caisse.csv"'
-        
-        writer = csv.writer(response)
-        writer.writerow([
-            'Date',
-            'Type',
-            'Montant',
-            'Devise',
-            'Motif',
-            'Moyen'
-        ])
-        
-        for mouvement in mouvements:
-            writer.writerow([
-                mouvement.date.strftime('%Y-%m-%d %H:%M:%S'),
-                mouvement.type,
-                mouvement.montant,
-                mouvement.devise.sigle if mouvement.devise else 'N/A',
-                mouvement.motif,
-                mouvement.moyen
-            ])
-        
-        return response
-
-
 class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     """ViewSet pour gérer les entrées de stock avec support multi-devises (filtré par entreprise/succursale)."""
     queryset = Entree.objects.all()
     serializer_class = EntreeSerializer
 
     def get_queryset(self):
-        return super().get_queryset().order_by('-date_op')
+        return super().get_queryset().prefetch_related(
+            Prefetch(
+                'lignes',
+                queryset=LigneEntree.objects.select_related(
+                    'article__sous_type_article',
+                    'article__unite',
+                    'devise',
+                ),
+            )
+        ).order_by('-date_op')
 
     def perform_create(self, serializer):
         tenant_id, branch_id = self.get_tenant_ids()
@@ -2236,15 +2316,16 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 total_devise = devise_data['total']
                 
                 if total_devise > 0:
-                    MouvementCaisse.objects.create(
+                    creer_mouvement_caisse(
                         montant=total_devise,
                         devise=devise_obj,
-                        type='SORTIE',
-                        motif=f"Approvisionnement entrée #{entree.pk}",
-                        moyen='Cash',
-                        entree=entree,
+                        type_mouvement='SORTIE',
                         entreprise_id=entree.entreprise_id,
                         succursale_id=entree.succursale_id,
+                        content_object=entree,
+                        entree=entree,
+                        reference_piece=f'APPRO-{entree.pk}-{devise_sigle}',
+                        motif='',
                     )
         
         # Retourner la réponse avec les messages informatifs
@@ -2588,15 +2669,16 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 mouvement_type = 'SORTIE' if diff > 0 else 'ENTREE'
                 tenant_id = entree.entreprise_id
                 default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first() if tenant_id else Devise.objects.filter(est_principal=True).first()
-                MouvementCaisse.objects.create(
+                creer_mouvement_caisse(
                     montant=abs(diff),
                     devise=default_dev,
-                    type=mouvement_type,
-                    motif=f"Ajustement entrée #{entree.pk} (total {old_total} -> {new_total})",
-                    moyen='Ajustement',
-                    entree=entree,
+                    type_mouvement=mouvement_type,
                     entreprise_id=entree.entreprise_id,
                     succursale_id=entree.succursale_id,
+                    content_object=entree,
+                    entree=entree,
+                    reference_piece=f'AJ-ENT-{entree.pk}',
+                    motif='Ajustement entrée',
                 )
         
         return Response(self.get_serializer(entree).data, status=status.HTTP_200_OK)
@@ -2623,15 +2705,18 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             if total > 0:
                 tenant_id = entree.entreprise_id
                 default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first() if tenant_id else Devise.objects.filter(est_principal=True).first()
-                MouvementCaisse.objects.create(
+                ligne_dev = entree.lignes.first()
+                devise_annul = ligne_dev.devise if ligne_dev and ligne_dev.devise else default_dev
+                creer_mouvement_caisse(
                     montant=total,
-                    devise=entree.devise or default_dev,
-                    type='ENTREE',
-                    motif=f"Annulation entrée #{entree.pk}",
-                    moyen='Ajustement',
-                    entree=entree,
+                    devise=devise_annul,
+                    type_mouvement='ENTREE',
                     entreprise_id=entree.entreprise_id,
                     succursale_id=entree.succursale_id,
+                    content_object=entree,
+                    entree=entree,
+                    reference_piece=f'ANN-ENT-{entree.pk}',
+                    motif='Annulation entrée',
                 )
             
             entree.delete()
@@ -2714,70 +2799,14 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         return Response(response_data)
 
 
-class LigneEntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
-    """ViewSet pour gérer les lignes d'entrée (filtré par entree__entreprise)."""
-    tenant_lookup = 'entree__entreprise_id'
-    queryset = LigneEntree.objects.all()
-    serializer_class = LigneEntreeSerializer
+class TypeCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    """CRUD des types de caisse (canaux d'encaissement) par entreprise / succursale."""
+
+    queryset = TypeCaisse.objects.all()
+    serializer_class = TypeCaisseSerializer
 
     def get_queryset(self):
-        return super().get_queryset().order_by('-date_entree', '-id')
-
-    def perform_create(self, serializer):
-        user = self.request.user
-        serializer.save()
-
-
-# Export CSV des logs de suppression
-
-    def perform_create(self, serializer):
-        user = self.request.user
-        ligne_entree = serializer.save()
-        # Contrôle ré-approvisionnement niveau ligne (cas de création directe de LigneEntree)
-        stock_actuel, _ = Stock.objects.get_or_create(article=ligne_entree.article, defaults={'Qte': 0, 'seuilAlert': 0})
-        if stock_actuel.Qte > 0:
-            # Annule la création (rollback) et lève erreur
-            raise serializers.ValidationError(
-                f"Réapprovisionnement refusé: l'article '{_article_display_name(ligne_entree.article)}' possède encore {stock_actuel.Qte} en stock. Réapprovisionnement seulement lorsque la quantité atteint 0." )
-        stock_actuel.Qte += ligne_entree.quantite
-        stock_actuel.save()
-
-    def perform_destroy(self, instance):
-        user = self.request.user
-        stock, created = Stock.objects.get_or_create(
-            article=instance.article, 
-
-            defaults={'Qte': 0, 'seuilAlert': 0}
-        )
-        nouvelle_qte = stock.Qte - instance.quantite
-        if nouvelle_qte < 0:
-            raise serializers.ValidationError("Impossible de supprimer cette ligne d'entrée : le stock deviendrait négatif.")
-        stock.Qte = nouvelle_qte
-        stock.save()
-        instance.delete()
-
-    def perform_update(self, serializer):
-        user = self.request.user
-        old_instance = self.get_object()
-        old_article = old_instance.article
-        old_quantite = old_instance.quantite
-        new_instance = serializer.save()
-        new_article = new_instance.article
-        new_quantite = new_instance.quantite
-        # Retirer l'ancienne quantité du stock de l'ancien article
-        stock_old, created = Stock.objects.get_or_create(
-            article=old_article, 
-            defaults={'Qte': 0, 'seuilAlert': 0}
-        )
-        stock_old.Qte -= old_quantite
-        stock_old.save()
-        # Ajouter la nouvelle quantité au stock du nouvel article
-        stock_new, created = Stock.objects.get_or_create(
-            article=new_article, 
-            defaults={'Qte': 0, 'seuilAlert': 0}
-        )
-        stock_new.Qte += new_quantite
-        stock_new.save()
+        return super().get_queryset().order_by('libelle', 'id')
 
 
 class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
@@ -2795,7 +2824,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             qs = qs.filter(date__date__gte=dmin)
         if dmax:
             qs = qs.filter(date__date__lte=dmax)
-        return qs.order_by('-date', '-id')
+        return qs.select_related('devise', 'utilisateur', 'content_type').prefetch_related('details__type_caisse').order_by('-date', '-id')
 
     def perform_create(self, serializer):
         tenant_id, branch_id = self.get_tenant_ids()
@@ -2900,7 +2929,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                     'date': mv.date.isoformat(),
                     'type': mv.type,
                     'montant': float(mv.montant),
-                    'motif': mv.motif[:50] + '...' if len(mv.motif) > 50 else mv.motif
+                    'motif': (mv.motif_affiche()[:50] + '...') if len(mv.motif_affiche()) > 50 else mv.motif_affiche()
                 })
         
         # Calcul des pourcentages et formatage final
@@ -3077,8 +3106,8 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                 'date': mv.date,
                 'type': mv.type,
                 'montant': mv.montant,
-                'motif': mv.motif,
-                'moyen': mv.moyen,
+                'motif': mv.motif_affiche(),
+                'moyen': '',
                 'reference_piece': mv.reference_piece
             }
             devise_data['mouvements_recents'].append(mouvement_info)
@@ -3221,8 +3250,8 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                 'date': mv.date,
                 'type': mv.type,
                 'montant': mv.montant.quantize(Decimal('0.01')),
-                'motif': mv.motif,
-                'moyen': mv.moyen,
+                'motif': mv.motif_affiche(),
+                'moyen': '',
                 'reference_piece': mv.reference_piece,
                 'devise': {
                     'sigle': mv.devise.sigle if mv.devise else 'N/A',
@@ -3341,7 +3370,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         for m in self.get_queryset():
             montant_str = _format_amount(m.montant, m.devise if hasattr(m, 'devise') else None, request.user.get_entreprise(request))
             writer.writerow([
-                m.date.isoformat(), m.type, montant_str, smart_str(m.motif), m.moyen or '', m.reference_piece or ''
+                m.date.isoformat(), m.type, montant_str, smart_str(m.motif_affiche()), '', m.reference_piece or ''
             ])
         return response
 
@@ -3486,10 +3515,8 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             montant_fmt = _format_amount(mv.montant, getattr(mv, 'devise', None))
             data = [
                 [Paragraph("<b>Montant</b>", header_style), Paragraph(montant_fmt, normal)],
-                [Paragraph("<b>Motif</b>", header_style), Paragraph((mv.motif or '-')[:50], normal)],
+                [Paragraph("<b>Motif</b>", header_style), Paragraph((mv.motif_affiche() or '-')[:80], normal)],
             ]
-            if mv.moyen:
-                data.append([Paragraph("<b>Moyen</b>", header_style), Paragraph(mv.moyen, normal)])
             if mv.reference_piece:
                 data.append([Paragraph("<b>Réf.</b>", header_style), Paragraph(mv.reference_piece[:30], normal)])
             col_w = [POS_WIDTH * 0.35, POS_WIDTH * 0.65]
@@ -3582,6 +3609,94 @@ class ClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     qs = qs.filter(is_special=False)
         return qs
 
+    @swagger_auto_schema(
+        operation_summary='Recherche de clients (tenant)',
+        manual_parameters=[
+            openapi.Parameter(
+                'q',
+                openapi.IN_QUERY,
+                description='Texte recherché (obligatoire) : nom, téléphone, adresse, e-mail ou code client. Ex. ?q=dupont',
+                type=openapi.TYPE_STRING,
+                required=True,
+            ),
+            openapi.Parameter(
+                'limit',
+                openapi.IN_QUERY,
+                description='Nombre max de résultats (défaut 25, max 100).',
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                'offset',
+                openapi.IN_QUERY,
+                description='Pagination (décalage).',
+                type=openapi.TYPE_INTEGER,
+            ),
+        ],
+        responses={
+            200: openapi.Response(
+                'Résultats + meta ; champ « message » si aucun client ne correspond.',
+                schema=openapi.Schema(type=openapi.TYPE_OBJECT),
+            ),
+        },
+    )
+    @action(detail=False, methods=['get'], url_path='search')
+    def search(self, request):
+        from stock.services.client_search import DEFAULT_LIMIT, MAX_LIMIT, search_clients
+
+        tenant_id, branch_id = _get_tenant_ids(request)
+        if tenant_id is None:
+            return Response(
+                {'detail': 'Contexte entreprise manquant.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        q = (request.query_params.get('q') or '').strip()
+        if not q:
+            return Response(
+                {
+                    'detail': _(
+                        'Indiquez ce que vous cherchez avec le paramètre « q ». '
+                        'Exemple : GET /api/clients/search/?q=dupont'
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            limit = int(request.query_params.get('limit', DEFAULT_LIMIT))
+        except (TypeError, ValueError):
+            limit = DEFAULT_LIMIT
+        try:
+            offset = int(request.query_params.get('offset', 0))
+        except (TypeError, ValueError):
+            offset = 0
+        limit = min(max(1, limit), MAX_LIMIT)
+        offset = max(0, offset)
+
+        clients, meta = search_clients(
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
+        ser = ClientSearchSerializer(clients, many=True, context={'request': request})
+        payload = {'results': ser.data, 'meta': meta}
+        if meta.get('total', 0) == 0:
+            q_display = (q[:200] + '…') if len(q) > 200 else q
+            if branch_id is not None:
+                msg = _(
+                    'Aucun client ne correspond à « %(term)s » pour cette succursale. '
+                    'Essayez un autre mot-clé (nom, téléphone, adresse, e-mail ou code client), '
+                    'vérifiez l’orthographe ou élargissez la recherche (autre succursale si votre rôle le permet).'
+                ) % {'term': q_display}
+            else:
+                msg = _(
+                    'Aucun client ne correspond à « %(term)s » dans votre entreprise. '
+                    'Essayez un autre mot-clé (nom, téléphone, adresse, e-mail ou code client) '
+                    'ou vérifiez l’orthographe.'
+                ) % {'term': q_display}
+            payload['message'] = msg
+        return Response(payload)
+
     @action(detail=True, methods=['get'])
     def dettes(self, request, pk=None):
         """
@@ -3629,11 +3744,11 @@ class ClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
 
 class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     """ViewSet pour la gestion des dettes clients (filtré par entreprise/succursale)."""
-    queryset = DetteClient.objects.select_related('client', 'devise', 'sortie').prefetch_related('paiements').all()
+    queryset = DetteClient.objects.select_related('client', 'devise', 'sortie').all()
     serializer_class = DetteClientSerializer
 
     def get_queryset(self):
-        return super().get_queryset().select_related('client', 'devise', 'sortie').prefetch_related('paiements').order_by('-date_creation', '-id')
+        return super().get_queryset().select_related('client', 'devise', 'sortie').order_by('-date_creation', '-id')
 
     def perform_create(self, serializer):
         sortie = serializer.validated_data.get('sortie')
@@ -3702,41 +3817,50 @@ class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
         GET /api/dettes/{id}/paiements/
         """
         dette = self.get_object()
-        paiements_qs = dette.paiements.select_related('devise', 'utilisateur').order_by('-date_paiement', '-id')
+        paiements_qs = (
+            dette._paiements_mouvements_qs()
+            .select_related('devise', 'utilisateur')
+            .prefetch_related('details__type_caisse')
+            .order_by('-date', '-id')
+        )
         page = self.paginate_queryset(paiements_qs)
         if page is not None:
-            serializer = PaiementDetteSerializer(page, many=True, context={'request': request})
+            serializer = PaiementDetteReadSerializer(page, many=True, context={'request': request})
             return self.get_paginated_response(serializer.data)
-        serializer = PaiementDetteSerializer(paiements_qs, many=True, context={'request': request})
+        serializer = PaiementDetteReadSerializer(paiements_qs, many=True, context={'request': request})
         return Response(serializer.data)
 
 
 class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
-    """ViewSet pour la gestion des paiements de dettes (filtré par entreprise/succursale)."""
-    queryset = PaiementDette.objects.select_related('dette', 'dette__client', 'devise', 'utilisateur').all()
-    serializer_class = PaiementDetteSerializer
+    """Paiements de dettes via MouvementCaisse liés à DetteClient (content_type / object_id). URLs inchangées."""
+    queryset = MouvementCaisse.objects.filter(type='ENTREE')
+    serializer_class = PaiementDetteReadSerializer
+    http_method_names = ['get', 'post', 'head', 'options']
 
     def get_queryset(self):
-        return super().get_queryset().select_related('dette', 'dette__client', 'devise', 'utilisateur').order_by('-date_paiement', '-id')
+        ct_dette = ContentType.objects.get_for_model(DetteClient)
+        return (
+            super()
+            .get_queryset()
+            .filter(content_type=ct_dette)
+            .select_related('devise', 'utilisateur', 'content_type')
+            .prefetch_related('details__type_caisse')
+            .order_by('-date', '-id')
+        )
 
-    def perform_create(self, serializer):
-        user = self.request.user
-        dette = serializer.validated_data.get('dette')
-        if dette.statut == 'PAYEE':
-            raise serializers.ValidationError({
-                'dette': 'Cette dette est déjà entièrement payée. Aucun paiement supplémentaire n\'est autorisé.'
-            })
-        montant_paye = serializer.validated_data.get('montant_paye')
-        if montant_paye > dette.solde_restant:
-            raise serializers.ValidationError({
-                'montant_paye': f'Le montant du paiement ({montant_paye}) dépasse le solde restant ({dette.solde_restant}).'
-            })
-        if not serializer.validated_data.get('devise') and dette.devise:
-            serializer.validated_data['devise'] = dette.devise
-        tenant_id, branch_id = self.get_tenant_ids()
-        if not tenant_id:
-            raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
-        serializer.save(utilisateur=user, entreprise_id=tenant_id, succursale_id=branch_id)
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return PaiementDetteWriteSerializer
+        return PaiementDetteReadSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = PaiementDetteWriteSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        mc = serializer.save()
+        return Response(
+            PaiementDetteReadSerializer(mc, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=['get'], url_path='recu-paiement', permission_classes=[IsAuthenticated])
     def recu_paiement_pdf(self, request, pk=None):
@@ -3745,9 +3869,16 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         S'inspire du design de la facture de vente. Peut être utilisé à chaque paiement (partiel ou total).
         GET /api/paiements-dettes/{id}/recu-paiement/
         """
+        from django.contrib.contenttypes.models import ContentType as CTModel
+
         user = request.user
         paiement = self.get_object()
-        dette = paiement.dette
+        ct_dette = CTModel.objects.get_for_model(DetteClient)
+        if paiement.content_type_id != ct_dette.id or not paiement.object_id:
+            return Response({'error': _('Mouvement invalide pour un reçu de paiement de dette.')}, status=400)
+        dette = DetteClient.objects.filter(pk=paiement.object_id).select_related('client').first()
+        if not dette:
+            return Response({'error': _('Dette introuvable.')}, status=404)
         client = dette.client
         entreprise = user.get_entreprise(request)
 
@@ -3780,7 +3911,7 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         symbole = (devise_obj.symbole or devise_obj.sigle or '') if devise_obj else ''
 
         elements.append(Paragraph(f"{_('N° Reçu')}: RECU-{paiement.pk:06d}", info_style))
-        elements.append(Paragraph(f"{_('Date et heure')}: {paiement.date_paiement.strftime('%d/%m/%Y %H:%M')}", info_style))
+        elements.append(Paragraph(f"{_('Date et heure')}: {paiement.date.strftime('%d/%m/%Y %H:%M')}", info_style))
         elements.append(Spacer(1, 1*mm))
 
         # CLIENT (labels traduits)
@@ -3844,7 +3975,7 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         elements.append(Paragraph(f"<b>{_('Détail du paiement')}</b>", header_style))
         table_paiement_data = [
             [Paragraph(f"<b>{_('Libellé')}</b>", normal), Paragraph(f"<b>{_('Valeur')}</b>", normal), Paragraph(f"<b>{_('Reste')}</b>", normal)],
-            [Paragraph(_("Montant payé (ce reçu)"), normal), Paragraph(f"<b>{paiement.montant_paye:.2f} {symbole}</b>", normal), Paragraph(f"<b>{solde_apres:.2f} {symbole}</b>", normal)],
+            [Paragraph(_("Montant payé (ce reçu)"), normal), Paragraph(f"<b>{paiement.montant:.2f} {symbole}</b>", normal), Paragraph(f"<b>{solde_apres:.2f} {symbole}</b>", normal)],
         ]
         table_paiement = Table(table_paiement_data, colWidths=[POS_WIDTH*0.25, POS_WIDTH*0.25, POS_WIDTH*0.50])
         table_paiement.setStyle(TableStyle([
@@ -3863,15 +3994,26 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         elements.append(Spacer(1, 1.5*mm))
 
         # Historique des paiements (fond blanc, traduit)
-        autres_paiements = PaiementDette.objects.filter(dette=dette).exclude(pk=paiement.pk).order_by('-date_paiement')[:5]
+        autres_paiements = (
+            MouvementCaisse.objects.filter(
+                content_type=ct_dette,
+                object_id=dette.pk,
+                type='ENTREE',
+            )
+            .exclude(pk=paiement.pk)
+            .select_related('devise')
+            .prefetch_related('details__type_caisse')
+            .order_by('-date')[:5]
+        )
         if autres_paiements.exists():
             elements.append(Paragraph(f"<b>{_('Autres paiements sur cette dette')}</b>", header_style))
             hist_data = [[Paragraph(f"<b>{_('Date')}</b>", normal), Paragraph(f"<b>{_('Montant')}</b>", normal), Paragraph(f"<b>{_('Moyen')}</b>", normal)]]
             for p in autres_paiements:
+                moyen_h = mouvement_moyen_affiche(p) or '-'
                 hist_data.append([
-                    Paragraph(p.date_paiement.strftime('%d/%m/%Y %H:%M'), normal),
-                    Paragraph(f"{p.montant_paye:.2f} {symbole}", normal),
-                    Paragraph(p.moyen or '-', normal),
+                    Paragraph(p.date.strftime('%d/%m/%Y %H:%M'), normal),
+                    Paragraph(f"{p.montant:.2f} {symbole}", normal),
+                    Paragraph(moyen_h or '-', normal),
                 ])
             hist_table = Table(hist_data, colWidths=[POS_WIDTH*0.35, POS_WIDTH*0.30, POS_WIDTH*0.35])
             hist_table.setStyle(TableStyle([
