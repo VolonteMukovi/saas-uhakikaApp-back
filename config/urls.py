@@ -45,6 +45,7 @@ urlpatterns = [
     path('api/stock/import-excel/', include('import_excel.urls')),
     path('api/', include('users.urls')),
     path('api/', include('stock.urls')),
+    path('api/', include('order.urls')),
     path('api/', include('rapports.urls')),
     path('api/i18n-test/', i18n_test, name='i18n_test'),
     path('api/auth/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),

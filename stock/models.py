@@ -1,5 +1,6 @@
 from django.db import models
 from django.conf import settings
+from django.contrib.auth.hashers import check_password, is_password_usable, make_password
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import Sum, F, OuterRef, Subquery, DecimalField, Value
@@ -241,26 +242,75 @@ class Client(models.Model):
     telephone = models.CharField(max_length=50, blank=True, null=True)
     adresse = models.CharField(max_length=255, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
-    is_special = models.BooleanField(
-        default=False,
-        verbose_name='Client spécial',
-        help_text='Si vrai, client priorisé dans les rapports (ex. dettes) par défaut.',
+    password = models.CharField(
+        max_length=128,
+        blank=True,
+        null=True,
+        verbose_name="Mot de passe (hash)",
+        help_text="Hash du mot de passe pour l’espace client (connexion par e-mail). Laisser vide si le client n’a pas accès au portail.",
     )
     date_enregistrement = models.DateTimeField(auto_now_add=True)
-    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='clients', null=True, blank=True)
-    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='clients', null=True, blank=True)
 
     class Meta:
         ordering = ['nom']
         indexes = [
-            models.Index(fields=['entreprise_id']),
-            models.Index(fields=['succursale_id']),
-            models.Index(fields=['entreprise_id', 'succursale_id']),
-            models.Index(fields=['entreprise_id', 'is_special']),
+            models.Index(fields=['email']),
         ]
 
     def __str__(self):
         return f"{self.id} - {self.nom}"
+
+    def set_password(self, raw_password: str) -> None:
+        """Définit le mot de passe portail (stockage hashé, comme pour User)."""
+        if raw_password is None or str(raw_password).strip() == "":
+            self.password = None
+            return
+        self.password = make_password(raw_password)
+
+    def check_password(self, raw_password: str) -> bool:
+        if not raw_password or not self.password:
+            return False
+        if not is_password_usable(self.password):
+            return False
+        return check_password(raw_password, self.password)
+
+    def has_portal_password(self) -> bool:
+        return bool(self.password and is_password_usable(self.password))
+
+
+class ClientEntreprise(models.Model):
+    """
+    Association Client ↔ Entreprise (multi-tenant), avec succursale préférée optionnelle.
+    Un même contact peut être lié à plusieurs entreprises sans dupliquer la fiche `Client`.
+    """
+
+    client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name="liens_entreprise")
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name="liens_clients")
+    succursale = models.ForeignKey(
+        Succursale,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="liens_clients",
+        help_text="Succursale de rattachement pour ce client dans cette entreprise (optionnel).",
+    )
+    is_special = models.BooleanField(
+        default=False,
+        verbose_name="Client spécial",
+        help_text="Priorité dans les rapports (dettes, etc.) pour ce client dans cette entreprise.",
+    )
+
+    class Meta:
+        unique_together = ("client", "entreprise")
+        indexes = [
+            models.Index(fields=["entreprise_id", "client_id"]),
+            models.Index(fields=["client_id"]),
+            models.Index(fields=["entreprise_id", "is_special"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.client_id} @ {self.entreprise_id}"
+
 
 class DetteClientQuerySet(models.QuerySet):
     """Annotations pour filtres / rapports (montants depuis MouvementCaisse)."""

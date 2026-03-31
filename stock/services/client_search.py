@@ -12,6 +12,8 @@ from django.db.utils import OperationalError
 from django.db.models import Case, FloatField, Q, QuerySet, Value, When
 from django.db.models.expressions import RawSQL
 
+from django.db.models import Q
+
 from stock.models import Client
 
 _FTS_SPECIAL_RE = re.compile(r'[~*<>@+-]')
@@ -47,9 +49,15 @@ def _build_fts5_match(tokens: list[str]) -> str:
 
 
 def _base_qs(entreprise_id: int, succursale_id: int | None) -> QuerySet[Client]:
-    base = Client.objects.filter(entreprise_id=entreprise_id)
+    base = Client.objects.filter(liens_entreprise__entreprise_id=entreprise_id).distinct()
     if succursale_id is not None:
-        base = base.filter(succursale_id=succursale_id)
+        base = base.filter(
+            Q(liens_entreprise__entreprise_id=entreprise_id)
+            & (
+                Q(liens_entreprise__succursale_id=succursale_id)
+                | Q(liens_entreprise__succursale__isnull=True)
+            )
+        ).distinct()
     return base
 
 
@@ -68,7 +76,8 @@ def _postgresql_similarity(base: QuerySet[Client], q: str) -> QuerySet[Client]:
     return (
         base.annotate(relevance=relevance)
         .filter(relevance__gte=_PG_SIMILARITY_MIN)
-        .order_by('-relevance', 'id')
+        # `id` becomes ambiguous once the base queryset joins ClientEntreprise.
+        .order_by('-relevance', 'pk')
     )
 
 
@@ -88,7 +97,9 @@ def _mysql_fuzzy_fulltext(base: QuerySet[Client], q: str, tokens: list[str]) -> 
 
     qs_nl = base.annotate(
         relevance=RawSQL(
-            'MATCH (nom, telephone, adresse, email, id) AGAINST (%s IN NATURAL LANGUAGE MODE)',
+            # `id` becomes ambiguous once `base` joins `ClientEntreprise`.
+            # Searching by id is already covered by the `q_short` / fallback icontains filters.
+            'MATCH (nom, telephone, adresse, email) AGAINST (%s IN NATURAL LANGUAGE MODE)',
             [q],
             output_field=FloatField(),
         )
@@ -98,13 +109,13 @@ def _mysql_fuzzy_fulltext(base: QuerySet[Client], q: str, tokens: list[str]) -> 
         qs_nl = qs_nl.filter(q_short)
 
     if qs_nl.exists():
-        return qs_nl.order_by('-relevance', 'id')
+        return qs_nl.order_by('-relevance', 'pk')
 
     if fts_tokens:
         boolean = ' '.join(f'+{_escape_fts_token(t)}*' for t in fts_tokens)
         qs_b = base.annotate(
             relevance=RawSQL(
-                'MATCH (nom, telephone, adresse, email, id) AGAINST (%s IN BOOLEAN MODE)',
+                'MATCH (nom, telephone, adresse, email) AGAINST (%s IN BOOLEAN MODE)',
                 [boolean],
                 output_field=FloatField(),
             )
@@ -112,12 +123,12 @@ def _mysql_fuzzy_fulltext(base: QuerySet[Client], q: str, tokens: list[str]) -> 
         if short_tokens:
             qs_b = qs_b.filter(q_short)
         if qs_b.exists():
-            return qs_b.order_by('-relevance', 'id')
+            return qs_b.order_by('-relevance', 'pk')
 
     if short_tokens:
         return base.filter(q_short).annotate(
             relevance=Value(1.0, output_field=FloatField())
-        ).order_by('id')
+        ).order_by('pk')
 
     return _fallback_icontains(base, tokens)
 
@@ -181,7 +192,7 @@ def _sqlite_fts5(
         output_field=FloatField(),
     )
     return (
-        base.filter(id__in=ids).annotate(relevance=preserved).order_by('-relevance', 'id')
+        base.filter(id__in=ids).annotate(relevance=preserved).order_by('-relevance', 'pk')
     )
 
 
@@ -195,7 +206,7 @@ def _fallback_icontains(base: QuerySet[Client], tokens: list[str]) -> QuerySet[C
             | Q(adresse__icontains=t)
             | Q(email__icontains=t)
         )
-    return base.filter(q).annotate(relevance=Value(1.0, output_field=FloatField())).order_by('id')
+    return base.filter(q).annotate(relevance=Value(1.0, output_field=FloatField())).order_by('pk')
 
 
 def client_search_queryset(
@@ -217,7 +228,8 @@ def client_search_queryset(
     if vendor == 'mysql':
         return _mysql_fuzzy(base, q, tokens)
     if vendor == 'sqlite':
-        return _sqlite_fts5(base, entreprise_id, succursale_id, tokens)
+        # FTS5 historique sur stock_client.entreprise_id : périmètre désormais via ClientEntreprise.
+        return _fallback_icontains(base, tokens)
 
     return _fallback_icontains(base, tokens)
 

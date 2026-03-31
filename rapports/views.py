@@ -73,7 +73,7 @@ def _dettes_rapport_is_special_filter(request):
     - is_special=all (ou both, *, any, tous) : tous les clients (sans filtre sur is_special).
 
     Returns:
-        dict: {'is_special': bool} à passer à Client.objects.filter(**dict)
+        dict: {'is_special': bool} pour filtrer via `ClientEntreprise` (lien entreprise courant)
         None: aucun filtre sur is_special
     Raises:
         ValueError: paramètre non reconnu
@@ -530,9 +530,15 @@ class RapportsViewSet(viewsets.ViewSet):
         from stock.models import Client, DetteClient
         client_qs = Client.objects.filter(id=client_id)
         if eid:
-            client_qs = client_qs.filter(entreprise_id=eid)
-        if user.is_agent(request) and branch_id is not None:
-            client_qs = client_qs.filter(succursale_id=branch_id)
+            client_qs = client_qs.filter(liens_entreprise__entreprise_id=eid).distinct()
+        if user.is_agent(request) and branch_id is not None and eid:
+            client_qs = client_qs.filter(
+                Q(liens_entreprise__entreprise_id=eid)
+                & (
+                    Q(liens_entreprise__succursale_id=branch_id)
+                    | Q(liens_entreprise__succursale__isnull=True)
+                )
+            ).distinct()
         try:
             client = client_qs.get()
         except Client.DoesNotExist:
@@ -540,7 +546,8 @@ class RapportsViewSet(viewsets.ViewSet):
                 'error': f'Client avec ID "{client_id}" non trouvé'
             }, status=status.HTTP_404_NOT_FOUND)
 
-        if special_kw is not None and client.is_special != special_kw['is_special']:
+        lien = client.liens_entreprise.filter(entreprise_id=eid).first() if eid else None
+        if special_kw is not None and (not lien or lien.is_special != special_kw['is_special']):
             return Response({
                 'error': _(
                     'Client non trouvé ou hors du périmètre du filtre is_special pour ce rapport.'
@@ -734,19 +741,20 @@ class RapportsViewSet(viewsets.ViewSet):
         if date_fin_obj:
             filtre_dettes['date_creation__date__lte'] = date_fin_obj
 
-        base_client_filter = {'entreprise_id': eid} if eid else {}
-        if user.is_agent(request) and branch_id is not None:
-            base_client_filter['succursale_id'] = branch_id
         clients_avec_dettes = Client.objects.filter(
             dettes__solde_restant__gt=0,
             dettes__statut='EN_COURS',
-            **base_client_filter
         )
+        if eid:
+            clients_avec_dettes = clients_avec_dettes.filter(dettes__entreprise_id=eid)
         if user.is_agent(request) and branch_id is not None:
             clients_avec_dettes = clients_avec_dettes.filter(dettes__succursale_id=branch_id)
 
-        if special_kw is not None:
-            clients_avec_dettes = clients_avec_dettes.filter(**special_kw)
+        if special_kw is not None and eid:
+            clients_avec_dettes = clients_avec_dettes.filter(
+                liens_entreprise__entreprise_id=eid,
+                liens_entreprise__is_special=special_kw['is_special'],
+            ).distinct()
 
         # Appliquer le filtre de date sur les dettes si nécessaire
         if date_debut_obj or date_fin_obj:
@@ -773,6 +781,7 @@ class RapportsViewSet(viewsets.ViewSet):
         tot_solde_global = Decimal('0.00')
 
         for client in page_clients:
+            lien = client.liens_entreprise.filter(entreprise_id=eid).first() if eid else None
             # Récupérer toutes les dettes EN_COURS du client avec le filtre de date
             dettes_encours = DetteClient.objects.filter(
                 client=client,
@@ -799,7 +808,7 @@ class RapportsViewSet(viewsets.ViewSet):
                     'telephone': client.telephone or '',
                     'adresse': client.adresse or '',
                     'email': client.email or '',
-                    'is_special': client.is_special,
+                    'is_special': bool(lien.is_special) if lien else False,
                     'totaux_encours': {
                         'montant_total': str(tot_montant_client.quantize(Decimal('0.01'))),
                         'montant_paye': str(tot_paye_client.quantize(Decimal('0.01'))),

@@ -646,7 +646,11 @@ def download_template_sortie(request):
     tenant_id = request.user.get_entreprise_id(request) if request.user.is_authenticated else None
     articles_qs = Article.objects.filter(entreprise_id=tenant_id) if tenant_id else Article.objects.all()
     devises_qs = Devise.objects.filter(entreprise_id=tenant_id) if tenant_id else Devise.objects.all()
-    clients_qs = Client.objects.filter(entreprise_id=tenant_id) if tenant_id else Client.objects.all()
+    clients_qs = (
+        Client.objects.filter(liens_entreprise__entreprise_id=tenant_id).distinct()
+        if tenant_id
+        else Client.objects.all()
+    )
 
     wb = openpyxl.Workbook()
     ws = wb.active

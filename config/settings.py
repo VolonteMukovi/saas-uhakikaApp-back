@@ -34,6 +34,7 @@ INSTALLED_APPS = [
     "stock",
     "import_excel",
     "rapports",  # Application pour la génération des rapports
+    "order",  # Gestion des marchandises en cours de transport
 ]
 
 MIDDLEWARE = [

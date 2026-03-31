@@ -1,9 +1,30 @@
 from rest_framework import serializers
 from .models import (
-    Entreprise, Succursale, Devise, TypeArticle, SousTypeArticle, Unite, Article, Entree, LigneEntree, Stock, Sortie, LigneSortie, LigneSortieLot, BeneficeLot, MouvementCaisse, Client, DetteClient, TypeCaisse, DetailMouvementCaisse,
+    Entreprise,
+    Succursale,
+    Devise,
+    TypeArticle,
+    SousTypeArticle,
+    Unite,
+    Article,
+    Entree,
+    LigneEntree,
+    Stock,
+    Sortie,
+    LigneSortie,
+    LigneSortieLot,
+    BeneficeLot,
+    MouvementCaisse,
+    Client,
+    ClientEntreprise,
+    DetteClient,
+    TypeCaisse,
+    DetailMouvementCaisse,
 )
 from django.db import transaction, models
 from django.utils.translation import gettext as _
+
+from order.services.lot_closure import entree_is_from_lot_closure
 
 from stock.services.article_names import article_duplicate_exists, normalize_nom_scientifique
 from stock.services.tenant_context import get_tenant_ids
@@ -227,32 +248,212 @@ class LigneSortieSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class ClientEntrepriseSerializer(serializers.ModelSerializer):
+    client_id = serializers.CharField(source="client.id", read_only=True)
+    client_nom = serializers.CharField(source="client.nom", read_only=True)
+    entreprise_nom = serializers.CharField(source="entreprise.nom", read_only=True)
+    succursale_nom = serializers.CharField(source="succursale.nom", read_only=True, allow_null=True)
+
+    class Meta:
+        model = ClientEntreprise
+        fields = (
+            "id",
+            "client",
+            "client_id",
+            "client_nom",
+            "entreprise",
+            "entreprise_nom",
+            "succursale",
+            "succursale_nom",
+            "is_special",
+        )
+
+    def validate(self, attrs):
+        ent = attrs.get("entreprise") or (self.instance and self.instance.entreprise)
+        suc = attrs.get("succursale", serializers.empty)
+        if suc is serializers.empty:
+            suc = self.instance.succursale if self.instance else None
+        if suc is not None and ent is not None and suc.entreprise_id != ent.id:
+            raise serializers.ValidationError(
+                {"succursale": _("La succursale doit appartenir à l’entreprise du lien.")}
+            )
+        return attrs
+
+
+class ClientLienWriteSerializer(serializers.ModelSerializer):
+    """Création / remplacement des liens client ↔ entreprise."""
+
+    class Meta:
+        model = ClientEntreprise
+        fields = ("entreprise", "succursale", "is_special")
+
+    def validate(self, attrs):
+        ent = attrs.get("entreprise")
+        suc = attrs.get("succursale")
+        if suc is not None and ent is not None and suc.entreprise_id != ent.id:
+            raise serializers.ValidationError(
+                {"succursale": _("La succursale doit appartenir à l’entreprise du lien.")}
+            )
+        return attrs
+
+
+class ExistingClientReadSerializer(serializers.ModelSerializer):
+    """Réponse riche lors d'une tentative de création d'un client dupliqué (email)."""
+
+    liens_entreprise = ClientEntrepriseSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Client
+        fields = (
+            "id",
+            "nom",
+            "telephone",
+            "adresse",
+            "email",
+            "date_enregistrement",
+            "liens_entreprise",
+        )
+
 
 class ClientSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
-    
+    password = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        style={"input_type": "password"},
+        help_text="Mot de passe portail (connexion par e-mail). Laisser vide pour ne pas modifier.",
+    )
+    liens_entreprise = ClientEntrepriseSerializer(many=True, read_only=True)
+    liens = ClientLienWriteSerializer(many=True, write_only=True, required=False)
+
     class Meta:
         model = Client
-        fields = '__all__'
-    
+        fields = [f.name for f in Client._meta.fields if f.name != "password"] + [
+            "password",
+            "liens_entreprise",
+            "liens",
+        ]
+
+    def _assert_liens_tenant(self, liens_data, tenant_id):
+        if tenant_id is None:
+            return
+        for row in liens_data:
+            ent = row.get("entreprise")
+            if ent is not None and ent.id != tenant_id:
+                raise serializers.ValidationError(
+                    {"liens": _("Chaque entreprise doit correspondre au contexte courant (JWT).")}
+                )
+
+    @transaction.atomic
     def create(self, validated_data):
-        # Récupérer le dernier client de cette entreprise pour générer le nouvel ID
-        last_client = Client.objects.filter(   
-            id__startswith=f"CLI"
-        ).order_by('-id').first()
-        
+        liens_in = validated_data.pop("liens", None)
+        password = validated_data.pop("password", None)
+        request = self.context.get("request")
+        tenant_id, branch_id = get_tenant_ids(request) if request else (None, None)
+        user = getattr(request, "user", None) if request else None
+        if not (user and user.is_authenticated) and tenant_id is None:
+            if not liens_in:
+                raise serializers.ValidationError(
+                    {
+                        "liens": _(
+                            "Sans connexion, indiquez au moins une entreprise : tableau « liens » "
+                            "avec un objet contenant « entreprise » (id) et éventuellement « succursale »."
+                        )
+                    }
+                )
+
+        email = (validated_data.get("email") or "").strip()
+        if email:
+            existing = (
+                Client.objects.filter(email__iexact=email)
+                .prefetch_related("liens_entreprise__entreprise", "liens_entreprise__succursale")
+                .first()
+            )
+            if existing is not None:
+                already = set(existing.liens_entreprise.values_list("entreprise_id", flat=True))
+                all_entreprises_qs = Entreprise.objects.all().order_by("id")
+                entreprises_disponibles_qs = all_entreprises_qs.exclude(id__in=already)
+                raise serializers.ValidationError(
+                    {
+                        "detail": _("Un client avec cet email existe déjà dans le système."),
+                        "existing_client": ExistingClientReadSerializer(existing, context={"request": request}).data,
+                        "suggestion": _(
+                            "Si vous souhaitez créer un nouveau profil, veuillez utiliser une adresse email différente ainsi qu’un nom distinct."
+                        ),
+                        # Pour aider le frontend : toutes les entreprises existantes + celles non encore associées.
+                        "entreprises_disponibles_ids": list(all_entreprises_qs.values_list("id", flat=True)),
+                        "entreprises_disponibles": EntrepriseSerializer(
+                            all_entreprises_qs, many=True, context={"request": request}
+                        ).data,
+                        "entreprises_non_associees_ids": list(
+                            entreprises_disponibles_qs.values_list("id", flat=True)
+                        ),
+                        "entreprises_non_associees": EntrepriseSerializer(
+                            entreprises_disponibles_qs, many=True, context={"request": request}
+                        ).data,
+                        "action": {
+                            "endpoint": "/api/clients/associate-entreprise/",
+                            "method": "POST",
+                            "hint": _(
+                                "Utilisez cet endpoint pour associer ce client existant à votre entreprise, sans le recréer."
+                            ),
+                        },
+                    }
+                )
+
+        last_client = Client.objects.filter(id__startswith="CLI").order_by("-id").first()
         if last_client:
-            # Extraire le numéro et incrémenter
             try:
-                last_num = int(last_client.id[3:])  # CLI0001 -> 1
+                last_num = int(last_client.id[3:])
                 new_num = last_num + 1
             except (ValueError, IndexError):
                 new_num = 1
         else:
             new_num = 1
-        
-        validated_data['id'] = f"CLI{new_num:04d}"
-        return super().create(validated_data)
+        validated_data["id"] = f"CLI{new_num:04d}"
+
+        instance = super().create(validated_data)
+
+        if liens_in is not None:
+            self._assert_liens_tenant(liens_in, tenant_id)
+            for row in liens_in:
+                ClientEntreprise.objects.create(client=instance, **row)
+        elif tenant_id:
+            ClientEntreprise.objects.create(
+                client=instance,
+                entreprise_id=tenant_id,
+                succursale_id=branch_id,
+                is_special=False,
+            )
+
+        if password and str(password).strip():
+            instance.set_password(password)
+            instance.save(update_fields=["password"])
+        return instance
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        liens_in = validated_data.pop("liens", None)
+        password = validated_data.pop("password", None)
+        request = self.context.get("request")
+        tenant_id, _ = get_tenant_ids(request) if request else (None, None)
+
+        instance = super().update(instance, validated_data)
+        if liens_in is not None:
+            self._assert_liens_tenant(liens_in, tenant_id)
+            instance.liens_entreprise.all().delete()
+            for row in liens_in:
+                ClientEntreprise.objects.create(client=instance, **row)
+
+        if password is not None:
+            if str(password).strip():
+                instance.set_password(password)
+                instance.save(update_fields=["password"])
+            else:
+                instance.password = None
+                instance.save(update_fields=["password"])
+        return instance
 
 
 class ClientSearchSerializer(ClientSerializer):
@@ -261,7 +462,10 @@ class ClientSearchSerializer(ClientSerializer):
     relevance = serializers.FloatField(read_only=True)
 
     class Meta(ClientSerializer.Meta):
-        fields = [f.name for f in Client._meta.fields] + ['relevance']
+        fields = [f.name for f in Client._meta.fields if f.name != "password"] + [
+            "relevance",
+            "liens_entreprise",
+        ]
 
 
 class SortieSerializer(serializers.ModelSerializer):
@@ -531,13 +735,44 @@ class EntreeSerializer(serializers.ModelSerializer):
     """
     Serializer pour Entree.
     Le champ devise est OBLIGATOIRE uniquement dans chaque ligne (lignes[*].devise).
+
+    Entrée issue de la clôture d'un lot : ``lot_id`` renseigné, ``libele`` imposé côté serveur
+    (non modifiable).
     """
     lignes = LigneEntreeSerializer(many=True)
+    lot_id = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Entree
-        fields = ['id', 'libele', 'description', 'date_op', 'lignes']
-        read_only_fields = ['date_op']
+        fields = ['id', 'libele', 'description', 'date_op', 'lignes', 'lot_id']
+        read_only_fields = ['date_op', 'lot_id']
+
+    def get_lot_id(self, obj):
+        from order.models import Lot
+
+        return Lot.objects.filter(entree_stock_id=obj.pk).values_list('pk', flat=True).first()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        inst = getattr(self, 'instance', None)
+        if inst is not None and getattr(inst, 'pk', None) and entree_is_from_lot_closure(inst):
+            self.fields['libele'].read_only = True
+            self.fields['description'].read_only = True
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if entree_is_from_lot_closure(instance):
+            data['description'] = ''
+        return data
+
+    def validate(self, attrs):
+        inst = self.instance
+        if inst is not None and getattr(inst, 'pk', None) and entree_is_from_lot_closure(inst):
+            if 'libele' in attrs and attrs.get('libele') != inst.libele:
+                raise serializers.ValidationError(
+                    {'libele': _("Le libellé d'une entrée issue d'un lot clôturé ne peut pas être modifié.")}
+                )
+        return attrs
 
     def create(self, validated_data):
         lignes_data = validated_data.pop('lignes', [])

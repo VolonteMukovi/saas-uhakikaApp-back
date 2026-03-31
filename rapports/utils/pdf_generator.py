@@ -63,6 +63,17 @@ class PDFGenerator:
             spaceAfter=3,
             alignment=TA_LEFT
         ))
+        # Même rendu que EntrepriseNom / EntrepriseInfo mais centré (rapports A4)
+        self.styles.add(ParagraphStyle(
+            name='EntrepriseNomCenter',
+            parent=self.styles['EntrepriseNom'],
+            alignment=TA_CENTER,
+        ))
+        self.styles.add(ParagraphStyle(
+            name='EntrepriseInfoCenter',
+            parent=self.styles['EntrepriseInfo'],
+            alignment=TA_CENTER,
+        ))
         # Variantes compactes (facture POS : nom + tél serrés, moins d'espace)
         self.styles.add(ParagraphStyle(
             name='EntrepriseNomCompact',
@@ -93,21 +104,32 @@ class PDFGenerator:
             spaceAfter=6
         ))
     
-    def _create_entete(self, entete_data, compact=False):
+    def _create_entete(self, entete_data, compact=False, centered=True):
         """Créer l'en-tête simplifié : logo (si présent), nom, slogan, téléphone uniquement.
-        compact=True : espacements réduits (nom/tél serrés, peu d'espace avant le titre) pour facture POS."""
+        compact=True : espacements réduits (nom/tél serrés, peu d'espace avant le titre) pour facture POS.
+        centered=True : bloc centré sur la largeur utile (rapports A4). Les tickets POS passent compact=True
+        ou centered=False pour conserver l'alignement à gauche."""
+        if compact:
+            centered = False
         elements = []
         entreprise = entete_data.get('entreprise', {})
-        style_nom = self.styles['EntrepriseNomCompact'] if compact else self.styles['EntrepriseNom']
-        style_info = self.styles['EntrepriseInfoCompact'] if compact else self.styles['EntrepriseInfo']
+        if compact:
+            style_nom = self.styles['EntrepriseNomCompact']
+            style_info = self.styles['EntrepriseInfoCompact']
+        elif centered:
+            style_nom = self.styles['EntrepriseNomCenter']
+            style_info = self.styles['EntrepriseInfoCenter']
+        else:
+            style_nom = self.styles['EntrepriseNom']
+            style_info = self.styles['EntrepriseInfo']
         space_after_block = 4 if compact else 12  # points
         
-        # Logo (si disponible) — aligné au début (gauche)
+        # Logo (si disponible) — gauche (tickets) ou centré (A4)
         logo_path = entreprise.get('logo_path')
         if logo_path:
             try:
                 img = Image(logo_path, width=40 * mm, height=40 * mm)
-                img.hAlign = 'LEFT'
+                img.hAlign = 'CENTER' if centered else 'LEFT'
                 elements.append(img)
                 elements.append(Spacer(1, 4))
             except Exception:

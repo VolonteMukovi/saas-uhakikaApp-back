@@ -8,12 +8,30 @@ from rest_framework import viewsets, status, serializers, permissions
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .models import (
-    Entreprise, Succursale, Devise, TypeArticle, SousTypeArticle, Unite, Article, Entree, LigneEntree, Stock, Sortie, LigneSortie, LigneSortieLot, BeneficeLot, MouvementCaisse, Client, DetteClient, TypeCaisse,
+    Entreprise,
+    Succursale,
+    Devise,
+    TypeArticle,
+    SousTypeArticle,
+    Unite,
+    Article,
+    Entree,
+    LigneEntree,
+    Stock,
+    Sortie,
+    LigneSortie,
+    LigneSortieLot,
+    BeneficeLot,
+    MouvementCaisse,
+    Client,
+    ClientEntreprise,
+    DetteClient,
+    TypeCaisse,
 )
 from stock.services.caisse import creer_mouvement_caisse, mouvement_moyen_affiche
 from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
 from django.db import transaction, models
-from django.db.models import Prefetch, Sum
+from django.db.models import Prefetch, Q, Sum
 from django.contrib.contenttypes.models import ContentType
 from rest_framework.exceptions import PermissionDenied, NotFound
 from django.utils.translation import gettext as _, pgettext
@@ -21,6 +39,9 @@ from .serializers import *
 from users.permissions import IsSuperAdmin, IsAdmin, IsSuperAdminOrAdmin, IsSuperAdminOrReadOnlyAdmin, IsOwnerOrSuperAdmin, IsAdminOrUser
 from users.serializers import UserSerializer
 from stock.permissions import EntreprisePermission, IsAdminOrUser as StockIsAdminOrUser
+from users.authentication import JWTAuthenticationWithContext
+from order.authentication import ClientJWTAuthentication
+from order.permissions import IsClientAuthenticated
 
 
 class BusinessPermissionMixin:
@@ -71,9 +92,17 @@ class TenantFilterMixin:
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        if not self.request.user.is_authenticated:
+        # Support portail client (JWT dédié) : `request.user` est vide, mais
+        # `request.client` / `request.client_membership` sont présents.
+        if not self.request.user.is_authenticated and getattr(self.request, "client", None) is None:
             return queryset.none() if (self.tenant_lookup or hasattr(queryset.model, 'entreprise_id')) else queryset
-        tenant_id, branch_id = _get_tenant_ids(self.request)
+
+        if getattr(self.request, "client", None) is not None:
+            m = getattr(self.request, "client_membership", None)
+            tenant_id = getattr(m, "entreprise_id", None)
+            branch_id = getattr(m, "succursale_id", None)
+        else:
+            tenant_id, branch_id = _get_tenant_ids(self.request)
         if tenant_id is None:
             return queryset.none() if (self.tenant_lookup or hasattr(queryset.model, 'entreprise_id')) else queryset
         # Agent sans succursale dans le JWT : filtre uniquement par entreprise (pas par succursale).
@@ -1509,7 +1538,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         from rapports.utils.pdf_generator import PDFGenerator
         entete = get_entete_entreprise(entreprise)
         pdf_gen = PDFGenerator()
-        elements = list(pdf_gen._create_entete(entete))
+        elements = list(pdf_gen._create_entete(entete, centered=False))
         elements.append(Spacer(1, 1*mm))
         elements.append(Paragraph(_("BON DE SORTIE"), title_style))
         elements.append(Paragraph(f"{_('N°')}: {sortie.pk}", normal))
@@ -1764,6 +1793,16 @@ class TypeArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
 class ArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = Article.objects.all()
     serializer_class = ArticleSerializer
+    # Important: try portal client auth first; a portal token is NOT a SimpleJWT staff token.
+    authentication_classes = [ClientJWTAuthentication, JWTAuthenticationWithContext]
+
+    def get_permissions(self):
+        # Portail client : lecture/recherche uniquement.
+        if getattr(self.request, "client", None) is not None:
+            if self.request.method in permissions.SAFE_METHODS:
+                return [IsClientAuthenticated()]
+            return [permissions.IsAuthenticated()]  # forcera un 403 (pas d'écriture pour client)
+        return super().get_permissions()
 
     def get_queryset(self):
         return super().get_queryset().order_by('-pk')
@@ -3403,7 +3442,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         from rapports.utils.pdf_generator import PDFGenerator
         entete = get_entete_entreprise(entreprise)
         pdf_gen = PDFGenerator()
-        elements.extend(pdf_gen._create_entete(entete))
+        elements.extend(pdf_gen._create_entete(entete, centered=False))
         elements.append(Spacer(1, 1*mm))
 
         if mv.sortie_id:
@@ -3591,22 +3630,43 @@ class SousTypeArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         return Response(dict(grouped))
 
 
-class ClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
-    """ViewSet pour la gestion des clients (filtré par entreprise/succursale)."""
+class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
+    """ViewSet pour la gestion des clients (filtré par entreprise/succursale via `ClientEntreprise`)."""
+
     queryset = Client.objects.all()
     serializer_class = ClientSerializer
 
+    def get_permissions(self):
+        # Inscription / création de fiche client sans compte staff (ex. portail public).
+        if self.action == "create":
+            return [AllowAny()]
+        return super().get_permissions()
+
     def get_queryset(self):
-        qs = super().get_queryset().order_by('-date_enregistrement', '-id')
-        # Liste : filtre optionnel ?is_special=true|false (strictement sur la liste)
-        if getattr(self, 'action', None) == 'list':
-            raw = self.request.query_params.get('is_special')
+        qs = (
+            Client.objects.all()
+            .prefetch_related("liens_entreprise__entreprise", "liens_entreprise__succursale")
+            .order_by("-date_enregistrement", "-id")
+        )
+        tenant_id, branch_id = _get_tenant_ids(self.request)
+        if tenant_id is not None:
+            qs = qs.filter(liens_entreprise__entreprise_id=tenant_id).distinct()
+        if branch_id is not None and tenant_id is not None:
+            qs = qs.filter(
+                Q(liens_entreprise__entreprise_id=tenant_id)
+                & (
+                    Q(liens_entreprise__succursale_id=branch_id)
+                    | Q(liens_entreprise__succursale__isnull=True)
+                )
+            ).distinct()
+        if getattr(self, "action", None) == "list":
+            raw = self.request.query_params.get("is_special")
             if raw is not None:
                 v = str(raw).strip().lower()
-                if v in ('true', '1', 'yes', 'oui'):
-                    qs = qs.filter(is_special=True)
-                elif v in ('false', '0', 'no', 'non'):
-                    qs = qs.filter(is_special=False)
+                if v in ("true", "1", "yes", "oui"):
+                    qs = qs.filter(liens_entreprise__is_special=True)
+                elif v in ("false", "0", "no", "non"):
+                    qs = qs.filter(liens_entreprise__is_special=False)
         return qs
 
     @swagger_auto_schema(
@@ -3697,6 +3757,76 @@ class ClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             payload['message'] = msg
         return Response(payload)
 
+    @swagger_auto_schema(
+        operation_summary="Associer un client existant à l’entreprise (ClientEntreprise)",
+        operation_description=(
+            "Crée une association `ClientEntreprise` **sans** recréer le client.\n\n"
+            "- Le client est identifié par `client_id` **ou** `email`.\n"
+            "- L’entreprise est celle du contexte JWT (`entreprise_id`).\n"
+            "- Empêche les doublons : si le lien existe déjà → 400."
+        ),
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=[],
+            properties={
+                "client_id": openapi.Schema(type=openapi.TYPE_STRING, description="Ex. `CLI0001` (optionnel si email fourni)."),
+                "email": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_EMAIL, description="Email du client (optionnel si client_id fourni)."),
+                "succursale_id": openapi.Schema(type=openapi.TYPE_INTEGER, nullable=True, description="Succursale optionnelle."),
+                "is_special": openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Marquer client spécial pour ce lien (optionnel)."),
+            },
+        ),
+        responses={201: ClientEntrepriseSerializer, 400: "Erreur de validation"},
+        tags=["Clients — associations entreprise"],
+    )
+    @action(detail=False, methods=["post"], url_path="associate-entreprise")
+    def associate_entreprise(self, request):
+        tenant_id, _ = _get_tenant_ids(request)
+        if tenant_id is None:
+            return Response({"detail": _("Contexte entreprise manquant.")}, status=status.HTTP_403_FORBIDDEN)
+
+        client_id = (request.data.get("client_id") or "").strip()
+        email = (request.data.get("email") or "").strip()
+        if not client_id and not email:
+            return Response(
+                {"detail": _("Indiquez « client_id » ou « email ».")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        qs = Client.objects.all()
+        if client_id:
+            qs = qs.filter(pk=client_id)
+        else:
+            qs = qs.filter(email__iexact=email)
+        client = qs.first()
+        if not client:
+            return Response({"detail": _("Client introuvable.")}, status=status.HTTP_404_NOT_FOUND)
+
+        if ClientEntreprise.objects.filter(client=client, entreprise_id=tenant_id).exists():
+            return Response({"detail": _("Ce client est déjà associé à cette entreprise.")}, status=status.HTTP_400_BAD_REQUEST)
+
+        succursale_id = request.data.get("succursale_id", None)
+        if succursale_id is not None and str(succursale_id).strip() != "":
+            try:
+                succursale_id = int(succursale_id)
+            except (TypeError, ValueError):
+                return Response({"detail": _("Le champ « succursale_id » doit être un entier.")}, status=status.HTTP_400_BAD_REQUEST)
+            if not Succursale.objects.filter(pk=succursale_id, entreprise_id=tenant_id).exists():
+                return Response({"detail": _("Succursale invalide pour cette entreprise.")}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            succursale_id = None
+
+        is_special = request.data.get("is_special", False)
+        is_special = bool(is_special) if isinstance(is_special, bool) else str(is_special).strip().lower() in ("true", "1", "yes", "oui")
+
+        link = ClientEntreprise.objects.create(
+            client=client,
+            entreprise_id=tenant_id,
+            succursale_id=succursale_id,
+            is_special=is_special,
+        )
+        out = ClientEntrepriseSerializer(link, context={"request": request}).data
+        return Response(out, status=status.HTTP_201_CREATED)
+
     @action(detail=True, methods=['get'])
     def dettes(self, request, pk=None):
         """
@@ -3740,6 +3870,85 @@ class ClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             'dettes_payees': dettes.filter(statut='PAYEE').count(),
             'dettes_en_retard': dettes.filter(statut='RETARD').count(),
         })
+
+
+class ClientEntrepriseViewSet(BusinessPermissionMixin, viewsets.ReadOnlyModelViewSet):
+    """Lecture des associations `Client ↔ Entreprise` (multi-tenant, succursale optionnelle)."""
+
+    queryset = ClientEntreprise.objects.select_related("client", "entreprise", "succursale").all()
+    serializer_class = ClientEntrepriseSerializer
+
+    @swagger_auto_schema(
+        operation_summary="Liste des associations client ↔ entreprise",
+        operation_description=(
+            "Liste paginée des liens `ClientEntreprise`.\n\n"
+            "- **Périmètre** : entreprise du JWT (et succursale si le contexte l’impose).\n"
+            "- **Filtres** : `client_id`, `succursale_id`, `is_special`.\n"
+            "- **Pagination** : `page`, `page_size`."
+        ),
+        manual_parameters=[
+            openapi.Parameter("page", openapi.IN_QUERY, type=openapi.TYPE_INTEGER, description="Numéro de page."),
+            openapi.Parameter(
+                "page_size",
+                openapi.IN_QUERY,
+                type=openapi.TYPE_INTEGER,
+                description="Taille de page (défaut 25, max 200).",
+            ),
+            openapi.Parameter(
+                "client_id",
+                openapi.IN_QUERY,
+                type=openapi.TYPE_STRING,
+                description="Filtrer par identifiant client (ex. `CLI0001`).",
+            ),
+            openapi.Parameter(
+                "succursale_id",
+                openapi.IN_QUERY,
+                type=openapi.TYPE_INTEGER,
+                description="Filtrer par succursale (id).",
+            ),
+            openapi.Parameter(
+                "is_special",
+                openapi.IN_QUERY,
+                type=openapi.TYPE_BOOLEAN,
+                description="Filtrer les liens marqués client spécial (`true` / `false`).",
+            ),
+        ],
+        tags=["Clients — associations entreprise"],
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    def get_queryset(self):
+        qs = super().get_queryset().order_by("-id")
+
+        tenant_id, branch_id = _get_tenant_ids(self.request)
+        if tenant_id is not None:
+            qs = qs.filter(entreprise_id=tenant_id)
+        if branch_id is not None:
+            # Inclure aussi les liens “sans succursale” (historique / catalogue global)
+            qs = qs.filter(Q(succursale_id=branch_id) | Q(succursale__isnull=True))
+
+        p = self.request.query_params
+        client_id = p.get("client_id")
+        if client_id:
+            qs = qs.filter(client_id=client_id)
+
+        if p.get("is_special") is not None:
+            v = str(p.get("is_special")).strip().lower()
+            if v in ("true", "1", "yes", "oui"):
+                qs = qs.filter(is_special=True)
+            elif v in ("false", "0", "no", "non"):
+                qs = qs.filter(is_special=False)
+
+        succursale_id = p.get("succursale_id")
+        if succursale_id:
+            try:
+                sid = int(succursale_id)
+                qs = qs.filter(succursale_id=sid)
+            except (TypeError, ValueError):
+                pass
+
+        return qs
 
 
 class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
