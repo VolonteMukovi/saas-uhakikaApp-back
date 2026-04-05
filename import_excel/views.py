@@ -9,7 +9,7 @@ from django.utils.translation import gettext as _
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
-from stock.models import Article, Devise, SousTypeArticle, Unite, Stock, Client
+from stock.models import Article, Devise, SousTypeArticle, Unite, Stock, Client, Succursale, Entreprise
 from stock.serializers import EntreeSerializer, ArticleSerializer
 from stock.services.article_names import normalize_nom_scientifique
 import json
@@ -24,23 +24,158 @@ def _leading_column_is_article_code(val) -> bool:
     s = str(val).strip().upper().replace(' ', '')
     return bool(_ARTICLE_CODE_RE.match(s))
 
+
+def _parse_optional_id_cell(cell):
+    if cell is None:
+        return None
+    if isinstance(cell, str) and not str(cell).strip():
+        return None
+    try:
+        return int(float(str(cell).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_appro_header(val):
+    if val is None:
+        return ''
+    s = str(val).strip().lower()
+    for a, b in (('é', 'e'), ('è', 'e'), ('ê', 'e'), ('à', 'a'), ('û', 'u'), ('ô', 'o'), ('ç', 'c')):
+        s = s.replace(a, b)
+    return s.replace(' ', '_')
+
+
+# En-têtes reconnus (normalisés) → champ logique
+_APPRO_HEADER_SYNONYMS = {
+    'entreprise_id': frozenset({'entreprise_id', 'reference_entreprise', 'id_entreprise'}),
+    'succursale_id': frozenset({'succursale_id', 'reference_succursale', 'id_succursale'}),
+    'article_id': frozenset({'article_id', 'code_article', 'code_produit'}),
+    'quantite': frozenset({'quantite', 'qty', 'qte'}),
+    'prix_unitaire': frozenset({'prix_unitaire', 'prix_achat'}),
+    'prix_vente': frozenset({'prix_vente', 'prix_de_vente'}),
+    'devise_id': frozenset({'devise_id', 'devise'}),
+    'seuil_alerte': frozenset({'seuil_alerte', 'seuil'}),
+    'date_expiration': frozenset({'date_expiration', 'date_exp', 'dlc'}),
+}
+
+_APPRO_LEGACY_COL = {
+    'article_id': 0,
+    'quantite': 1,
+    'prix_unitaire': 2,
+    'prix_vente': 3,
+    'devise_id': 4,
+    'seuil_alerte': 5,
+    'date_expiration': 6,
+}
+
+_APPRO_EXT_DEFAULT_COL = {
+    'entreprise_id': 0,
+    'succursale_id': 1,
+    'article_id': 2,
+    'quantite': 3,
+    'prix_unitaire': 4,
+    'prix_vente': 5,
+    'devise_id': 6,
+    'seuil_alerte': 7,
+    'date_expiration': 8,
+}
+
+
+def _build_appro_column_map(header_row):
+    raw = [_normalize_appro_header(c) for c in (header_row or [])]
+    col_map = {}
+    for logical, syns in _APPRO_HEADER_SYNONYMS.items():
+        for i, h in enumerate(raw):
+            if h in syns:
+                col_map[logical] = i
+                break
+    return col_map
+
+
+def _appro_col_index(field, col_map, extended):
+    if extended:
+        if field in col_map:
+            return col_map[field]
+        return _APPRO_EXT_DEFAULT_COL.get(field)
+    return _APPRO_LEGACY_COL.get(field)
+
+
+def _appro_row_cell(row, field, col_map, extended):
+    idx = _appro_col_index(field, col_map, extended)
+    if idx is None or row is None or idx >= len(row):
+        return None
+    return row[idx]
+
+
+def _parse_number_excel(cell):
+    if cell is None:
+        return None
+    if isinstance(cell, str):
+        s = cell.strip()
+        if not s:
+            return None
+        s = s.replace(',', '.')
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    if isinstance(cell, (int, float)):
+        return float(cell)
+    return None
+
+
+def _coalesce_id(first, second, third):
+    for x in (first, second, third):
+        if x is not None:
+            return x
+    return None
+
+
+def _parse_devise_id_cell(devise_cell, devise_principale):
+    if devise_cell is None or (isinstance(devise_cell, str) and not devise_cell.strip()):
+        return devise_principale.id if devise_principale else None
+    if hasattr(devise_cell, 'id'):
+        return getattr(devise_cell, 'id', None)
+    if isinstance(devise_cell, (int, float)):
+        return int(devise_cell)
+    if isinstance(devise_cell, str):
+        try:
+            return int(float(devise_cell.strip()))
+        except ValueError:
+            return None
+    return None
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def download_template(request):
     """Télécharge un fichier Excel modèle pour l'approvisionnement."""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
+    from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids_dl
+
+    tenant_id, branch_id = _get_tenant_ids_dl(request)
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = 'Approvisionnement'
-    entetes = ['article_id', 'quantite', 'prix_unitaire', 'prix_vente', 'devise_id', 'seuil_alerte', 'date_expiration']
+    entetes = [
+        'entreprise_id',
+        'succursale_id',
+        'article_id',
+        'quantite',
+        'prix_unitaire',
+        'prix_vente',
+        'devise_id',
+        'seuil_alerte',
+        'date_expiration',
+    ]
     ws.append(entetes)
     # Style entête
     header_fill = PatternFill(start_color='FFB300', end_color='FFB300', fill_type='solid')
     header_font = Font(bold=True, color='FFFFFF')
     header_align = Alignment(horizontal='center', vertical='center')
     thin = Side(border_style="thin", color="000000")
-    for col in range(1, len(entetes)+1):
+    for col in range(1, len(entetes) + 1):
         cell = ws.cell(row=1, column=col)
         cell.fill = header_fill
         cell.font = header_font
@@ -48,10 +183,18 @@ def download_template(request):
         cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
         ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 18
 
-    # Exemple de lignes (prix_vente doit être >= prix_unitaire pour avoir un bénéfice)
-    ws.append([1, 100, 2500, 3000, 2, 10, '2026-06-30'])  # prix_vente = 3000 (bénéfice de 500)
-    ws.append([2, 50, 1500, 1800, 2, 5, ''])  # prix_vente = 1800 (bénéfice de 300)
-    ws.append([3, 200, 500, 600, 3, 20, ''])  # prix_vente = 600 (bénéfice de 100)
+    articles_qs = Article.objects.filter(entreprise_id=tenant_id) if tenant_id else Article.objects.all()
+    ex_id = articles_qs.values_list('article_id', flat=True).first() or 'EXEMP0001'
+    ex_dev = (
+        Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).values_list('id', flat=True).first()
+        if tenant_id
+        else Devise.objects.filter(est_principal=True).values_list('id', flat=True).first()
+    )
+    ex_dev = ex_dev or 1
+    # Exemples : réf. entreprise / succursale = contexte JWT (modifiable si cohérent avec votre session)
+    ws.append([tenant_id or '', branch_id or '', ex_id, 100, 2500, 3000, ex_dev, 10, '2026-06-30'])
+    ws.append([tenant_id or '', branch_id or '', ex_id, 50, 1500, 1800, ex_dev, 5, ''])
+    ws.append([tenant_id or '', branch_id or '', ex_id, 200, 500, 600, ex_dev, 20, ''])
 
     # Feuille de référence des articles
     ws2 = wb.create_sheet('Articles')
@@ -63,8 +206,6 @@ def download_template(request):
         cell.alignment = header_align
         cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
         ws2.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 22
-    tenant_id = request.user.get_entreprise_id(request) if request.user.is_authenticated else None
-    articles_qs = Article.objects.filter(entreprise_id=tenant_id) if tenant_id else Article.objects.all()
     for article in articles_qs:
         ws2.append([article.article_id, article.nom_scientifique, article.nom_commercial or ''])
 
@@ -82,6 +223,80 @@ def download_template(request):
     for devise in devises_qs:
         ws3.append([devise.id, devise.sigle, devise.nom, devise.symbole])
 
+    # Feuille entreprises : IDs entreprise / succursale (toujours au moins une ligne exploitable)
+    ws_ent = wb.create_sheet('entreprises')
+    ws_ent.append(['entreprise_id', 'Entreprise', 'succursale_id', 'Succursale'])
+    for col in range(1, 5):
+        cell = ws_ent.cell(row=1, column=col)
+        cell.fill = PatternFill(start_color='6A1B9A', end_color='6A1B9A', fill_type='solid')
+        cell.font = Font(bold=True, color='FFFFFF')
+        cell.alignment = header_align
+        cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
+        ws_ent.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 24
+
+    def _fill_entreprises_reference_sheet():
+        rows = 0
+        if tenant_id:
+            ent = Entreprise.objects.filter(pk=tenant_id).first()
+            if ent:
+                branches = list(
+                    Succursale.objects.filter(entreprise_id=tenant_id, is_active=True).order_by('nom', 'id')
+                )
+                if branches:
+                    for s in branches:
+                        ws_ent.append([ent.id, ent.nom, s.id, s.nom])
+                        rows += 1
+                else:
+                    ws_ent.append(
+                        [
+                            ent.id,
+                            ent.nom,
+                            '',
+                            '— Aucune succursale en base : laisser succursale_id vide dans Approvisionnement.',
+                        ]
+                    )
+                    rows += 1
+            else:
+                ws_ent.append(
+                    [
+                        tenant_id,
+                        '— Entreprise introuvable pour cet ID (vérifiez la base).',
+                        '',
+                        '',
+                    ]
+                )
+                rows += 1
+            return rows
+        for s in (
+            Succursale.objects.select_related('entreprise')
+            .filter(is_active=True)
+            .order_by('entreprise_id', 'nom', 'id')
+        ):
+            e = s.entreprise
+            ws_ent.append(
+                [
+                    e.id if e else '',
+                    (e.nom if e else ''),
+                    s.id,
+                    s.nom,
+                ]
+            )
+            rows += 1
+        if rows == 0:
+            for e in Entreprise.objects.all().order_by('id')[:500]:
+                ws_ent.append(
+                    [
+                        e.id,
+                        e.nom,
+                        '',
+                        '— Aucune succursale en base : laisser succursale_id vide.',
+                    ]
+                )
+                rows += 1
+        return rows
+
+    _fill_entreprises_reference_sheet()
+
     # Feuille "Référence complète" : tous les articles (code) et devises en un seul endroit
     ws_ref = wb.create_sheet('Reference_Complete', 1)
     ref_title_fill = PatternFill(start_color='5C6BC0', end_color='5C6BC0', fill_type='solid')
@@ -90,25 +305,35 @@ def download_template(request):
     ref_section_font = Font(bold=True, color='FFFFFF')
 
     ws_ref.append(['RÉFÉRENCE COMPLÈTE — Utilisez UNIQUEMENT les codes/ID ci-dessous dans la feuille "Approvisionnement"'])
-    ws_ref.merge_cells('A1:G1')
+    ws_ref.merge_cells('A1:I1')
     ws_ref.cell(row=1, column=1).fill = ref_title_fill
     ws_ref.cell(row=1, column=1).font = ref_title_font
     ws_ref.cell(row=1, column=1).alignment = header_align
     ws_ref.row_dimensions[1].height = 22
 
     ws_ref.append([])
-    ws_ref.append(['ARTICLE_ID (CODE) — Colonne 1 de la feuille Approvisionnement (tous les articles)'])
-    ws_ref.merge_cells('A3:G3')
+    ws_ref.append([
+        'ENTREPRISE_ID — colonne 1 ; SUCCURSALE_ID — colonne 2 (voir feuille « entreprises » pour les ID et libellés). '
+        'Doivent correspondre au contexte de connexion. Laisser succursale_id vide si aucune succursale.'
+    ])
+    ws_ref.merge_cells('A3:I3')
     ws_ref.cell(row=3, column=1).fill = ref_section_fill
     ws_ref.cell(row=3, column=1).font = ref_section_font
+    ws_ref.append([])
+    row_hint = ws_ref.max_row + 1
+    ws_ref.append(['ARTICLE_ID (CODE) — Colonne 3 de la feuille Approvisionnement (tous les articles)'])
+    ws_ref.merge_cells(f'A{row_hint}:I{row_hint}')
+    ws_ref.cell(row=row_hint, column=1).fill = ref_section_fill
+    ws_ref.cell(row=row_hint, column=1).font = ref_section_font
     ws_ref.append(['CODE PRODUIT (article_id)', 'Nom scientifique', 'Nom commercial'])
+    hdr_art = ws_ref.max_row
     for col in range(1, 4):
-        cell = ws_ref.cell(row=4, column=col)
+        cell = ws_ref.cell(row=hdr_art, column=col)
         cell.fill = PatternFill(start_color='1976D2', end_color='1976D2', fill_type='solid')
         cell.font = Font(bold=True, color='FFFFFF')
         cell.alignment = header_align
         cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
-    row_art = 5
+    row_art = hdr_art + 1
     for article in articles_qs.order_by('article_id'):
         ws_ref.append([
             article.article_id,
@@ -120,12 +345,13 @@ def download_template(request):
         row_art += 1
 
     ws_ref.append([])
-    ws_ref.append(['DEVISE_ID — Colonne 5 de la feuille Approvisionnement (toutes les devises)'])
-    ws_ref.merge_cells(f'A{row_art + 1}:G{row_art + 1}')
-    ws_ref.cell(row=row_art + 1, column=1).fill = ref_section_fill
-    ws_ref.cell(row=row_art + 1, column=1).font = ref_section_font
-    row_art += 2
+    ws_ref.append(['DEVISE_ID — Colonne 7 de la feuille Approvisionnement (toutes les devises)'])
+    r_dev_title = ws_ref.max_row
+    ws_ref.merge_cells(f'A{r_dev_title}:I{r_dev_title}')
+    ws_ref.cell(row=r_dev_title, column=1).fill = ref_section_fill
+    ws_ref.cell(row=r_dev_title, column=1).font = ref_section_font
     ws_ref.append(['ID', 'Sigle', 'Nom', 'Symbole'])
+    row_art = ws_ref.max_row
     for col in range(1, 5):
         cell = ws_ref.cell(row=row_art, column=col)
         cell.fill = PatternFill(start_color='388E3C', end_color='388E3C', fill_type='solid')
@@ -139,7 +365,7 @@ def download_template(request):
             ws_ref.cell(row=row_art, column=col).border = Border(top=thin, left=thin, right=thin, bottom=thin)
         row_art += 1
 
-    for c in ['A', 'B', 'C', 'D', 'E', 'F', 'G']:
+    for c in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']:
         ws_ref.column_dimensions[c].width = 22
 
     output = io.BytesIO()
@@ -154,127 +380,217 @@ def download_template(request):
 @permission_classes([IsAuthenticated])
 def import_approvisionnement(request):
     """Importe un fichier Excel d'approvisionnement et crée une Entree avec ses lignes."""
+    from datetime import datetime
+    from decimal import Decimal
+    from django.db.models import Sum
+    from users.models import UserBranch
+    from stock.models import MouvementCaisse
+    from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
+
     file = request.FILES.get('file')
     if not file:
         return JsonResponse({'error': _('Aucun fichier envoyé.')}, status=400)
     wb = openpyxl.load_workbook(file)
     ws = wb['Approvisionnement']
-    lignes = []
-    from datetime import datetime
-    from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
-    from stock.models import Devise
+
+    header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+    col_map = _build_appro_column_map(header_row)
+    header_nonempty = [h for h in (header_row or []) if h is not None and str(h).strip()]
+    extended = (
+        col_map.get('entreprise_id') is not None
+        or col_map.get('succursale_id') is not None
+        or len(header_nonempty) >= 9
+    )
+
     tenant_id, branch_id = _get_tenant_ids(request)
     if not tenant_id:
         return JsonResponse({'error': _('Contexte entreprise manquant. Connectez-vous et sélectionnez une entreprise.')}, status=400)
-    devise_principale = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
+
+    post_ent = _parse_optional_id_cell(request.POST.get('entreprise_id'))
+    post_succ = _parse_optional_id_cell(request.POST.get('succursale_id'))
+
+    lignes = []
+    targets = set()
+
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-            # Ignore les lignes vides (toutes les valeurs nulles ou vides)
-            if not row or all(cell is None or (isinstance(cell, str) and not cell.strip()) for cell in row):
-                continue
-            # Nouvelle structure avec prix_vente
-            if len(row) < 6:
-                return JsonResponse({'error': f'Ligne {row_idx}: Format invalide. Colonnes attendues: article_id, quantite, prix_unitaire, prix_vente, devise_id, seuil_alerte, date_expiration'}, status=400)
-            
-            article_id_raw, quantite_raw, prix_unitaire_raw, prix_vente_raw, devise_id, seuil_alerte_raw, date_expiration = row[:7]
+        if not row or all(cell is None or (isinstance(cell, str) and not cell.strip()) for cell in row):
+            continue
 
-            # Normaliser l'ID article
-            article_id = str(article_id_raw).strip() if article_id_raw is not None else None
+        row = list(row)
+        min_len = 9 if extended else 7
+        if len(row) < min_len:
+            row.extend([None] * (min_len - len(row)))
 
-            # Helper: parser de nombres (gère les chaînes avec ',' comme séparateur décimal)
-            def _parse_number(cell):
-                if cell is None:
-                    return None
-                if isinstance(cell, str):
-                    s = cell.strip()
-                    if not s:
-                        return None
-                    s = s.replace(',', '.')
+        if not extended and len(row) < 7:
+            return JsonResponse(
+                {
+                    'error': _(
+                        'Ligne %(row)d : format ancien (7 colonnes) attendu : '
+                        'article_id, quantite, prix_unitaire, prix_vente, devise_id, seuil_alerte, date_expiration.'
+                    )
+                    % {'row': row_idx}
+                },
+                status=400,
+            )
+
+        row_ent = _parse_optional_id_cell(_appro_row_cell(row, 'entreprise_id', col_map, extended))
+        row_succ = _parse_optional_id_cell(_appro_row_cell(row, 'succursale_id', col_map, extended))
+        article_id_raw = _appro_row_cell(row, 'article_id', col_map, extended)
+        quantite_raw = _appro_row_cell(row, 'quantite', col_map, extended)
+        prix_unitaire_raw = _appro_row_cell(row, 'prix_unitaire', col_map, extended)
+        prix_vente_raw = _appro_row_cell(row, 'prix_vente', col_map, extended)
+        devise_cell = _appro_row_cell(row, 'devise_id', col_map, extended)
+        seuil_alerte_raw = _appro_row_cell(row, 'seuil_alerte', col_map, extended)
+        date_expiration = _appro_row_cell(row, 'date_expiration', col_map, extended)
+
+        article_id = str(article_id_raw).strip() if article_id_raw is not None else None
+        if not article_id:
+            continue
+
+        eff_ent = _coalesce_id(row_ent, post_ent, tenant_id)
+        eff_succ = _coalesce_id(row_succ, post_succ, branch_id)
+        targets.add((eff_ent, eff_succ))
+
+        quantite = _parse_number_excel(quantite_raw)
+        prix_unitaire = _parse_number_excel(prix_unitaire_raw)
+        prix_vente = _parse_number_excel(prix_vente_raw)
+        seuil_alerte = _parse_number_excel(seuil_alerte_raw)
+
+        if prix_vente is None:
+            return JsonResponse(
+                {
+                    'error': _(
+                        'Prix de vente manquant ou invalide à la ligne %(row)d (article %(art)s). '
+                        'Le prix de vente est obligatoire pour chaque ligne.'
+                    )
+                    % {'row': row_idx, 'art': article_id}
+                },
+                status=400,
+            )
+        if prix_vente <= 0:
+            return JsonResponse(
+                {
+                    'error': _(
+                        'Prix de vente invalide à la ligne %(row)d (article %(art)s). '
+                        'Le prix de vente doit être supérieur à 0.'
+                    )
+                    % {'row': row_idx, 'art': article_id}
+                },
+                status=400,
+            )
+
+        if quantite is None:
+            return JsonResponse(
+                {'error': _('Quantité manquante ou invalide à la ligne %(row)d (article %(art)s).') % {'row': row_idx, 'art': article_id}},
+                status=400,
+            )
+
+        # devise : résolution après validation entreprise (on re-vérifie les id plus bas)
+        devise_id_val = _parse_devise_id_cell(devise_cell, None)
+
+        date_str = None
+        if date_expiration:
+            if isinstance(date_expiration, str):
+                try:
+                    date_str = datetime.strptime(date_expiration, '%Y-%m-%d').strftime('%Y-%m-%d')
+                except ValueError:
                     try:
-                        return float(s)
-                    except Exception:
-                        return None
-                if isinstance(cell, (int, float)):
-                    return float(cell)
-                return None
-
-            quantite = _parse_number(quantite_raw)
-            prix_unitaire = _parse_number(prix_unitaire_raw)
-            prix_vente = _parse_number(prix_vente_raw)
-            seuil_alerte = _parse_number(seuil_alerte_raw)
-            
-            # Validation du prix_vente (obligatoire et doit être > 0)
-            if prix_vente is None:
-                return JsonResponse({'error': f'Prix de vente manquant ou invalide à la ligne {row_idx} (article {article_id}). Le prix de vente est obligatoire pour chaque ligne d\'entrée.'}, status=400)
-            
-            if prix_vente <= 0:
-                return JsonResponse({'error': f'Prix de vente invalide à la ligne {row_idx} (article {article_id}). Le prix de vente doit être supérieur à 0.'}, status=400)
-            # Toujours extraire l'id numérique de la devise, peu importe le type
-            devise_id_val = None
-            # LOG TEMPORAIRE POUR DEBUG
-            # print('DEBUG devise_id:', devise_id, type(devise_id))
-            # On ne doit JAMAIS transmettre un objet Devise, ni aucun objet non convertible en int
-            devise_id_val = None
-            # Si devise_id est vide ou None, on prend la devise principale de l'entreprise
-            if devise_id is None or (isinstance(devise_id, str) and not devise_id.strip()):
-                devise_id_val = devise_principale.id if devise_principale else None
-            else:
-                if hasattr(devise_id, 'id'):
-                    devise_id_val = getattr(devise_id, 'id', None)
-                elif isinstance(devise_id, (int, float)):
-                    devise_id_val = int(devise_id)
-                elif isinstance(devise_id, str):
-                    try:
-                        devise_id_val = int(float(devise_id))
-                    except Exception:
-                        devise_id_val = None
-                else:
-                    devise_id_val = None
-            # Si la devise n'existe pas dans la base, on force à None pour utiliser la devise principale
-            if devise_id_val is not None:
-                if not Devise.objects.filter(pk=devise_id_val).exists():
-                    devise_id_val = None
-
-            # Validation minimale des valeurs numériques
-            if quantite is None:
-                return JsonResponse({'error': f'Quantité manquante ou invalide à la ligne {row_idx} (article {article_id}).'}, status=400)
-
-            # Conversion automatique des formats de date
-            date_str = None
-            if date_expiration:
-                if isinstance(date_expiration, str):
-                    # Essaye AAAA-MM-JJ
-                    try:
-                        date_str = datetime.strptime(date_expiration, "%Y-%m-%d").strftime("%Y-%m-%d")
+                        date_str = datetime.strptime(date_expiration, '%d/%m/%Y').strftime('%Y-%m-%d')
                     except ValueError:
-                        # Essaye JJ/MM/AAAA
-                        try:
-                            date_str = datetime.strptime(date_expiration, "%d/%m/%Y").strftime("%Y-%m-%d")
-                        except ValueError:
-                            date_str = None
-                elif isinstance(date_expiration, datetime):
-                    date_str = date_expiration.strftime("%Y-%m-%d")
-                elif isinstance(date_expiration, (int, float)):
-                    # Excel peut stocker les dates comme float (numéro de série)
-                    try:
-                        from openpyxl.utils.datetime import from_excel
-                        date_obj = from_excel(date_expiration)
-                        date_str = date_obj.strftime("%Y-%m-%d")
-                    except Exception:
                         date_str = None
-            ligne = {
-                'article_id': article_id,  # Le serializer attend 'article_id' (PrimaryKeyRelatedField avec source='article')
-                'quantite': int(quantite) if quantite is not None else None,
-                'prix_unitaire': float(prix_unitaire) if prix_unitaire is not None else 0.0,
-                'prix_vente': float(prix_vente),  # Prix de vente obligatoire
-                'seuil_alerte': int(seuil_alerte) if seuil_alerte is not None else 0,
-                'date_expiration': date_str if date_str else None,
-                'devise_id': devise_id_val if devise_id_val is not None else None
-            }
-            lignes.append(ligne)
+            elif isinstance(date_expiration, datetime):
+                date_str = date_expiration.strftime('%Y-%m-%d')
+            elif isinstance(date_expiration, (int, float)):
+                try:
+                    from openpyxl.utils.datetime import from_excel
+
+                    date_obj = from_excel(date_expiration)
+                    date_str = date_obj.strftime('%Y-%m-%d')
+                except Exception:
+                    date_str = None
+
+        ligne = {
+            'article_id': article_id,
+            'quantite': int(quantite) if quantite is not None else None,
+            'prix_unitaire': float(prix_unitaire) if prix_unitaire is not None else 0.0,
+            'prix_vente': float(prix_vente),
+            'seuil_alerte': int(seuil_alerte) if seuil_alerte is not None else 0,
+            'date_expiration': date_str if date_str else None,
+            'devise_id': devise_id_val,
+            '_row': row_idx,
+            '_eff_ent': eff_ent,
+            '_eff_succ': eff_succ,
+        }
+        lignes.append(ligne)
+
+    if not lignes:
+        return JsonResponse({'error': _('Aucune ligne d\'approvisionnement valide dans le fichier.')}, status=400)
+
+    if len(targets) > 1:
+        return JsonResponse(
+            {
+                'error': _(
+                    'Toutes les lignes doivent cibler la même entreprise et la même succursale '
+                    '(après remplissage des colonnes ou des champs entreprise_id / succursale_id du formulaire).'
+                )
+            },
+            status=400,
+        )
+
+    final_ent, final_succ = next(iter(targets))
+    if final_ent is None:
+        return JsonResponse({'error': _('Entreprise cible introuvable pour cet import.')}, status=400)
+    if final_ent != tenant_id:
+        return JsonResponse(
+            {
+                'error': _(
+                    'L\'entreprise indiquée (ID %(got)d) ne correspond pas au contexte de connexion (ID %(exp)d).'
+                )
+                % {'got': final_ent, 'exp': tenant_id}
+            },
+            status=400,
+        )
+
+    if final_succ is not None:
+        sc = Succursale.objects.filter(pk=final_succ, entreprise_id=final_ent).first()
+        if not sc:
+            return JsonResponse(
+                {'error': _('Succursale ID %(sid)d invalide ou non rattachée à l\'entreprise %(eid)d.') % {'sid': final_succ, 'eid': final_ent}},
+                status=400,
+            )
+
+    membership = request.user.get_current_membership(request)
+    if membership and request.user.is_agent(request):
+        br_qs = UserBranch.objects.filter(membership=membership, is_active=True)
+        if br_qs.exists() and final_succ is not None:
+            if not br_qs.filter(succursale_id=final_succ).exists():
+                return JsonResponse(
+                    {'error': _('Vous n\'êtes pas autorisé à approvisionner cette succursale.')},
+                    status=403,
+                )
+
+    devise_principale = Devise.objects.filter(entreprise_id=final_ent, est_principal=True).first()
+
+    for ligne in lignes:
+        row_idx = ligne.pop('_row')
+        ligne.pop('_eff_ent', None)
+        ligne.pop('_eff_succ', None)
+        aid = ligne['article_id']
+        if not Article.objects.filter(pk=aid, entreprise_id=final_ent).exists():
+            return JsonResponse(
+                {'error': _('Ligne %(row)d : article %(art)s absent ou non rattaché à l\'entreprise %(eid)d.') % {'row': row_idx, 'art': aid, 'eid': final_ent}},
+                status=400,
+            )
+
+        devise_id_val = ligne.get('devise_id')
+        if devise_id_val is None:
+            devise_id_val = devise_principale.id if devise_principale else None
+        else:
+            if not Devise.objects.filter(pk=devise_id_val, entreprise_id=final_ent).exists():
+                devise_id_val = devise_principale.id if devise_principale else None
+        ligne['devise_id'] = devise_id_val
+
     # Vérification du solde de caisse par devise avant création
-    from decimal import Decimal
-    from stock.models import MouvementCaisse
-    from django.db.models import Sum
     erreurs_solde = []
     totaux_par_devise = {}
     for ligne in lignes:
@@ -294,7 +610,7 @@ def import_approvisionnement(request):
         devise_obj = Devise.objects.filter(pk=devise_id).first()
         if not devise_obj:
             continue
-        qs = MouvementCaisse.objects.filter(devise=devise_obj, entreprise_id=tenant_id)
+        qs = MouvementCaisse.objects.filter(devise=devise_obj, entreprise_id=final_ent)
         entrees = qs.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
         sorties = qs.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
         solde = entrees - sorties
@@ -310,11 +626,11 @@ def import_approvisionnement(request):
     data = {
         'libele': request.POST.get('libele', 'Import Excel'),
         'description': request.POST.get('description', ''),
-        'lignes': lignes
+        'lignes': lignes,
     }
     serializer = EntreeSerializer(data=data, context={'request': request})
     if serializer.is_valid():
-        entree = serializer.save(entreprise_id=tenant_id, succursale_id=branch_id)
+        entree = serializer.save(entreprise_id=final_ent, succursale_id=final_succ)
         from stock.services.caisse import creer_mouvement_caisse
         for devise_id, total in totaux_par_devise.items():
             if total <= 0:
@@ -326,8 +642,8 @@ def import_approvisionnement(request):
                 montant=total,
                 devise=devise_obj,
                 type_mouvement='SORTIE',
-                entreprise_id=tenant_id,
-                succursale_id=branch_id,
+                entreprise_id=final_ent,
+                succursale_id=final_succ,
                 entree=entree,
                 content_object=None,
                 utilisateur=request.user if request.user.is_authenticated else None,

@@ -776,18 +776,28 @@ class EntreeSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         lignes_data = validated_data.pop('lignes', [])
-        user = self.context['request'].user
+        entreprise_id = validated_data.pop('entreprise_id', None)
+        succursale_id = validated_data.pop('succursale_id', None)
+        libele = validated_data.pop('libele', '')
+        description = validated_data.pop('description', '')
 
-        # Création de l'Entree
+        # Création de l'Entree (entreprise / succursale : perform_create ou import Excel)
         entree = Entree.objects.create(
-       
-            libele=validated_data.get('libele', ''),
-            description=validated_data.get('description', ''),
+            libele=libele,
+            description=description,
+            entreprise_id=entreprise_id,
+            succursale_id=succursale_id,
         )
 
         # Création des lignes et mise à jour du stock
-        # Fallback devise principale si devise_id absent ou None
-        devise_principale = Devise.objects.filter( est_principal=True).first()
+        # Fallback devise principale si devise_id absent ou None (par entreprise si connue)
+        devise_principale = None
+        if entreprise_id:
+            devise_principale = Devise.objects.filter(
+                entreprise_id=entreprise_id, est_principal=True
+            ).first()
+        if devise_principale is None:
+            devise_principale = Devise.objects.filter(est_principal=True).first()
         for ligne in lignes_data:
             article_obj = ligne['article']
             quantite = ligne['quantite']

@@ -1,547 +1,324 @@
-# API Gestion de Stock — Guide frontend (Cursor AI)
+# Uhakika — Plateforme de gestion d’entreprise, stock et caisse
 
-Ce document décrit le flux chronologique des scénarios utilisateur (création de compte, entreprise, liaison user–entreprise, succursales) et donne tous les endpoints, méthodes HTTP, payloads et réponses attendus pour que le frontend (ou un agent Cursor AI) puisse implémenter les écrans dans le bon ordre.
+**Uhakika** est une solution logicielle **SaaS multi-tenant** conçue pour les commerces, dépôts, cantines et PME qui doivent **piloter le stock en temps réel**, **encaisser sur plusieurs devises et canaux de caisse**, **gérer la vente à crédit**, **suivre les approvisionnements** (y compris depuis l’import Excel ou les lots en transit) et **offrir un portail client** (commandes, historique, dettes).
 
-**Base URL de l’API :** `http://127.0.0.1:8000/api/` (à adapter en production).
-
-**Authentification :** JWT. Après login, envoyer le header :
-`Authorization: Bearer <access>`
-
-### Documentation interactive (Swagger & ReDoc)h
-
-- **Swagger UI :** `http://127.0.0.1:8000/swagger/` — tester les endpoints, bouton **Authorize** pour coller `Bearer <access_token>`.
-- **ReDoc :** `http://127.0.0.1:8000/redoc/` — même schéma, lecture plus linéaire.
-- **Schéma OpenAPI brut :** `http://127.0.0.1:8000/swagger.json` ou `http://127.0.0.1:8000/swagger.yaml` (import Postman, génération client).
-
-La description générale (flux multi-tenant, auth, rôles) est dans la page d’accueil du schéma ; les actions personnalisées (`select-context`, `assign_entreprise`, `succursales`, `my_entreprise`, `users` sur entreprise, etc.) ont des résumés et corps de requête documentés via **drf-yasg**.
+Ce dépôt contient le **backend API** (Django 5 + Django REST Framework). Il expose une API REST documentée (**Swagger** / **ReDoc**, schéma OpenAPI) et sert de socle à des applications web ou mobiles « front ».
 
 ---
 
-## 1. Ordre chronologique des scénarios
+## Table des matières
 
-L’ordre logique côté utilisateur est le suivant :
-
-1. **Création de compte** (inscription) — pas d’auth  
-2. **Connexion** (login) — obtention des tokens + infos user / entreprises  
-3. **Création d’une entreprise** — utilisateur connecté, sans entreprise encore (ou admin)  
-4. **Liaison user ↔ entreprise** (Membership) — associer son compte à l’entreprise (avec rôle admin/user)  
-5. **Sélection du contexte** (optionnel) — choisir l’entreprise (et la succursale) pour les prochains appels  
-6. **Création de succursales** (optionnel) — si l’entreprise a `has_branches: true`
-
-En pratique, les étapes 3 et 4 peuvent être proposées juste après le login pour un nouvel utilisateur : il crée son entreprise puis s’y associe en un flux guidé.
-
----
-
-## 2. Création de compte (inscription)
-
-- **Endpoint :** `POST /api/users/`  
-- **Auth :** Aucune (`AllowAny`)  
-- **Content-Type :** `application/json`
-
-**Payload :**
-
-```json
-{
-  "username": "string",
-  "email": "user@example.com",
-  "first_name": "string",
-  "last_name": "string",
-  "password": "string",
-  "password_confirm": "string"
-}
-```
-
-**Contraintes :**  
-- `password` et `password_confirm` doivent être identiques.  
-- Longueur minimale du mot de passe : 8 caractères.
-
-**Réponse succès (201) :**
-
-```json
-{
-  "message": "Compte créé avec succès. Contactez le superadmin pour associer votre entreprise.",
-  "user_id": 1,
-  "username": "johndoe",
-  "email": "user@example.com"
-}
-```
-
-**Réponse erreur (400) :** body avec champs d’erreur (ex. `password`, `password_confirm`, `username`).
+1. [Vision produit](#1-vision-produit)
+2. [Architecture technique](#2-architecture-technique)
+3. [Multi-tenant, contexte et sécurité](#3-multi-tenant-contexte-et-sécurité)
+4. [Acteurs et rôles](#4-acteurs-et-rôles)
+5. [Modules applicatifs](#5-modules-applicatifs)
+6. [Processus métier (de bout en bout)](#6-processus-métier-de-bout-en-bout)
+7. [Fonctionnalités détaillées par domaine](#7-fonctionnalités-détaillées-par-domaine)
+8. [API, internationalisation et rapports](#8-api-internationalisation-et-rapports)
+9. [Pour aller plus loin](#9-pour-aller-plus-loin)
 
 ---
 
-## 3. Connexion (login)
+## 1. Vision produit
 
-- **Endpoint :** `POST /api/auth/`  
-- **Auth :** Aucune  
-- **Content-Type :** `application/json`
+### 1.1 Ce que Uhakika résout
 
-**Payload :**
+| Besoin | Réponse dans la plateforme |
+|--------|----------------------------|
+| Savoir **ce qu’il reste** en rayon ou en réserve | Stock global par article + **lots d’entrée** avec **FIFO** (premier entré, premier sorti) |
+| **Acheter** et **vendre** en traçant les marges | Entrées / sorties, **coût d’achat** et **prix de vente** par lot, **bénéfices par lot** |
+| **Encaisser** et suivre la **caisse** | Mouvements **ENTREE** / **SORTIE**, multi-devises, **types de caisse** (multicaisse), pièces justificatives |
+| Vendre **à crédit** et **recouvrer** | **Dettes client**, statuts, **paiements** liés à la caisse |
+| **Commandes** avant livraison | **Commandes** (statuts), passage à **livrée** → **sortie de stock automatique** (même logique qu’une vente) |
+| **Marchandise en route** | **Lots** fournisseur (transit → arrivée → **clôture** avec **entrée stock** sans double débit caisse) |
+| **Décisionnel** | **Rapports** (inventaire, ventes, dettes, bons PDF), **tableaux de bord** caisse, **bénéfices** par période |
+| **Clients autonomes** | **Portail client** (JWT dédié) : catalogue recherchable, **commandes**, **dettes**, **ventes** |
 
-```json
-{
-  "username": "johndoe",
-  "password": "votremotdepasse"
-}
-```
+### 1.2 Positionnement SaaS
 
-**Réponse succès (200) :**
-
-```json
-{
-  "refresh": "eyJ0eXAiOiJKV1QiLCJhbGc...",
-  "access": "eyJ0eXAiOiJKV1QiLCJhbGc...",
-  "user": {
-    "id": 1,
-    "username": "johndoe",
-    "email": "user@example.com",
-    "entreprise": { "id": 1, "nom": "...", "has_branches": false, ... },
-    "enterprises": [
-      {
-        "membership_id": 1,
-        "entreprise": { "id": 1, "nom": "...", "secteur": "...", "adresse": "...", "telephone": "...", "email": "...", "responsable": "...", "has_branches": false },
-        "role": "admin",
-        "default_branch_id": null
-      }
-    ]
-  }
-}
-```
-
-- Si l’utilisateur n’a **aucune entreprise** (pas encore de Membership), `user.enterprises` est `[]` et `user.entreprise` peut être `null`.  
-- Conserver `access` pour le header `Authorization: Bearer <access>` et `refresh` pour renouveler le token (voir refresh ci‑dessous).
-
-**Refresh du token :**  
-`POST /api/auth/refresh/`  
-Body : `{ "refresh": "<refresh_token>" }`  
-Réponse : `{ "access": "..." }` (et éventuellement `refresh`).
+- Une **entreprise** = un **tenant** : les données sont **isolées** (articles, stock, ventes, caisse, etc.).
+- Les **succursales** (optionnelles) permettent de **scinder** catalogue, stock et périmètre des **agents**.
+- **Plusieurs utilisateurs** peuvent travailler sur la même entreprise avec des **rôles** différents (admin / agent).
+- Les **clients finaux** peuvent disposer d’un **compte portail** lié à une ou plusieurs entreprises (liaison `ClientEntreprise`).
 
 ---
 
-## 4. Création d’une entreprise
+## 2. Architecture technique
 
-- **Endpoint :** `POST /api/entreprises/`  
-- **Auth :** Bearer token requis. L’utilisateur doit être considéré comme “admin” (en pratique : après liaison à une entreprise) **ou** le backend peut autoriser un utilisateur sans entreprise à en créer une (à confirmer selon les règles métier).  
-- **Content-Type :** `application/json`
+| Couche | Technologie |
+|--------|-------------|
+| Framework | **Django 5.2** |
+| API | **Django REST Framework** (viewsets, serializers, pagination) |
+| Auth staff | **JWT** (`djangorestframework-simplejwt`) avec **claims** `entreprise_id`, `succursale_id`, `membership_id` |
+| Auth portail client | **JWT client** dédié (`ClientJWTAuthentication`) |
+| Documentation API | **drf-yasg** — `/swagger/`, `/redoc/`, `swagger.json` |
+| Base de données | **MySQL** ou **MariaDB** (via **PyMySQL** en mode MySQLdb) |
+| Configuration | **python-decouple** (`.env`), option **`DATABASE_URL`**, charset **utf8mb4** |
+| Fichiers / médias | Logos entreprise, images types de caisse (stockage `MEDIA`) |
+| Import masse | **openpyxl** — feuilles Excel pour **approvisionnement** |
 
-**Payload :**
-
-```json
-{
-  "nom": "Ma Société",
-  "secteur": "Commerce",
-  "pays": "France",
-  "adresse": "123 rue Example",
-  "telephone": "+33600000000",
-  "email": "contact@masociete.com",
-  "nif": "NIF123456",
-  "responsable": "Jean Dupont",
-  "logo": null,
-  "slogan": "Notre slogan",
-  "has_branches": false
-}
-```
-
-**Champs optionnels :** `logo` (fichier ou null), `slogan`, `has_branches` (défaut `false`). Si l’entreprise aura des succursales, mettre `has_branches: true`.
-
-**Réponse succès (201) :** objet entreprise (tous les champs du modèle, ex. `id`, `nom`, `secteur`, `pays`, `adresse`, `telephone`, `email`, `nif`, `responsable`, `logo`, `slogan`, `has_branches`).
-
-**Comportement backend :** À la création, le backend associe automatiquement l’utilisateur connecté à cette entreprise avec le rôle **admin** (Membership créé). Donc après cette étape, l’utilisateur a déjà une liaison avec l’entreprise créée.
-
-**Note pour le flux “premier compte” :** Actuellement, seuls les utilisateurs déjà “admin” (ayant au moins un Membership avec rôle admin) peuvent créer une entreprise. Pour un **nouvel utilisateur sans aucune entreprise**, deux options côté produit : (1) Adapter le backend pour autoriser `POST /api/entreprises/` pour tout utilisateur authentifié sans membership (puis création auto du Membership admin), afin que le flux “Inscription → Login → Créer mon entreprise” fonctionne ; (2) Ou faire créer la première entreprise par un superadmin, puis l’utilisateur s’y associe via `assign_entreprise`.
+Le projet est organisé en **applications Django** : `config`, `users`, `stock`, `order`, `rapports`, `import_excel`.
 
 ---
 
-## 5. Liaison user ↔ entreprise (Membership)
+## 3. Multi-tenant, contexte et sécurité
 
-Utilisé quand l’utilisateur a déjà un compte et qu’une entreprise existe déjà (créée par lui ou par un superadmin). Il s’associe à cette entreprise avec un rôle.
+### 3.1 Entreprise et succursale
 
-- **Endpoint :** `POST /api/users/{user_id}/assign_entreprise/`  
-- **Auth :** Bearer token requis.  
-- **Règle :** Un utilisateur non superadmin ne peut associer **que son propre compte** (`user_id` = son `id`). Le superadmin peut associer n’importe quel `user_id`.
+- Chaque enregistrement métier majeur est rattaché à une **`Entreprise`**.
+- Si `has_branches` est activé, des **`Succursale`** précisent le site (magasin, dépôt).
+- Les **articles**, **entrées**, **sorties**, **mouvements de caisse**, etc. respectent ce **périmètre** selon les filtres du code (tenant + branche dans le JWT ou paramètres).
 
-**Payload :**
+### 3.2 JWT staff et sélection de contexte
 
-```json
-{
-  "entreprise_id": 1,
-  "role": "admin"
-}
-```
+1. **Connexion** : `POST /api/auth/` → tokens + premier **membership** actif injecté dans le refresh.
+2. **Changement d’entreprise / succursale** : `POST /api/auth/select-context/` → nouveaux tokens avec le **contexte** voulu.
 
-- `entreprise_id` : **obligatoire**, ID de l’entreprise existante.  
-- `role` : **optionnel**, `"admin"` ou `"user"`. Défaut : `"admin"`.
+Sans contexte entreprise valide, la plupart des endpoints métier répondent **400** ou **403** avec un message explicite.
 
-**Réponse succès (200) :**
+### 3.3 Membership et branches agents
 
-```json
-{
-  "message": "Utilisateur johndoe associé à Ma Société avec le rôle admin",
-  "user_id": 1,
-  "entreprise_id": 1,
-  "entreprise_nom": "Ma Société",
-  "role": "admin"
-}
-```
+- **`Membership`** : lien `(utilisateur, entreprise)` + **`role`** `admin` ou `user` (agent).
+- **`UserBranch`** : pour un agent, liste des **succursales autorisées** ; l’**admin** voit en général toute l’entreprise.
 
-**Scénario typique après inscription :**  
-1. Login (`POST /api/auth/`).  
-2. Créer l’entreprise (`POST /api/entreprises/`) → l’utilisateur est déjà lié en admin.  
-**OU** si l’entreprise a été créée autrement (ex. par un superadmin) :  
-3. Associer son compte : `POST /api/users/<son_id>/assign_entreprise/` avec `entreprise_id` et `role` (souvent `"admin"`).
+### 3.4 Portail client
+
+- Authentification séparée : **`/api/client-auth/login/`**, refresh, **`select-context`** (entreprise + membership client).
+- Le serveur pose **`request.client`** et **`request.client_membership`** pour filtrer **commandes**, **dettes**, **ventes** et **recherche articles** au périmètre du client.
 
 ---
 
-## 6. Sélection du contexte (entreprise / succursale)
+## 4. Acteurs et rôles
 
-Après login, les appels API sont “dans le contexte” d’une entreprise (et éventuellement d’une succursale). Par défaut, le premier Membership actif est utilisé. Pour **changer** d’entreprise ou de succursale, appeler :
+### 4.1 Super administrateur plateforme
 
-- **Endpoint :** `POST /api/auth/select-context/`  
-- **Auth :** Bearer token requis  
-- **Content-Type :** `application/json`
+- Compte **`is_superuser`** (créé via `createsuperuser`).
+- Gestion transverse : utilisateurs, rattachements entreprises, supervision.
 
-**Payload :**
+### 4.2 Administrateur d’entreprise (`Membership.role = admin`)
 
-```json
-{
-  "entreprise_id": 1,
-  "succursale_id": null
-}
-```
+- Paramètre l’**entreprise** (logo, slogan, succursales, devises, types de caisse, etc.).
+- Gère les **utilisateurs** et **agents**, le **catalogue**, les **clients**, les **entrées/sorties**, les **dettes**, les **commandes** (dont passage **livrée** / **rejetée**), les **lots** et la **clôture**.
+- Peut **supprimer** des commandes (selon règles) et accède à tous les **rapports** du tenant.
 
-- `entreprise_id` : **obligatoire**. Doit être une entreprise à laquelle l’utilisateur est lié (Membership actif).  
-- `succursale_id` : **optionnel**. Si l’entreprise a des succursales (`has_branches: true`), on peut passer l’ID d’une succursale de cette entreprise ; sinon `null`.
+### 4.3 Agent / employé (`Membership.role = user`)
 
-**Réponse succès (200) :** nouveaux tokens avec le contexte mis à jour :
+- Opère dans le **périmètre succursale** (branches autorisées + contexte JWT).
+- Peut **consulter** et **mettre à jour le statut** des **commandes** (livrée / rejetée), mais **pas** les supprimer (sauf règles spécifiques documentées dans l’API).
+- Utilise les écrans de **vente**, **stock**, **caisse** selon les permissions des viewsets.
 
-```json
-{
-  "refresh": "...",
-  "access": "...",
-  "user": {
-    "id": 1,
-    "username": "johndoe",
-    "email": "user@example.com",
-    "entreprise_id": 1,
-    "succursale_id": null,
-    "membership_id": 1,
-    "entreprise": { "id": 1, "nom": "Ma Société", "has_branches": false }
-  }
-}
-```
+### 4.4 Client final (portail)
 
-À utiliser pour mettre à jour le token côté frontend et afficher la bonne entreprise/succursale courante.
+- Compte **`Client`** avec **mot de passe** optionnel pour le portail et lien **`ClientEntreprise`** (entreprise + succursale + flag **client spécial** pour certains rapports dettes).
+- **Crée** et **modifie** ses **commandes** tant qu’elles sont **en attente**.
+- Consulte **ses dettes**, **ses ventes** (sorties), **recherche** le catalogue autorisé.
+- **Ne passe pas** par le même JWT que le staff.
 
 ---
 
-## 7. Création de succursale (si l’entreprise a des succursales)
+## 5. Modules applicatifs
 
-Disponible seulement si l’entreprise a `has_branches: true`. Réservé à l’**admin** de l’entreprise (Membership avec rôle `admin`).
+### 5.1 `users` — Comptes, memberships, contexte
 
-- **Endpoint :** `POST /api/succursales/`  
-- **Auth :** Bearer token. L’utilisateur doit être admin de l’entreprise du contexte (contexte JWT = cette entreprise).  
-- **Content-Type :** `application/json`
+- Inscription utilisateur, profil, **assignation** à une entreprise, gestion **succursales** par utilisateur.
+- **Tokens** enrichis (session, `session_start`, claims tenant).
+- Endpoints clés documentés dans **Swagger** : `users`, `login`, `auth`, `select-context`.
 
-**Payload :**
+### 5.2 `stock` — Cœur métier (référentiel, stock, ventes, caisse, crédit)
 
-```json
-{
-  "nom": "Succursale Centre",
-  "adresse": "45 avenue Example",
-  "telephone": "+33600000001",
-  "email": "centre@masociete.com"
-}
-```
+| Ressource | Rôle |
+|-----------|------|
+| **Entreprise**, **Succursale** | Tenant et sites |
+| **Unité**, **TypeArticle**, **SousTypeArticle**, **Article** | Catalogue (code article auto `XXXX####` par préfixe type/sous-type) |
+| **Stock** | Quantité agrégée par article (alertes seuil) |
+| **Entree** / **LigneEntree** | Approvisionnements par **lot** (`quantite_restante` pour FIFO) |
+| **Sortie** / **LigneSortie** | Ventes ; traçabilité **LigneSortieLot** ; **BeneficeLot** |
+| **Devise** | Multi-devises par entreprise (dont devise **principale**) |
+| **MouvementCaisse** | Toute entrée/sortie d’argent (ventes, achats, ajustements, paiements dettes…) |
+| **TypeCaisse**, **DetailMouvementCaisse** | Multicaisse (ventilation par canal) |
+| **Client**, **ClientEntreprise** | Contacts et rattachement multi-entreprises / succursales |
+| **DetteClient**, **PaiementDette** (logique migrée vers MouvementCaisse) | Crédit client et recouvrement |
 
-- `nom` : obligatoire.  
-- `adresse`, `telephone`, `email` : optionnels.  
-- L’**entreprise** est fixée côté backend par le contexte (token / membership) ; inutile de l’envoyer.
+**Actions personnalisées** (exemples) : recherche **articles** / **clients**, **stats** articles, **lots par article**, **bénéfices totaux** (période + pagination), **produits les plus vendus**, **soldes caisse**, **tableau de bord**, **mouvements par devise**, **bons POS / factures PDF**, etc.
 
-**Réponse succès (201) :** objet succursale avec `id`, `entreprise`, `entreprise_nom`, `nom`, `adresse`, `telephone`, `email`, `is_active`, `created_at`.
+### 5.3 `order` — Fournisseurs, lots en transit, commandes client, portail
 
-**Liste des succursales :** `GET /api/succursales/` — retourne les succursales de l’entreprise du contexte.
+| Ressource | Rôle |
+|-----------|------|
+| **Fournisseur** | Référentiel achats |
+| **Lot** + **LotItem** | Expedition, articles, quantités, coûts ; statuts **EN_TRANSIT**, **ARRIVE**, **CLOTURE** |
+| **FraisLot** | Frais de transport, douane, manutention (par devise) |
+| **Commande** + **CommandeItem** | Pré-commande client (article catalogue **ou** nom libre) |
+| **CommandeResponse** | Fil de discussion / validation interne |
 
-### CRUD succursale (complete côté API)
+**Clôture de lot** : création d’une **Entrée** + lignes (prix vente, seuil, expiration) **sans** débit caisse (coût déjà engagé « hors caisse » en transit).
 
-- **Lire une succursale (GET détail)** : `GET /api/succursales/{id}/`
-- **Créer (POST)** : `POST /api/succursales/`
-- **Mettre à jour (PATCH/PUT)** : `PATCH /api/succursales/{id}/` ou `PUT /api/succursales/{id}/`
-- **Supprimer (DELETE)** : `DELETE /api/succursales/{id}/`
-  - Implémenté comme une **désactivation** (`is_active = false`) via `perform_destroy`.
+**Livraison commande** : passage au statut **LIVREE** → **sortie automatique** (FIFO, stock, bénéfices, **mouvement caisse** comme une vente), lien **`sortie_livraison`** sur la commande.
 
-Règles d’accès :
-- **Admin** de l’entreprise (Membership.role = `admin`) : peut créer/modifier/supprimer.
-- **Agent** (Membership.role = `user`) : ne voit que sa succursale courante (filtrage côté backend), pas de CRUD.
+**Portail** : routes sous `/api/client-auth/…`, `/api/client-portal/…`.
 
----
+### 5.4 `rapports` — PDF et JSON métier
 
-## 7 bis. Associer un utilisateur aux succursales (Membership)
+- **Inventaire** (JSON / PDF)
+- **Bon d’entrée**, **bon d’achat**, **clients & dettes** (variantes générales / synthèse)
+- **Rapport des ventes** (période obligatoire, **pagination SQL** sur les lignes, totaux agrégés sur la période)
+- **Fiche stock** par article (PDF)
 
-En base, cela repose sur :
+En-têtes avec **logo**, **slogan**, **téléphone** entreprise.
 
-- **`Membership.default_succursale`** : succursale par défaut pour le JWT / le filtrage (voir aussi `select-context`).
-- **`UserBranch`** : liste des succursales auxquelles ce **membership** (user + entreprise) est autorisé.
+### 5.5 `import_excel` — Approvisionnement par fichier
 
-Ce n’était **pas** documenté avant ; les endpoints suivants exposent cette logique.
+- Téléchargement d’un **modèle Excel** (colonnes article, quantités, prix, devise, seuil, expiration).
+- Upload : validation, création d’**Entrée** / **LigneEntree**, mise à jour **Stock**, règles de caisse selon implémentation (voir endpoints dans `import_excel`).
 
-### Lire les succursales liées à un user pour une entreprise
+### 5.6 `config` — Paramètres globaux
 
-- **Endpoint :** `GET /api/users/{user_id}/succursales/?entreprise_id={entreprise_id}`  
-- **Auth :** Bearer. **Superadmin** ou **admin** de l’entreprise (même règle que la gestion des utilisateurs).  
-- **Query :** `entreprise_id` **obligatoire**.
-
-**Réponse succès (200) :**
-
-```json
-{
-  "user_id": 3,
-  "entreprise_id": 1,
-  "membership_id": 5,
-  "default_succursale_id": 2,
-  "succursales": [
-    { "id": 2, "nom": "Centre", "adresse": "..." }
-  ]
-}
-```
-
-### Définir la succursale par défaut et/ou la liste des succursales autorisées
-
-- **Endpoint :** `POST /api/users/{user_id}/succursales/`  
-- **Auth :** Bearer. **Superadmin** ou **admin** de l’entreprise.  
-- **Content-Type :** `application/json`
-
-**Payload (exemple complet) :**
-
-```json
-{
-  "entreprise_id": 1,
-  "default_succursale_id": 2,
-  "succursale_ids": [2, 7]
-}
-```
-
-- **`entreprise_id`** : obligatoire. L’utilisateur cible doit avoir un **Membership actif** pour cette entreprise.  
-- **`succursale_ids`** : optionnel. Si la clé est **présente**, elle **remplace** toutes les lignes `UserBranch` pour ce membership (liste vide = aucune succursale autorisée explicitement). Chaque id doit être une succursale **active** de cette entreprise.  
-- **`default_succursale_id`** : optionnel (`null` pour effacer). Doit être une succursale de cette entreprise. Si vous envoyez **à la fois** `succursale_ids` et `default_succursale_id` non null, la valeur par défaut **doit** figurer dans `succursale_ids`. Avec `succursale_ids: []`, la valeur par défaut doit être `null` ou omise.
-
-Vous pouvez aussi n’envoyer **que** `default_succursale_id` (sans clé `succursale_ids`) pour ne mettre à jour que la succursale par défaut, sans toucher aux `UserBranch`.
-
-**Réponse succès (200) :** message + `membership_id`, `default_succursale_id`, liste `succursales` mise à jour.
-
-**Ordre conseillé côté produit :** créer les succursales (`POST /api/succursales/`) → puis appeler ce `POST` pour chaque employé / admin qui doit être limité à certaines succursales.
-
-### CRUD côté frontend : association User ↔ Succursales (UserBranch)
-
-Cette association (User <-> Succursales) est gérée via :
-- **`GET /api/users/{user_id}/succursales/?entreprise_id={entreprise_id}`** (lecture)
-- **`POST /api/users/{user_id}/succursales/`** (création / mise à jour / suppression)
-
-Il n’y a pas d’endpoint séparé “PUT/PATCH UserBranch par id” : le CRUD est fait via `POST`.
-
-#### 1) Lire (GET)
-- **Endpoint :** `GET /api/users/{user_id}/succursales/?entreprise_id=1`
-- **Auth :** Bearer token (superadmin ou admin de l’entreprise)
-
-Réponse (exemple) :
-```json
-{
-  "user_id": 3,
-  "entreprise_id": 1,
-  "membership_id": 5,
-  "default_succursale_id": 2,
-  "succursales": [
-    { "id": 2, "nom": "Centre", "adresse": "..." }
-  ]
-}
-```
-
-#### 2) Écrire (POST) : Create / Update / Delete
-- **Endpoint :** `POST /api/users/{user_id}/succursales/`
-- **Body :** au moins un des champs `succursale_ids` ou `default_succursale_id` doit être fourni.
-
-##### Create / Update complet (remplacer la liste)
-```json
-{
-  "entreprise_id": 1,
-  "default_succursale_id": 2,
-  "succursale_ids": [2, 7]
-}
-```
-Effet :
-- remplace toutes les lignes `UserBranch` de ce membership
-- met à jour `Membership.default_succursale_id`
-
-##### Update “default uniquement” (ne pas toucher aux UserBranch)
-```json
-{ "entreprise_id": 1, "default_succursale_id": 2 }
-```
-
-##### Delete (retirer l’accès à toutes les succursales)
-```json
-{
-  "entreprise_id": 1,
-  "succursale_ids": [],
-  "default_succursale_id": null
-}
-```
-
-#### 3) Cas critique : agent (`Membership.role == "user"`) sans succursale
-
-Règle stricte backend :
-- si un agent n’a **pas** de succursale courante déterminée (JWT / `membership.default_succursale_id`), les endpoints “métier stock/rapports” échouent avec **403 (succursale requise)**.
-
-Guide frontend (côté UI) :
-1. Quand tu affiches la fiche d’un agent, fais un `GET /api/users/{id}/succursales/?entreprise_id=...`.
-2. Si `default_succursale_id == null` ou `succursales` est vide :
-   - affiche : “Affecter des succursales à cet agent”
-   - empêche d’accéder aux écrans stock/rapports pour cet agent tant que l’affectation n’est pas faite.
-3. Pour corriger :
-   - envoie un `POST /api/users/{id}/succursales/` avec `succursale_ids` + `default_succursale_id`
-   - puis côté agent, déclenche `POST /api/auth/select-context/` :
-     ```json
-     { "entreprise_id": 1, "succursale_id": 2 }
-     ```
-     (ou laisse `succursale_id` à `null` si tu veux que le backend utilise le default)
-
-Remarque sécurité :
-- quand tu remplaces `succursale_ids`, le backend met aussi `default_succursale_id` à `null` si l’ancien default n’appartient plus à la nouvelle liste (pour éviter toute fuite d’accès).
+- **`settings`** : apps installées, CORS, JWT, **DATABASES** (utf8mb4, pooling optionnel), **i18n** (fr/en), middleware **langue** (`Accept-Language`).
 
 ---
 
-## 8. Récapitulatif des endpoints (ordre chronologique)
+## 6. Processus métier (de bout en bout)
 
-| Étape | Méthode | Endpoint | Auth | Rôle |
-|-------|--------|----------|------|------|
-| 1. Inscription | `POST` | `/api/users/` | Non | - |
-| 2. Connexion | `POST` | `/api/auth/` | Non | - |
-| 3. Refresh token | `POST` | `/api/auth/refresh/` | Refresh token | - |
-| 4. Créer entreprise | `POST` | `/api/entreprises/` | Bearer | Admin ou premier compte |
-| 5. Lier user ↔ entreprise | `POST` | `/api/users/{id}/assign_entreprise/` | Bearer | Soi‑même ou superadmin |
-| 6. Changer contexte | `POST` | `/api/auth/select-context/` | Bearer | Utilisateur avec Membership |
-| 7. Créer succursale | `POST` | `/api/succursales/` | Bearer | Admin entreprise |
-| 8. Lier user ↔ succursales | `GET` / `POST` | `/api/users/{id}/succursales/` | Bearer | Superadmin ou admin entreprise |
+### 6.1 Cycle de vie d’un article
 
-**Utiles en complément :**
+1. Création des **taxonomies** (unité, type, sous-type) si besoin.
+2. Création de l’**Article** (code généré automatiquement).
+3. Création éventuelle de la fiche **Stock** (souvent à la première entrée).
 
-- `GET /api/users/me/` — profil de l’utilisateur connecté (GET/PATCH/PUT).  
-- `GET /api/entreprises/my_entreprise/` — entreprise du contexte (pour un admin).  
-- `GET /api/entreprises/` — liste des entreprises (selon droits : une pour admin, toutes pour superadmin).  
-- `GET /api/succursales/` — liste des succursales de l’entreprise du contexte.  
-- `GET /api/entreprises/{id}/users/` — liste des utilisateurs d’une entreprise.
+### 6.2 Approvisionnement classique (entrée magasin)
 
----
+1. **POST** entrée avec **lignes** : quantité, **prix d’achat**, **prix de vente**, devise, seuil, date d’expiration.
+2. Création des **LigneEntree** (`quantite_restante` = quantité initiale).
+3. **Augmentation** de `Stock.Qte`.
+4. **Sortie de caisse** (si le montant est dû immédiatement) selon règles métier de l’endpoint (solde vérifié le cas échéant).
 
-## 8 bis. Bénéfices totaux (`GET /api/entrees/benefices-totaux/`) — **obligatoirement contextualisé**
+### 6.3 Vente au comptant (ou payée)
 
-Cet endpoint agrège les enregistrements `BeneficeLot` **uniquement** pour :
+1. **POST** sortie avec lignes : article, quantité, **prix unitaire encaissé** (optionnel ; sinon moyenne pondérée des **prix de vente des lots** consommés en FIFO).
+2. Consommation **FIFO** sur `LigneEntree`, création **LigneSortieLot** et **BeneficeLot**.
+3. **Diminution** `Stock.Qte`.
+4. **Mouvement caisse ENTREE** par devise (sauf vente **EN_CREDIT** : montant caisse 0 mais sortie enregistrée).
 
-- l’**`entreprise_id`** portée par le JWT (`login` / `select-context`) ;
-- et, si le token contient une **`succursale_id`**, **uniquement** les lots dont l’**entrée** (`Entree`) est rattachée à cette succursale.
+### 6.4 Vente à crédit
 
-**Sans contexte entreprise** (pas de `entreprise_id` / membership utilisable) → **400** avec un message explicite.
+1. Sortie avec statut **EN_CREDIT** : traçabilité stock / FIFO / bénéfices comme une vente ; **pas** d’encaissement immédiat.
+2. **DetteClient** associée (montant, devise, lien sortie / client / entreprise).
+3. **Paiements** : via API **paiements-dettes** → **MouvementCaisse** lié à la dette (**ENTREE**).
 
-### Appel frontend
+### 6.5 Lot fournisseur (transit → stock)
 
-1. S’assurer que l’utilisateur a un **access token** valide **après** `POST /api/auth/` et idéalement **`POST /api/auth/select-context/`** avec `entreprise_id` (et `succursale_id` si vous voulez un périmètre succursale).
-2. Requête :
+1. Création **Lot** + **LotItem** (articles, quantités, **prix d’achat**).
+2. Enregistrement des **FraisLot** (transport, douane…).
+3. Changement de statut jusqu’à **CLOTURE** avec payload **approvisionnement** (prix vente, seuil, expiration par ligne).
+4. Service **`apply_stock_on_lot_closure`** : **Entrée** dédiée, **Stock** mis à jour, **Lot.entree_stock** renseigné ; **pas** de mouvement caisse pour ce flux (règle métier « déjà engagé »).
 
-```http
-GET /api/entrees/benefices-totaux/?year=2026&month=3
-Authorization: Bearer <access>
-```
+### 6.6 Commande client → livraison
 
-3. Interpréter la réponse :
-   - `resume` : totaux du mois **pour le tenant courant uniquement** ;
-   - `benefices_par_article` : top 10 articles (déjà filtré) ;
-   - `details.entreprise_id` / `details.succursale_id` : rappel du **périmètre** appliqué (le front peut l’afficher ou le logger pour debug).
+1. **Client** ou **admin** crée une **Commande** avec **items** (quantités).
+2. Statuts : **EN_ATTENTE** → **ACCEPTEE** (selon workflow) → **LIVREE** ou **REJETEE**.
+3. Au passage **LIVREE** (première fois) :
+   - Vérification : **toutes** les lignes ont un **article catalogue** ; stock suffisant.
+   - Création **Sortie** + lignes + FIFO + **sortie_livraison** sur la commande + **caisse**.
+4. Les lignes **nom libre** sans article **bloquent** la livraison automatique (message API explicite).
 
-**Important :** ne pas appeler cet URL sans token ni avec un utilisateur sans entreprise : vous obtiendrez **400**, pas des données “globales”.
+### 6.7 Ajustement ou annulation d’entrée
 
----
-
-## 8 ter. Clients `is_special` et rapports **dettes** (multi-tenant inchangé)
-
-### Modèle & CRUD `/api/clients/`
-
-- Champ **`is_special`** (booléen, défaut **`false`**) : `true` = client spécial, `false` = client standard.
-- **Création / mise à jour** : inclure dans le JSON body, ex. `{ "nom": "…", "is_special": true, … }` (les autres champs habituels inchangés ; `id` reste généré côté serveur en création).
-- **Liste / détail** : le champ est renvoyé dans la réponse. Les objets `client` imbriqués (ex. sorties, dettes) utilisent le même serializer et exposent aussi `is_special`.
-- **Filtre liste (optionnel)** :  
-  `GET /api/clients/?is_special=true` ou `?is_special=false`  
-  Sans ce paramètre, la liste retourne **tous** les clients du tenant (comportement API classique).
-
-Le filtrage **entreprise** / **succursale** reste celui du `TenantFilterMixin` (comme ailleurs).
-
-### Rapports dettes — paramètre query `is_special`
-
-Endpoints concernés :  
-`GET /api/rapports/clients-dettes-general/` (et PDF),  
-`GET /api/rapports/clients-dettes/` (et PDF) avec `client_id`.
-
-Comportement **métier** (toujours limité à l’entreprise / succursale courante) :
-
-| Situation | Effet |
-|-----------|--------|
-| **Pas de paramètre** `is_special` | Uniquement les clients **spéciaux** (`is_special=true`) |
-| `is_special=true` | Idem : uniquement clients spéciaux |
-| `is_special=false` | Uniquement clients **non** spéciaux |
-| `is_special=all` (ou `both`, `*`, `any`, `tous`) | **Tous** les clients du tenant (avec dettes selon les autres filtres) |
-
-- **clients-dettes détail** : si le client demandé ne correspond pas au filtre (ex. client standard alors que le défaut = spéciaux seulement), réponse **404** avec message explicite — utiliser `is_special=all` pour consulter n’importe quel client du tenant.
-- Les objets client dans le JSON incluent **`is_special`** pour affichage / tri côté UI.
-
-**Exemples front :**
-
-```http
-# Rapport général : priorité clients spéciaux (défaut)
-GET /api/rapports/clients-dettes-general/?date_debut=2025-01-01
-Authorization: Bearer <access>
-
-# Tous les clients avec dettes
-GET /api/rapports/clients-dettes-general/?is_special=all
-
-# Fiche dettes d’un client standard (sinon 404 avec filtre par défaut)
-GET /api/rapports/clients-dettes/?client_id=CLI0005&is_special=all
-```
+- Mise à jour d’entrée : recalcul **FIFO** / lots / stock (logique dans **EntreeViewSet** — attention aux cohérences `Stock` si ventes déjà passées).
+- Annulation : **restitution** stock et mouvements de caisse associés selon implémentation.
 
 ---
 
-## 9. Flux recommandé côté frontend (nouvel utilisateur)
+## 7. Fonctionnalités détaillées par domaine
 
-1. **Inscription**  
-   - Afficher formulaire (username, email, first_name, last_name, password, password_confirm).  
-   - `POST /api/users/` → afficher message de succès.
+### 7.1 Stock et FIFO
 
-2. **Connexion**  
-   - Formulaire username + password.  
-   - `POST /api/auth/` → stocker `access`, `refresh` et `user` (localStorage/session/cookie au choix).
+- Chaque **ligne d’entrée** est un **lot** avec **quantité restante**.
+- Les **sorties** consomment les lots du **plus ancien** au plus récent (`date_entree`, `id`).
+- **Rapports** et **fiches** utilisent ces données pour **marge**, **bénéfice**, **valorisation**.
 
-3. **Si `user.enterprises` est vide** (pas encore d’entreprise) :  
-   - Proposer “Créer mon entreprise” : formulaire avec les champs entreprise → `POST /api/entreprises/`.  
-   - Le backend crée l’entreprise et associe l’utilisateur en admin.  
-   - Puis appeler `POST /api/auth/select-context/` avec le nouvel `entreprise_id` pour mettre à jour le contexte (optionnel si le token est déjà mis à jour côté backend au prochain appel).
+### 7.2 Caisse multidevise et multicanal
 
-4. **Si l’utilisateur a déjà une entreprise** mais veut s’associer à une autre (ou se lier à une entreprise existante) :  
-   - `POST /api/users/<current_user_id>/assign_entreprise/` avec `entreprise_id` et `role` (`"admin"` ou `"user"`).
+- **Types de caisse** : espèces, mobile money, etc. (par entreprise / succursale).
+- **Mouvements** : montant, devise, type ENTREE/SORTIE, **motif**, **moyen**, **référence pièce**, lien ** générique** (`content_type` / `object_id`) vers sortie, entrée, dette…
+- **Détails** historiques ou ventilation sur plusieurs types pour les anciens enregistrements.
 
-5. **Si l’entreprise a `has_branches: true`** :  
-   - Proposer “Ajouter une succursale” : formulaire nom, adresse, téléphone, email → `POST /api/succursales/`.  
-   - Pour **attribuer** des succursales à un employé : `GET` / `POST /api/users/{id}/succursales/` (voir section **7 bis**).  
-   - L’utilisateur peut choisir la succursale active dans le JWT via `POST /api/auth/select-context/` avec `succursale_id`.
+### 7.3 Clients et recherche
 
-6. **Tous les autres appels API** (stock, ventes, rapports, etc.) : envoyer le header `Authorization: Bearer <access>` ; le backend utilise le contexte (entreprise_id / succursale_id) présent dans le JWT ou dans la requête.
+- **Recherche full-text** (selon migrations MySQL) sur articles et clients (`/api/articles/search/`, `/api/clients/search/`) avec `q`, `limit`, `offset`.
+- **Clients spéciaux** (`is_special`) : filtrage dédié sur certains **rapports dettes**.
 
----
+### 7.4 Tableaux de bord et indicateurs
 
-## 10. Gestion des erreurs
+- Soldes de caisse, **comparaison devises**, **bénéfices totaux** avec **évaluation de performance** (statuts type EXCELLENTE, NEUTRE, A_SURVEILLER selon résultat net période).
+- **Top produits** vendus (par **nombre de ventes** ou métriques dédiées).
 
-- **400** : payload invalide (champs manquants, format, contraintes). Body : `{ "champ": ["message d’erreur"], ... }` ou `{ "error": "message" }`.  
-- **401** : non authentifié (pas de token ou token expiré).  
-- **403** : authentifié mais pas le droit (ex. associer un autre user sans être superadmin, ou accès à une entreprise sans Membership).  
-- **404** : ressource introuvable (ex. entreprise_id ou user_id inexistant).
+### 7.5 Internationalisation
 
-Utiliser le champ `error` ou les clés par champ dans la réponse pour afficher les messages à l’utilisateur.
+- Langues **fr** / **en** ; middleware et **gettext** sur messages d’erreur et libellés métiers.
+- Endpoint de test : `/api/i18n-test/`.
 
 ---
 
-Ce README sert de **prompt / spec** pour un agent Cursor AI ou un développeur frontend : en suivant l’ordre des sections et les payloads ci‑dessus, les scénarios “création compte → création entreprise → liaison user–entreprise → création succursale” peuvent être implémentés dans le bon ordre chronologique avec les bons endpoints et formats.
+## 8. API, internationalisation et rapports
+
+### 8.1 Préfixe API
+
+Toutes les routes métier sont sous **`/api/`** (voir `config/urls.py`).
+
+Exemples :
+
+- `/api/entreprises/`, `/api/articles/`, `/api/entrees/`, `/api/sorties/`
+- `/api/mouvements-caisse/`, `/api/types-caisse/`, `/api/dettes/`
+- `/api/commandes/`, `/api/lots/`, `/api/fournisseurs/`
+- `/api/rapports/rapports/...` (inventaire, ventes, dettes, PDF…)
+- `/api/import-excel/...`
+
+### 8.2 Documentation interactive
+
+| URL | Usage |
+|-----|--------|
+| `/swagger/` | Tester les endpoints, bouton **Authorize** |
+| `/redoc/` | Lecture linéaire du schéma |
+| `/swagger.json` | Export Postman, génération client |
+
+La description générale (auth, tenant, caisse, clients) est centralisée dans **`config/openapi_description.py`**.
+
+### 8.3 Pagination
+
+- Liste standard : **`page`**, **`page_size`** (plafond configurable, ex. 200).
+- Rapport ventes : pagination **côté SQL** + totaux période en **agrégats**.
+
+---
+
+## 9. Pour aller plus loin
+
+### 9.1 Guide d’intégration frontend (détaillé)
+
+Un guide pas à pas (inscription, login, création entreprise, `select-context`, payloads) a été conservé ici :
+
+**[`docs/GUIDE_INTEGRATION_FRONTEND.md`](docs/GUIDE_INTEGRATION_FRONTEND.md)**
+
+### 9.2 Configuration locale
+
+- Copier les variables d’environnement (voir `.env` / `config/.env`) : `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `DATABASE_*` ou `DATABASE_URL`.
+- Installer les dépendances : `pip install -r requirements.txt`
+- Migrations : `python manage.py migrate`
+- Serveur : `python manage.py runserver`
+
+### 9.3 Base de données
+
+- Prévoir **utf8mb4** pour éviter les problèmes de caractères et aligner les migrations Django.
+- En cas de déploiement **MySQL/MariaDB** hébergé, vérifier les types de clés étrangères (INT/BIGINT) si bases anciennes — des migrations utilitaires peuvent être présentes dans `stock/migration_utils/`.
+
+---
+
+## Synthèse pour communication commerciale (Uhakika)
+
+**Uhakika** aide les organisations à **centraliser** la gestion opérationnelle : **catalogue** structuré, **stock** fiable par **lot** et **FIFO**, **ventes** et **caisse** multi-devises, **crédit client** avec **recouvrement** tracé, **commandes** et **livraisons** qui **impactent automatiquement le stock**, **achats fournisseurs** avec **transit** et **clôture** propre, **rapports PDF** pour le pilotage, et un **portail client** pour réduire les appels et les erreurs de saisie.
+
+Le tout dans une architecture **multi-entreprise**, **multi-succursale**, **sécurisée par JWT** et **documentée** pour une intégration rapide des équipes produit et IT.
+
+---
+
+*Document généré à partir du code du dépôt — à actualiser lors de nouvelles fonctionnalités.*
