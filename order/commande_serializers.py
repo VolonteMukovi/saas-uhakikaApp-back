@@ -1,3 +1,4 @@
+from django.db import transaction
 from django.utils.translation import gettext as _
 from rest_framework import serializers
 
@@ -6,6 +7,7 @@ from stock.serializers import ArticleSerializer
 from stock.services.tenant_context import get_tenant_ids
 
 from .models import Commande, CommandeItem, CommandeResponse
+from .services.commande_livraison import apply_sortie_on_commande_livree
 
 
 def _check_commande_items_catalogue(items, tenant_id, commande_succursale_id):
@@ -153,9 +155,13 @@ class CommandeDetailSerializer(serializers.ModelSerializer):
     items = CommandeItemReadSerializer(many=True, read_only=True)
     reponses = CommandeResponseSerializer(many=True, read_only=True)
     client_nom = serializers.CharField(source="client.nom", read_only=True)
+    sortie_livraison = serializers.IntegerField(
+        source="sortie_livraison_id", read_only=True, allow_null=True
+    )
 
     class Meta:
         model = Commande
+
         fields = (
             "id",
             "reference",
@@ -166,6 +172,7 @@ class CommandeDetailSerializer(serializers.ModelSerializer):
             "entreprise",
             "succursale",
             "note_client",
+            "sortie_livraison",
             "items",
             "reponses",
             "created_at",
@@ -320,6 +327,19 @@ class CommandeUpdateAdminSerializer(serializers.ModelSerializer):
                 )
             )
         return value
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        old_statut = instance.statut
+        new_statut = validated_data.get("statut", old_statut)
+        instance = super().update(instance, validated_data)
+        if (
+            new_statut == Commande.StatutCommande.LIVREE
+            and old_statut != Commande.StatutCommande.LIVREE
+        ):
+            apply_sortie_on_commande_livree(instance)
+            instance.refresh_from_db()
+        return instance
 
 
 class CommandeClientUpdateSerializer(serializers.ModelSerializer):

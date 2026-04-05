@@ -142,7 +142,8 @@ class CommandeViewSet(viewsets.ModelViewSet):
             "Schéma ci-dessous regroupe **deux variantes** (client portail vs staff) ; l’API n’accepte "
             "que celle qui correspond au JWT.\n\n"
             "**Client** : `nom`, `note_client`, `succursale`, `items` ; uniquement si **EN_ATTENTE**.\n\n"
-            "**Admin / employé** : **`statut`** = **REJETEE** ou **LIVREE** uniquement."
+            "**Admin / employé** : **`statut`** = **REJETEE** ou **LIVREE** uniquement. "
+            "**LIVREE** déclenche une sortie de stock (FIFO) pour les quantités commandées, comme une vente."
         ),
         request_body=COMMANDE_UPDATE_REQUEST_BODY,
         responses={200: CommandeDetailSerializer},

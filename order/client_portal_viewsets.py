@@ -21,6 +21,11 @@ from .openapi_params import PAGINATION_PARAMS, TAG_PORTAIL_CLIENT
 from .permissions import IsClientAuthenticated
 
 
+def _openapi_fake_request(view) -> bool:
+    """drf-yasg appelle get_queryset sans JWT : pas de request.client."""
+    return getattr(view, "swagger_fake_view", False)
+
+
 class ClientPortalDetteViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Dettes du client connecté pour l'entreprise du JWT (succursale du membership).
@@ -34,6 +39,8 @@ class ClientPortalDetteViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = DetteClientSerializer
 
     def get_queryset(self):
+        if _openapi_fake_request(self):
+            return DetteClient.objects.none()
         c = self.request.client
         m = self.request.client_membership
         bq = branch_q_for_membership(m)
@@ -104,6 +111,8 @@ class ClientPortalSortieViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = ClientPortalSortieReadSerializer
 
     def get_queryset(self):
+        if _openapi_fake_request(self):
+            return Sortie.objects.none()
         c = self.request.client
         m = self.request.client_membership
         bq = branch_q_for_membership(m)

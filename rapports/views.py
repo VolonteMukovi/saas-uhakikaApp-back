@@ -3,7 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from django.db.models import Sum, Q, F, DecimalField, OuterRef, Subquery, Value, Exists
+from django.db.models import Sum, Q, F, DecimalField, OuterRef, Subquery, Value, Exists, ExpressionWrapper
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.translation import gettext as _
@@ -13,6 +13,7 @@ from django.shortcuts import get_object_or_404
 from datetime import datetime, date
 from decimal import Decimal
 import io
+import math
 
 from config.pagination import StandardResultsSetPagination
 
@@ -1057,8 +1058,13 @@ class RapportsViewSet(viewsets.ViewSet):
             )
         return d0, d1
 
-    def _build_ventes_report(self, request):
-        """Construit le JSON du rapport des ventes (lignes de sortie : article, qté, PU, référence)."""
+    def _build_ventes_report(self, request, *, for_pdf=False):
+        """
+        Construit le JSON du rapport des ventes (lignes de sortie : article, qté, PU, référence).
+
+        JSON (for_pdf=False) : pagination SQL via page / page_size ; totaux sur toute la période en agrégat BDD.
+        PDF (for_pdf=True) : toutes les lignes, sans clé pagination.
+        """
         user = request.user
         entreprise = user.get_entreprise(request)
         d0, d1 = self._parse_ventes_dates(request)
@@ -1081,7 +1087,59 @@ class RapportsViewSet(viewsets.ViewSet):
             .order_by('sortie__date_creation', 'sortie_id', 'id')
         )
 
-        sortie_ids = list(lignes_qs.values_list('sortie_id', flat=True).distinct())
+        # Totaux sur la période complète (requêtes agrégées, sans charger toutes les lignes)
+        agg = lignes_qs.aggregate(
+            total_qte=Sum('quantite'),
+            total_montant=Sum(
+                ExpressionWrapper(
+                    F('quantite') * F('prix_unitaire'),
+                    output_field=DecimalField(max_digits=20, decimal_places=2),
+                )
+            ),
+        )
+        tot_qte = int(agg['total_qte'] or 0)
+        tot_m_vente = (agg['total_montant'] or Decimal('0')).quantize(Decimal('0.01'))
+
+        pagination_meta = None
+        if for_pdf:
+            page_slice_qs = lignes_qs
+        else:
+            try:
+                page = int(request.query_params.get('page', 1))
+            except (TypeError, ValueError):
+                page = 1
+            page = max(1, page)
+            try:
+                page_size = int(
+                    request.query_params.get(
+                        'page_size', StandardResultsSetPagination.page_size
+                    )
+                )
+            except (TypeError, ValueError):
+                page_size = StandardResultsSetPagination.page_size
+            page_size = max(
+                1, min(page_size, StandardResultsSetPagination.max_page_size)
+            )
+
+            count = lignes_qs.count()
+            total_pages = max(1, math.ceil(count / page_size)) if count else 1
+            if page > total_pages and count:
+                page = total_pages
+            start = (page - 1) * page_size
+            page_slice_qs = lignes_qs[start : start + page_size]
+
+            pagination_meta = {
+                'page': page,
+                'page_size': page_size,
+                'count': count,
+                'total_pages': total_pages,
+                'has_next': start + page_size < count,
+                'has_previous': page > 1,
+            }
+
+        # Une fois le queryset slicé (pagination), Django interdit .distinct() dessus : on matérialise la page.
+        page_lines = list(page_slice_qs)
+        sortie_ids = list(dict.fromkeys(l.sortie_id for l in page_lines))
         ref_ventes = {}
         mc_cols = mouvementcaisse_column_names()
         mc_qs = build_mouvementcaisse_queryset(mc_cols)
@@ -1098,10 +1156,7 @@ class RapportsViewSet(viewsets.ViewSet):
                     ref_ventes[mv.sortie_id] = mv.reference_piece
 
         lignes_ventes = []
-        tot_qte = 0
-        tot_m_vente = Decimal('0.00')
-
-        for ligne in lignes_qs:
+        for ligne in page_lines:
             s = ligne.sortie
             pu_achat = ligne.get_cout_achat_unitaire()
             if not isinstance(pu_achat, Decimal):
@@ -1110,8 +1165,6 @@ class RapportsViewSet(viewsets.ViewSet):
             if not isinstance(pu_vente, Decimal):
                 pu_vente = Decimal(str(pu_vente))
             q = ligne.quantite
-            tot_qte += q
-            tot_m_vente += (Decimal(q) * pu_vente).quantize(Decimal('0.01'))
 
             ref = f'Sortie #{s.id}'
             if s.id in ref_ventes:
@@ -1127,14 +1180,17 @@ class RapportsViewSet(viewsets.ViewSet):
                 }
             )
 
-        return {
+        out = {
             'entete': self._get_entete_entreprise(entreprise, user),
             'titre': _("RAPPORT DES VENTES"),
             'periode': {'date_debut': str(d0), 'date_fin': str(d1)},
             'lignes_ventes': lignes_ventes,
             'total_quantite': tot_qte,
-            'total_montant_vente': str(tot_m_vente.quantize(Decimal('0.01'))),
+            'total_montant_vente': str(tot_m_vente),
         }
+        if pagination_meta is not None:
+            out['pagination'] = pagination_meta
+        return out
 
     @action(detail=False, methods=['get'], url_path='ventes')
     def ventes(self, request):
@@ -1144,10 +1200,15 @@ class RapportsViewSet(viewsets.ViewSet):
         Paramètres obligatoires:
         - date_debut, date_fin : YYYY-MM-DD (bornes inclusives).
 
+        Pagination (requêtes BDD directes : LIMIT/OFFSET + agrégats SQL pour les totaux période) :
+        - page (défaut 1), page_size (défaut 25, max 200).
+
+        Les champs total_quantite et total_montant_vente portent sur **toute la période**, pas seulement la page.
+
         Contenu:
         - Lignes : article, quantité, PU achat (FIFO), PU vente, référence (sortie + pièce caisse si présente).
 
-        GET /api/rapports/ventes/?date_debut=2026-01-01&date_fin=2026-01-31
+        GET /api/rapports/ventes/?date_debut=2026-01-01&date_fin=2026-01-31&page=1&page_size=25
         """
         try:
             return Response(self._build_ventes_report(request))
@@ -1162,7 +1223,7 @@ class RapportsViewSet(viewsets.ViewSet):
         GET /api/rapports/ventes/pdf/?date_debut=2026-01-01&date_fin=2026-01-31
         """
         try:
-            data = self._build_ventes_report(request)
+            data = self._build_ventes_report(request, for_pdf=True)
         except ValidationError as exc:
             return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
 

@@ -71,19 +71,55 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': config('DATABASE_NAME'),
-        'USER': config('DATABASE_USER'),
-        'PASSWORD': config('DATABASE_PASSWORD'),
-        'HOST': config('DATABASE_HOST', default='localhost'),
-        'PORT': config('DATABASE_PORT', default='3306'),
-        'OPTIONS': {
-            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-        },
+def _mysql_connection_options():
+    """
+    Options communes MySQL / MariaDB (PyMySQL installé comme MySQLdb).
+    - utf8mb4 : même jeu que les migrations Django (défaut moderne), indépendant
+      du charset « serveur » affiché par phpMyAdmin (souvent latin1 en meta).
+    - sql_mode STRICT_TRANS_TABLES : aligné sur les attentes Django / intégrité.
+    """
+    opts = {
+        "charset": "utf8mb4",
+        "init_command": (
+            "SET sql_mode='STRICT_TRANS_TABLES', "
+            "NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"
+        ),
     }
-}
+    ssl_ca = config("DATABASE_SSL_CA", default="").strip()
+    if ssl_ca:
+        opts["ssl"] = {"ca": ssl_ca}
+    return opts
+
+
+_CONN_MAX_AGE = config("DATABASE_CONN_MAX_AGE", default=0, cast=int)
+_DATABASE_URL = config("DATABASE_URL", default="").strip()
+
+if _DATABASE_URL:
+    _parse_kwargs = {"conn_max_age": _CONN_MAX_AGE}
+    if _CONN_MAX_AGE > 0:
+        _parse_kwargs["conn_health_checks"] = True
+    DATABASES = {
+        "default": dj_database_url.parse(_DATABASE_URL, **_parse_kwargs),
+    }
+    _engine = DATABASES["default"].get("ENGINE", "")
+    if "mysql" in _engine:
+        DATABASES["default"].setdefault("OPTIONS", {})
+        DATABASES["default"]["OPTIONS"].update(_mysql_connection_options())
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.mysql",
+            "NAME": config("DATABASE_NAME"),
+            "USER": config("DATABASE_USER"),
+            "PASSWORD": config("DATABASE_PASSWORD"),
+            "HOST": config("DATABASE_HOST", default="localhost"),
+            "PORT": config("DATABASE_PORT", default="3306"),
+            "CONN_MAX_AGE": _CONN_MAX_AGE,
+            "OPTIONS": _mysql_connection_options(),
+        }
+    }
+    if _CONN_MAX_AGE > 0:
+        DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
 
 
 AUTH_USER_MODEL = 'users.User'

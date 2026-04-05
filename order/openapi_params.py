@@ -320,7 +320,10 @@ COMMANDE_UPDATE_REQUEST_BODY = openapi.Schema(
         "**JWT portail (client)** : `nom`, `note_client`, `succursale` (ID), `items` (tableau). "
         "Uniquement si la commande est **EN_ATTENTE**. Si `items` est présent, il **remplace** "
         "toutes les lignes existantes.\n\n"
-        "**JWT staff (admin ou employé)** : **`statut` uniquement** — **`REJETEE`** ou **`LIVREE`**."
+        "**JWT staff (admin ou employé)** : **`statut` uniquement** — **`REJETEE`** ou **`LIVREE`**. "
+        "Passage à **`LIVREE`** : crée une **sortie de stock** (FIFO, comme une vente), met à jour les lots / "
+        "`Stock` / caisse, et lie la commande (`sortie_livraison`). "
+        "Toutes les lignes doivent avoir un **article catalogue** ; stock suffisant requis."
     ),
     properties={
         "statut": openapi.Schema(

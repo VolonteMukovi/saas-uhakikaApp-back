@@ -1221,7 +1221,9 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 devise_id = ligne.get('devise_id') or ligne.get('devise')
                 if devise_id:
                     try:
-                        devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=instance.sortie.entreprise_id)
+                        devise_obj = Devise.objects.get(
+                            pk=devise_id, entreprise_id=instance.entreprise_id
+                        )
                     except Devise.DoesNotExist:
                         devise_obj = default_dev
                 else:
@@ -2523,20 +2525,40 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         nombre_articles_distincts = (
             benefices.values('lot_entree__article_id').distinct().count()
         )
-        
-        # Évaluation de la performance
+
+        # Évaluation de la performance (ne jamais qualifier de « bonne » une période en perte)
+        seuil_perte_moderee = Decimal('-500')
+        seuil_perte_grave = Decimal('-5000')
         if total_benefice > 0:
             performance = 'EXCELLENTE'
-            message = f"La boutique fonctionne très bien avec un bénéfice total de {total_benefice}"
-        elif total_benefice > -1000:
-            performance = 'BONNE'
-            message = f"La boutique fonctionne correctement avec un bénéfice de {total_benefice}"
-        elif total_benefice > -5000:
-            performance = 'MOYENNE'
-            message = f"Attention : bénéfice négatif de {total_benefice}. Réviser les prix."
+            message = (
+                f"Période profitable : bénéfice total {total_benefice}. "
+                "Conserver la vigilance sur les marges par article."
+            )
+        elif total_benefice == 0:
+            performance = 'NEUTRE'
+            message = (
+                "Équilibre sur la période (bénéfice net nul). "
+                "Surveiller les lots perdants dans le détail par article."
+            )
+        elif total_benefice >= seuil_perte_moderee:
+            performance = 'A_SURVEILLER'
+            message = (
+                f"Période en légère perte (bénéfice net {total_benefice}). "
+                "Réviser les prix de vente, les remises et les articles les plus déficitaires."
+            )
+        elif total_benefice >= seuil_perte_grave:
+            performance = 'PREOCCUPANTE'
+            message = (
+                f"Perte significative sur la période ({total_benefice}). "
+                "Analyser le coût d'achat, la politique tarifaire et les sorties à crédit."
+            )
         else:
             performance = 'CRITIQUE'
-            message = f"URGENT : Perte importante de {total_benefice}. Action immédiate requise."
+            message = (
+                f"Perte très importante ({total_benefice}). "
+                "Action urgente : revue des marges, du stock et des conditions de vente."
+            )
         
         return Response({
             'resume': {
@@ -2658,8 +2680,8 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 
                 # Restaurer le stock
                 stock_obj, created = Stock.objects.get_or_create(
-                    article=ancienne_ligne.article, 
-                    defaults={'Qte': 0, 'seuilAlert': 0}
+                    article=ancienne_ligne.article,
+                    defaults={'Qte': 0, 'seuilAlert': 0},
                 )
                 stock_obj.Qte -= ancienne_ligne.quantite
                 stock_obj.save()
@@ -2734,9 +2756,8 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         with transaction.atomic():
             for ligne in entree.lignes.all():
                 stock_obj, created = Stock.objects.get_or_create(
-                    article=ligne.article, 
-              
-                    defaults={'Qte': 0, 'seuilAlert': 0}
+                    article=ligne.article,
+                    defaults={'Qte': 0, 'seuilAlert': 0},
                 )
                 stock_obj.Qte -= ligne.quantite
                 stock_obj.save()

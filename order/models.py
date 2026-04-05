@@ -264,6 +264,14 @@ class Commande(models.Model):
         help_text="Libellé optionnel (ex. désignation provisoire si le catalogue n’est pas à jour).",
     )
     note_client = models.TextField(blank=True, default="", help_text="Message ou instructions du client.")
+    sortie_livraison = models.OneToOneField(
+        "stock.Sortie",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="commande_livraison",
+        help_text="Sortie de stock créée automatiquement lors du passage au statut « livrée ».",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -32,6 +32,18 @@ def _mysql_table_exists(cursor, table: str) -> bool:
     return cursor.fetchone()[0] > 0
 
 
+def _mysql_fk_exists_on_column(cursor, table: str, column: str) -> bool:
+    cursor.execute(
+        """
+        SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+          AND COLUMN_NAME = %s AND REFERENCED_TABLE_NAME IS NOT NULL
+        """,
+        [table, column],
+    )
+    return cursor.fetchone()[0] > 0
+
+
 def _mysql_index_exists(cursor, table: str, index_name: str) -> bool:
     cursor.execute(
         """
@@ -41,6 +53,41 @@ def _mysql_index_exists(cursor, table: str, index_name: str) -> bool:
         [table, index_name],
     )
     return cursor.fetchone()[0] > 0
+
+
+def _mysql_column_type(cursor, table: str, column: str) -> str:
+    """
+    Type SQL exact de la colonne (ex. bigint(20), int(11), bigint(20) unsigned).
+    Nécessaire pour les FK : InnoDB exige la même définition que la colonne référencée
+    (sinon errno 150), y compris INT vs BIGINT et UNSIGNED.
+    """
+    cursor.execute(
+        """
+        SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+        """,
+        [table, column],
+    )
+    row = cursor.fetchone()
+    if not row:
+        raise RuntimeError(
+            f'apply_0008_idempotent: colonne `{table}`.`{column}` introuvable.'
+        )
+    return row[0]
+
+
+def _mysql_ensure_innodb(cursor, table: str) -> None:
+    """InnoDB est requis pour les clés étrangères (errno 150 si MyISAM / autre)."""
+    cursor.execute(
+        """
+        SELECT ENGINE FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+        """,
+        [table],
+    )
+    row = cursor.fetchone()
+    if row and row[0] and str(row[0]).upper() != "INNODB":
+        cursor.execute(f"ALTER TABLE `{table}` ENGINE=InnoDB")
 
 
 def _mysql_drop_fk_by_column(cursor, table: str, column: str) -> None:
@@ -153,10 +200,13 @@ def apply_0008_idempotent(apps, schema_editor) -> None:
                 'ALTER TABLE `stock_mouvementcaisse` ALTER COLUMN `categorie_operation` DROP DEFAULT'
             )
         if 'content_type_id' not in mc:
+            _mysql_ensure_innodb(cursor, "stock_mouvementcaisse")
+            _mysql_ensure_innodb(cursor, "django_content_type")
+            ct_type = _mysql_column_type(cursor, "django_content_type", "id")
             cursor.execute(
-                """
+                f"""
                 ALTER TABLE `stock_mouvementcaisse`
-                ADD COLUMN `content_type_id` integer NULL,
+                ADD COLUMN `content_type_id` {ct_type} NULL,
                 ADD CONSTRAINT `stock_mouvementcaiss_content_type_id_ad2b8e25_fk_django_co`
                 FOREIGN KEY (`content_type_id`) REFERENCES `django_content_type`(`id`)
                 """
@@ -169,10 +219,13 @@ def apply_0008_idempotent(apps, schema_editor) -> None:
                 """
             )
         if 'utilisateur_id' not in mc:
+            _mysql_ensure_innodb(cursor, "stock_mouvementcaisse")
+            _mysql_ensure_innodb(cursor, "users_user")
+            uid_type = _mysql_column_type(cursor, 'users_user', 'id')
             cursor.execute(
-                """
+                f"""
                 ALTER TABLE `stock_mouvementcaisse`
-                ADD COLUMN `utilisateur_id` bigint NULL,
+                ADD COLUMN `utilisateur_id` {uid_type} NULL,
                 ADD CONSTRAINT `stock_mouvementcaisse_utilisateur_id_75557a2a_fk_users_user_id`
                 FOREIGN KEY (`utilisateur_id`) REFERENCES `users_user`(`id`)
                 """
@@ -205,10 +258,25 @@ def apply_0008_idempotent(apps, schema_editor) -> None:
         dcols = _mysql_cols(cursor, 'stock_detailmouvementcaisse')
         if 'mouvement_id' not in dcols:
             cursor.execute('DELETE FROM `stock_detailmouvementcaisse`')
+            _mysql_ensure_innodb(cursor, "stock_detailmouvementcaisse")
+            _mysql_ensure_innodb(cursor, "stock_mouvementcaisse")
+            mid_type = _mysql_column_type(cursor, 'stock_mouvementcaisse', 'id')
+            cursor.execute(
+                f"""
+                ALTER TABLE `stock_detailmouvementcaisse`
+                ADD COLUMN `mouvement_id` {mid_type} NOT NULL,
+                ADD CONSTRAINT `stock_detailmouvemen_mouvement_id_bad96ba0_fk_stock_mou`
+                FOREIGN KEY (`mouvement_id`) REFERENCES `stock_mouvementcaisse`(`id`)
+                """
+            )
+        elif not _mysql_fk_exists_on_column(
+            cursor, "stock_detailmouvementcaisse", "mouvement_id"
+        ):
+            _mysql_ensure_innodb(cursor, "stock_detailmouvementcaisse")
+            _mysql_ensure_innodb(cursor, "stock_mouvementcaisse")
             cursor.execute(
                 """
                 ALTER TABLE `stock_detailmouvementcaisse`
-                ADD COLUMN `mouvement_id` bigint NOT NULL,
                 ADD CONSTRAINT `stock_detailmouvemen_mouvement_id_bad96ba0_fk_stock_mou`
                 FOREIGN KEY (`mouvement_id`) REFERENCES `stock_mouvementcaisse`(`id`)
                 """
@@ -227,19 +295,25 @@ def apply_0008_idempotent(apps, schema_editor) -> None:
         tc = _mysql_cols(cursor, 'stock_typecaisse')
         if 'entreprise_id' not in tc:
             cursor.execute('DELETE FROM `stock_typecaisse`')
+            _mysql_ensure_innodb(cursor, "stock_typecaisse")
+            _mysql_ensure_innodb(cursor, "stock_entreprise")
+            eid_type = _mysql_column_type(cursor, 'stock_entreprise', 'id')
             cursor.execute(
-                """
+                f"""
                 ALTER TABLE `stock_typecaisse`
-                ADD COLUMN `entreprise_id` bigint NOT NULL,
+                ADD COLUMN `entreprise_id` {eid_type} NOT NULL,
                 ADD CONSTRAINT `stock_typecaisse_entreprise_id_2d650062_fk_stock_entreprise_id`
                 FOREIGN KEY (`entreprise_id`) REFERENCES `stock_entreprise`(`id`)
                 """
             )
         if 'succursale_id' not in tc:
+            _mysql_ensure_innodb(cursor, "stock_typecaisse")
+            _mysql_ensure_innodb(cursor, "stock_succursale")
+            sid_type = _mysql_column_type(cursor, 'stock_succursale', 'id')
             cursor.execute(
-                """
+                f"""
                 ALTER TABLE `stock_typecaisse`
-                ADD COLUMN `succursale_id` bigint NULL,
+                ADD COLUMN `succursale_id` {sid_type} NULL,
                 ADD CONSTRAINT `stock_typecaisse_succursale_id_8ddbed50_fk_stock_succursale_id`
                 FOREIGN KEY (`succursale_id`) REFERENCES `stock_succursale`(`id`)
                 """
@@ -260,10 +334,13 @@ def apply_0008_idempotent(apps, schema_editor) -> None:
         # --- 15 : Detail type_caisse ---
         dcols = _mysql_cols(cursor, 'stock_detailmouvementcaisse')
         if 'type_caisse_id' not in dcols:
+            _mysql_ensure_innodb(cursor, "stock_detailmouvementcaisse")
+            _mysql_ensure_innodb(cursor, "stock_typecaisse")
+            tcid_type = _mysql_column_type(cursor, 'stock_typecaisse', 'id')
             cursor.execute(
-                """
+                f"""
                 ALTER TABLE `stock_detailmouvementcaisse`
-                ADD COLUMN `type_caisse_id` bigint NULL,
+                ADD COLUMN `type_caisse_id` {tcid_type} NULL,
                 ADD CONSTRAINT `stock_detailmouvemen_type_caisse_id_9c09512f_fk_stock_typ`
                 FOREIGN KEY (`type_caisse_id`) REFERENCES `stock_typecaisse`(`id`)
                 """
