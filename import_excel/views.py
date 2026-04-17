@@ -124,6 +124,36 @@ def _parse_number_excel(cell):
     return None
 
 
+def _parse_decimal_money_excel(cell):
+    """
+    Parse une cellule Excel en Decimal monétaire (2 décimales max).
+    Évite les artefacts float (ex. 2500.0000000003) qui font échouer la validation DRF
+    sur DecimalField(decimal_places=2).
+    """
+    from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
+    if cell is None:
+        return None
+    if isinstance(cell, str):
+        s = cell.strip()
+        if not s:
+            return None
+        s = s.replace(',', '.')
+        try:
+            return Decimal(s).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        except (InvalidOperation, ValueError):
+            return None
+    if isinstance(cell, int):
+        return Decimal(cell).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if isinstance(cell, float):
+        # Conversion via string pour limiter les artefacts binaires.
+        try:
+            return Decimal(str(cell)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        except (InvalidOperation, ValueError):
+            return None
+    return None
+
+
 def _coalesce_id(first, second, third):
     for x in (first, second, third):
         if x is not None:
@@ -452,8 +482,8 @@ def import_approvisionnement(request):
         targets.add((eff_ent, eff_succ))
 
         quantite = _parse_number_excel(quantite_raw)
-        prix_unitaire = _parse_number_excel(prix_unitaire_raw)
-        prix_vente = _parse_number_excel(prix_vente_raw)
+        prix_unitaire = _parse_decimal_money_excel(prix_unitaire_raw)
+        prix_vente = _parse_decimal_money_excel(prix_vente_raw)
         seuil_alerte = _parse_number_excel(seuil_alerte_raw)
 
         if prix_vente is None:
@@ -512,8 +542,8 @@ def import_approvisionnement(request):
         ligne = {
             'article_id': article_id,
             'quantite': int(quantite) if quantite is not None else None,
-            'prix_unitaire': float(prix_unitaire) if prix_unitaire is not None else 0.0,
-            'prix_vente': float(prix_vente),
+            'prix_unitaire': prix_unitaire if prix_unitaire is not None else Decimal('0.00'),
+            'prix_vente': prix_vente,
             'seuil_alerte': int(seuil_alerte) if seuil_alerte is not None else 0,
             'date_expiration': date_str if date_str else None,
             'devise_id': devise_id_val,
