@@ -7,6 +7,7 @@ from io import BytesIO
 from datetime import datetime
 from decimal import Decimal
 from django.utils.translation import gettext as _
+from django.utils import timezone
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -184,6 +185,57 @@ class PDFGenerator:
         elements.append(Spacer(1, space_after_block))
         
         return elements
+
+    def _append_generation_meta(self, elements, data):
+        """
+        Ajoute les métadonnées d'impression/génération si présentes:
+        - Date impression
+        - Imprimé par
+        """
+        meta = (data or {}).get('meta_generation') or {}
+        printed_at = (meta.get('printed_at') or '').strip()
+        printed_by = (meta.get('printed_by') or '').strip()
+        if not printed_at:
+            printed_at = timezone.now().strftime('%d/%m/%Y %H:%M')
+        if printed_by:
+            elements.append(Paragraph(f"{_('Imprimé par')}: {printed_by}", self.styles['TexteNormal']))
+        elements.append(Paragraph(f"{_('Date impression')}: {printed_at}", self.styles['TexteNormal']))
+        elements.append(Spacer(1, 8))
+
+    @staticmethod
+    def _get_generation_meta(data):
+        meta = (data or {}).get('meta_generation') or {}
+        printed_at = (meta.get('printed_at') or '').strip() or timezone.now().strftime('%d/%m/%Y %H:%M')
+        printed_by = (meta.get('printed_by') or '').strip()
+        return printed_at, printed_by
+
+    def _draw_footer(self, canv, doc, data):
+        """
+        Pied de page commun :
+        - Imprimé par (si disponible)
+        - Date impression
+        - Pagination (Page X)
+        """
+        printed_at, printed_by = self._get_generation_meta(data)
+        y = 10 * mm
+
+        canv.saveState()
+        canv.setFont('Helvetica', 8)
+        canv.setFillColor(colors.HexColor('#555555'))
+
+        left_text = f"{_('Date impression')}: {printed_at}"
+        if printed_by:
+            left_text = f"{left_text}  |  {_('Imprimé par')}: {printed_by}"
+        canv.drawString(doc.leftMargin, y, left_text)
+
+        page_text = f"{_('Page')} {canv.getPageNumber()}"
+        canv.drawRightString(doc.pagesize[0] - doc.rightMargin, y, page_text)
+        canv.restoreState()
+
+    def _build_with_footer(self, doc, elements, data):
+        def _on_page(canv, _doc):
+            self._draw_footer(canv, _doc, data)
+        doc.build(elements, onFirstPage=_on_page, onLaterPages=_on_page)
     
     # Libellés des statistiques (clé → msgid français pour traduction)
     _STATS_LABELS = {
@@ -379,7 +431,7 @@ class PDFGenerator:
         elements.append(table)
         
         # Construire le PDF
-        doc.build(elements)
+        self._build_with_footer(doc, elements, data)
         buffer.seek(0)
         return buffer
     
@@ -497,7 +549,7 @@ class PDFGenerator:
         elements.append(table)
         
         # Construire le PDF
-        doc.build(elements)
+        self._build_with_footer(doc, elements, data)
         buffer.seek(0)
         return buffer
     
@@ -529,8 +581,50 @@ class PDFGenerator:
         
         # Intervalle en haut (période)
         if 'periode' in data:
-            periode_text = _("<b>Intervalle :</b> du %(debut)s au %(fin)s") % {'debut': data['periode']['date_debut'], 'fin': data['periode']['date_fin']}
-            elements.append(Paragraph(periode_text, self.styles['TexteNormal']))
+            p = data.get('periode') or {}
+            d0 = p.get('date_debut')
+            d1 = p.get('date_fin')
+            if d0 and d1:
+                periode_text = _("<b>Intervalle :</b> du %(debut)s au %(fin)s") % {'debut': d0, 'fin': d1}
+                elements.append(Paragraph(periode_text, self.styles['TexteNormal']))
+                elements.append(Spacer(1, 8))
+
+        # Détail complet d'une entrée (si filtre entree_id utilisé)
+        entree_details = data.get('entree_details') or {}
+        if entree_details:
+            elements.append(Paragraph(_("<b>Détails de l'entrée sélectionnée</b>"), self.styles['SousTitre']))
+            details_rows = []
+            details_rows.append([_("N° Entrée"), str(entree_details.get('id') or '')])
+            if entree_details.get('date_op'):
+                details_rows.append([_("Date opération"), str(entree_details.get('date_op'))])
+            if entree_details.get('libele'):
+                details_rows.append([_("Libellé"), str(entree_details.get('libele'))])
+            if entree_details.get('description'):
+                details_rows.append([_("Description"), str(entree_details.get('description'))])
+            if entree_details.get('entreprise'):
+                details_rows.append([_("Entreprise"), str(entree_details.get('entreprise'))])
+            if entree_details.get('succursale'):
+                details_rows.append([_("Succursale"), str(entree_details.get('succursale'))])
+
+            details_table = Table(
+                details_rows,
+                colWidths=[self.usable_width * 0.28, self.usable_width * 0.72],
+            )
+            details_table.setStyle(TableStyle([
+                ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+                ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ('ALIGN', (1, 0), (1, -1), 'LEFT'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                ('GRID', (0, 0), (-1, -1), 0.3, colors.HexColor('#d0d0d0')),
+                ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#f5f7fa')),
+            ]))
+            elements.append(details_table)
             elements.append(Spacer(1, 8))
         
         # Zone commentaire (à remplir)
@@ -623,7 +717,7 @@ class PDFGenerator:
         table.setStyle(TableStyle(table_style))
         elements.append(table)
         
-        doc.build(elements)
+        self._build_with_footer(doc, elements, data)
         buffer.seek(0)
         return buffer
 
@@ -748,7 +842,7 @@ class PDFGenerator:
         )
         table.setStyle(TableStyle(table_style))
         elements.append(table)
-        doc.build(elements)
+        self._build_with_footer(doc, elements, data)
         buffer.seek(0)
         return buffer
 
@@ -895,7 +989,7 @@ class PDFGenerator:
                 elements.append(client_table)
             elements.append(Spacer(1, 12))
 
-        doc.build(elements)
+        self._build_with_footer(doc, elements, data)
         buffer.seek(0)
         return buffer
 
@@ -1029,6 +1123,6 @@ class PDFGenerator:
             stats_text = f"<b>{_('Nombre de clients avec dettes')}:</b> {nombre_clients}"
             elements.append(Paragraph(stats_text, self.styles['TexteNormal']))
 
-        doc.build(elements)
+        self._build_with_footer(doc, elements, data)
         buffer.seek(0)
         return buffer

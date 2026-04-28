@@ -117,6 +117,13 @@ class RapportsViewSet(viewsets.ViewSet):
     """
     permission_classes = [IsAdminOrUser]
 
+    @staticmethod
+    def _build_meta_generation(user):
+        return {
+            'printed_at': timezone.now().strftime('%d/%m/%Y %H:%M'),
+            'printed_by': (user.get_full_name() or user.username) if user else '',
+        }
+
     def _get_entete_entreprise(self, entreprise, user):
         """Génère l'en-tête simplifié : nom, logo, slogan, téléphone uniquement."""
         return get_entete_entreprise(entreprise)
@@ -365,6 +372,7 @@ class RapportsViewSet(viewsets.ViewSet):
         GET /api/rapports/inventaire/pdf/?filtrer_mouvements=false
         """
         data = self._serialize_inventaire(request, force_complet=True)
+        data['meta_generation'] = self._build_meta_generation(request.user)
 
         pdf_generator = PDFGenerator()
         pdf_buffer = pdf_generator.generate_inventaire_pdf(data)
@@ -497,7 +505,8 @@ class RapportsViewSet(viewsets.ViewSet):
             'titre': _("RAPPORT DE RÉQUISITION"),
             'instructions': _('Remplir manuellement les colonnes "Quantité" et "Prix Total" lors de l\'approvisionnement. Les montants sont en devise principale mentionnée dans l\'en-tête.'),
             'statistiques': statistiques,
-            'articles': serializer.data
+            'articles': serializer.data,
+            'meta_generation': self._build_meta_generation(user),
         }
 
         # Générer le PDF (toutes les _() dans le générateur utilisent la langue active)
@@ -674,6 +683,7 @@ class RapportsViewSet(viewsets.ViewSet):
             return json_response
 
         data = json_response.data
+        data['meta_generation'] = self._build_meta_generation(request.user)
         pdf_generator = PDFGenerator()
         pdf_buffer = pdf_generator.generate_clients_dettes_pdf(data)
 
@@ -890,6 +900,7 @@ class RapportsViewSet(viewsets.ViewSet):
             return json_response
 
         data = json_response.data
+        data['meta_generation'] = self._build_meta_generation(request.user)
         pdf_generator = PDFGenerator()
         pdf_buffer = pdf_generator.generate_clients_dettes_general_pdf(data)
 
@@ -898,7 +909,6 @@ class RapportsViewSet(viewsets.ViewSet):
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         return response
     
-    @action(detail=False, methods=['get'], url_path='bon-achat')
     def _build_bon_achat_data(self, request, *, for_pdf=False):
         """
         Construit les données du bon d'achat.
@@ -912,41 +922,58 @@ class RapportsViewSet(viewsets.ViewSet):
         date_debut = request.query_params.get('date_debut')
         date_fin = request.query_params.get('date_fin')
         article_id = request.query_params.get('article_id')
+        entree_id = request.query_params.get('entree_id')
         
-        # Validation: date_debut est obligatoire
-        if not date_debut:
-            return Response({
-                'error': 'Le paramètre "date_debut" est obligatoire',
-                'exemple': '/api/rapports/bon-achat/?date_debut=2025-11-01'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Conversion des dates
-        try:
-            date_debut_obj = datetime.strptime(date_debut, '%Y-%m-%d').date()
-            if date_fin:
-                date_fin_obj = datetime.strptime(date_fin, '%Y-%m-%d').date()
-            else:
-                date_fin_obj = timezone.now().date()
-        except ValueError:
-            return Response({
-                'error': 'Format de date invalide. Utilisez le format YYYY-MM-DD',
-                'exemple': '2025-11-01'
-            }, status=status.HTTP_400_BAD_REQUEST)
+        # Mode 1: entree_id fourni -> filtre direct par entrée, sans dates obligatoires.
+        # Mode 2: pas de entree_id -> filtrage par période (date_debut requis).
+        if entree_id:
+            try:
+                entree_id_int = int(str(entree_id).strip())
+            except (TypeError, ValueError):
+                return Response(
+                    {
+                        'error': 'Le paramètre "entree_id" doit être un entier valide',
+                        'exemple': '/api/rapports/bon-achat/?entree_id=12'
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            date_debut_obj = None
+            date_fin_obj = None
+        else:
+            if not date_debut:
+                return Response({
+                    'error': 'Le paramètre "date_debut" est obligatoire (sauf si entree_id est fourni)',
+                    'exemple': '/api/rapports/bon-achat/?date_debut=2025-11-01'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                date_debut_obj = datetime.strptime(date_debut, '%Y-%m-%d').date()
+                if date_fin:
+                    date_fin_obj = datetime.strptime(date_fin, '%Y-%m-%d').date()
+                else:
+                    date_fin_obj = timezone.now().date()
+            except ValueError:
+                return Response({
+                    'error': 'Format de date invalide. Utilisez le format YYYY-MM-DD',
+                    'exemple': '2025-11-01'
+                }, status=status.HTTP_400_BAD_REQUEST)
         
         eid, branch_id = self._get_tenant_ids_strict(request)
         base_entree_filter = {'entree__entreprise_id': eid} if eid else {}
         if user.is_agent(request) and branch_id is not None:
             base_entree_filter['entree__succursale_id'] = branch_id
-        lignes_entree = LigneEntree.objects.filter(
-            date_entree__date__gte=date_debut_obj,
-            date_entree__date__lte=date_fin_obj,
-            **base_entree_filter
-        ).select_related(
+        lignes_entree = LigneEntree.objects.filter(**base_entree_filter).select_related(
             'article',
             'article__unite',
             'entree',
             'devise'
         ).order_by('-date_entree', '-id')
+        if entree_id:
+            lignes_entree = lignes_entree.filter(entree_id=entree_id_int)
+        else:
+            lignes_entree = lignes_entree.filter(
+                date_entree__date__gte=date_debut_obj,
+                date_entree__date__lte=date_fin_obj,
+            )
         
         # Filtrage par article si spécifié
         if article_id:
@@ -996,20 +1023,36 @@ class RapportsViewSet(viewsets.ViewSet):
         
         # Générer l'en-tête complet
         entete = self._get_entete_entreprise(entreprise, user)
+
+        entree_details = None
+        if entree_id:
+            entree_obj = lignes_entree.select_related('entree', 'entree__succursale', 'entree__entreprise').first()
+            if entree_obj and getattr(entree_obj, 'entree', None):
+                e = entree_obj.entree
+                entree_details = {
+                    'id': e.id,
+                    'libele': e.libele,
+                    'description': getattr(e, 'description', '') or '',
+                    'date_op': e.date_op.strftime('%Y-%m-%d %H:%M') if getattr(e, 'date_op', None) else None,
+                    'entreprise': getattr(getattr(e, 'entreprise', None), 'nom', '') or '',
+                    'succursale': getattr(getattr(e, 'succursale', None), 'nom', '') or '',
+                }
         
         resp = {
             'entete': entete,
             'titre': _("BON D'ACHAT - APPROVISIONNEMENTS EFFECTUÉS"),
             'periode': {
                 'date_debut': date_debut,
-                'date_fin': date_fin or timezone.now().date().strftime('%Y-%m-%d')
+                'date_fin': (date_fin or timezone.now().date().strftime('%Y-%m-%d')) if not entree_id else None
             },
             'statistiques': {
                 'total_lignes': total_lignes,
                 'nombre_entrees': nombre_entrees
             },
+            'entree_details': entree_details,
             'recapitulatif': recapitulatif,
-            'achats': serializer.data
+            'achats': serializer.data,
+            'meta_generation': self._build_meta_generation(user),
         }
         if not for_pdf and pagination_meta is not None:
             resp['count'] = pagination_meta['count']
@@ -1026,13 +1069,16 @@ class RapportsViewSet(viewsets.ViewSet):
         Liste tous les approvisionnements (entrées) à partir d'une date donnée.
         
         Paramètres:
-        - date_debut: Date de début (obligatoire, format: YYYY-MM-DD)
+        - entree_id: Filtrer par N° d'entrée spécifique (optionnel, prioritaire)
+        - date_debut: Date de début (obligatoire si entree_id absent, format: YYYY-MM-DD)
         - date_fin: Date de fin (optionnel, format: YYYY-MM-DD)
         - article_id: Filtrer par article spécifique (optionnel)
         
+        GET /api/rapports/bon-achat/?entree_id=12
         GET /api/rapports/bon-achat/?date_debut=2025-11-01
         GET /api/rapports/bon-achat/?date_debut=2025-11-01&date_fin=2025-11-30
         GET /api/rapports/bon-achat/?date_debut=2025-11-01&article_id=CAPE0001
+        GET /api/rapports/bon-achat/?entree_id=12&article_id=CAPE0001
         """
         data = self._build_bon_achat_data(request, for_pdf=False)
         if isinstance(data, Response):
@@ -1045,10 +1091,12 @@ class RapportsViewSet(viewsets.ViewSet):
         Export PDF du bon d'achat.
         Format A4, prêt pour l'impression avec support multi-devises.
         
-        Paramètres: mêmes que l'action bon_achat (date_debut obligatoire)
+        Paramètres: mêmes que l'action bon_achat (entree_id possible sans dates)
         
+        GET /api/rapports/bon-achat/pdf/?entree_id=12
         GET /api/rapports/bon-achat/pdf/?date_debut=2025-11-01
         GET /api/rapports/bon-achat/pdf/?date_debut=2025-11-01&date_fin=2025-11-30
+        GET /api/rapports/bon-achat/pdf/?entree_id=12&article_id=CAPE0001
         """
         # Données complètes (sans pagination) pour le PDF
         data = self._build_bon_achat_data(request, for_pdf=True)
@@ -1223,6 +1271,7 @@ class RapportsViewSet(viewsets.ViewSet):
             'lignes_ventes': lignes_ventes,
             'total_quantite': tot_qte,
             'total_montant_vente': str(tot_m_vente),
+            'meta_generation': self._build_meta_generation(user),
         }
         if pagination_meta is not None:
             out['pagination'] = pagination_meta
