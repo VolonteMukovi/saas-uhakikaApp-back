@@ -103,8 +103,24 @@ class PDFGenerator:
             fontSize=9,
             spaceAfter=6
         ))
+
+    @staticmethod
+    def _format_quantity(value, max_decimals=3):
+        """Affiche une quantité sans zéros inutiles (41.00 -> 41, 41.50 -> 41.5)."""
+        if value is None or value == '':
+            return ''
+        try:
+            d = Decimal(str(value))
+            quantum = Decimal('1').scaleb(-max_decimals)
+            d = d.quantize(quantum)
+            s = f"{d:f}"
+            if '.' in s:
+                s = s.rstrip('0').rstrip('.')
+            return s
+        except Exception:
+            return str(value)
     
-    def _create_entete(self, entete_data, compact=False, centered=True):
+    def _create_entete(self, entete_data, compact=False, centered=True, logo_size_mm=None):
         """Créer l'en-tête simplifié : logo (si présent), nom, slogan, téléphone uniquement.
         compact=True : espacements réduits (nom/tél serrés, peu d'espace avant le titre) pour facture POS.
         centered=True : bloc centré sur la largeur utile (rapports A4). Les tickets POS passent compact=True
@@ -128,7 +144,18 @@ class PDFGenerator:
         logo_path = entreprise.get('logo_path')
         if logo_path:
             try:
-                img = Image(logo_path, width=40 * mm, height=40 * mm)
+                if logo_size_mm is None:
+                    logo_size_mm = 24 if compact else 30
+                max_w = logo_size_mm * mm
+                max_h = logo_size_mm * mm
+                img = Image(logo_path)
+                if getattr(img, 'imageWidth', None) and getattr(img, 'imageHeight', None):
+                    scale = min(max_w / img.imageWidth, max_h / img.imageHeight)
+                    img.drawWidth = img.imageWidth * scale
+                    img.drawHeight = img.imageHeight * scale
+                else:
+                    img.drawWidth = max_w
+                    img.drawHeight = max_h
                 img.hAlign = 'CENTER' if centered else 'LEFT'
                 elements.append(img)
                 elements.append(Spacer(1, 4))
@@ -215,7 +242,7 @@ class PDFGenerator:
         elements = []
         
         # En-tête
-        elements.extend(self._create_entete(data['entete']))
+        elements.extend(self._create_entete(data['entete'], logo_size_mm=30))
         
         # Titre du rapport
         elements.append(Paragraph(data['titre'], self.styles['TitrePrincipal']))
@@ -246,18 +273,18 @@ class PDFGenerator:
         ]]
         
         # Données : dans Nom on met le nom puis en dessous type et sous_type, texte aligné à gauche
-        total_prix_total = 0.0
+        total_prix_total = Decimal('0.00')
         for article in data['articles']:
             pu = article.get('prix_unitaire', 0)
             pt = article.get('prix_total', 0)
             try:
-                total_prix_total += float(pt) if pt is not None else 0.0
-            except (TypeError, ValueError):
+                total_prix_total += Decimal(str(pt)) if pt is not None else Decimal('0.00')
+            except (TypeError, ValueError, ArithmeticError):
                 pass
             if not isinstance(pu, str):
-                pu = f"{float(pu):.2f}" if pu is not None else "0.00"
+                pu = f"{Decimal(str(pu)).quantize(Decimal('0.01')):.2f}" if pu is not None else "0.00"
             if not isinstance(pt, str):
-                pt = f"{float(pt):.2f}" if pt is not None else "0.00"
+                pt = f"{Decimal(str(pt)).quantize(Decimal('0.01')):.2f}" if pt is not None else "0.00"
             nom_affichage = article['nom_scientifique']
             if article.get('nom_commercial'):
                 nom_affichage += f" ({article['nom_commercial']})"
@@ -267,15 +294,15 @@ class PDFGenerator:
                 article['article_id'],
                 Paragraph(nom_affichage, style_nom),
                 article['unite'],
-                str(article['quantite_stock']),
+                self._format_quantity(article['quantite_stock']),
                 pu,
                 pt,
-                str(article['seuil_alerte']),
+                self._format_quantity(article['seuil_alerte']),
                 article['statut']
             ])
 
         # Ligne de total général (Prix total = somme de tous les prix total)
-        total_pt_str = f"{total_prix_total:.2f}"
+        total_pt_str = f"{total_prix_total.quantize(Decimal('0.01')):.2f}"
         table_data.append([
             '',
             _('TOTAL GÉNÉRAL'),
@@ -371,7 +398,7 @@ class PDFGenerator:
         elements = []
         
         # En-tête
-        elements.extend(self._create_entete(data['entete']))
+        elements.extend(self._create_entete(data['entete'], logo_size_mm=26))
         
         # Titre
         elements.append(Paragraph(data['titre'], self.styles['TitrePrincipal']))
@@ -494,7 +521,7 @@ class PDFGenerator:
         elements = []
         
         # En-tête
-        elements.extend(self._create_entete(data['entete']))
+        elements.extend(self._create_entete(data['entete'], logo_size_mm=26))
         
         # Titre
         elements.append(Paragraph(data['titre'], self.styles['TitrePrincipal']))
@@ -530,16 +557,16 @@ class PDFGenerator:
             _('Total')
         ]]
         
-        total_general = 0.0
+        total_general = Decimal('0.00')
         for achat in data['achats']:
             try:
-                total_general += float(achat['prix_total'])
-            except (TypeError, ValueError):
+                total_general += Decimal(str(achat['prix_total']))
+            except (TypeError, ValueError, ArithmeticError):
                 pass
             table_data.append([
                 str(achat['numero_entree']),
-                achat['designation'][:45] + '...' if len(achat['designation']) > 45 else achat['designation'],
-                str(achat['quantite']),
+                achat['designation'],
+                self._format_quantity(achat['quantite']),
                 str(achat['prix_unitaire']),
                 str(achat['prix_total'])
             ])
@@ -550,7 +577,7 @@ class PDFGenerator:
             _('TOTAL GÉNÉRAL'),
             '',
             '',
-            f"{total_general:.2f}"
+            f"{total_general.quantize(Decimal('0.01')):.2f}"
         ])
         last_row_idx = len(table_data) - 1
         
@@ -615,7 +642,7 @@ class PDFGenerator:
             bottomMargin=self.margin,
         )
         elements = []
-        elements.extend(self._create_entete(data['entete']))
+        elements.extend(self._create_entete(data['entete'], logo_size_mm=24))
         elements.append(Paragraph(data['titre'], self.styles['TitrePrincipal']))
         elements.append(Spacer(1, 10))
         if 'periode' in data:
@@ -640,7 +667,7 @@ class PDFGenerator:
         for row in rows:
             art = row.get('article') or row.get('nom_scientifique') or '—'
             q = row.get('quantite')
-            q_s = str(q) if q is not None else '—'
+            q_s = self._format_quantity(q) if q is not None else '—'
             pua = row.get('pu_achat') or row.get('prix_achat_unitaire') or '—'
             puv = row.get('pu_vente') or row.get('prix_vente_unitaire') or '—'
             ref = str(row.get('reference', ''))[:48]
@@ -657,10 +684,10 @@ class PDFGenerator:
         tot_q = data.get('total_quantite')
         tot_mv = data.get('total_montant_vente')
         if tot_q is None or tot_mv is None:
-            tq = 0
+            tq = Decimal('0')
             tsum = Decimal('0.00')
             for r in rows:
-                q = int(r.get('quantite') or 0)
+                q = Decimal(str(r.get('quantite') or 0))
                 tq += q
                 puv = r.get('pu_vente') or r.get('prix_vente_unitaire') or '0'
                 tsum += (Decimal(q) * Decimal(str(puv))).quantize(Decimal('0.01'))
@@ -668,7 +695,7 @@ class PDFGenerator:
                 tot_q = tq
             if tot_mv is None:
                 tot_mv = str(tsum.quantize(Decimal('0.01')))
-        tot_q = tot_q if tot_q is not None else 0
+        tot_q = tot_q if tot_q is not None else Decimal('0')
         tot_mv = tot_mv if tot_mv is not None else '0.00'
 
         table_data.append(
@@ -676,7 +703,7 @@ class PDFGenerator:
                 Paragraph(f"<b>{_('TOTAL')}</b>", self.styles['Normal']),
                 '—',
                 str(tot_mv),
-                str(tot_q),
+                self._format_quantity(tot_q),
                 '—',
             ]
         )
@@ -751,7 +778,7 @@ class PDFGenerator:
 
         elements = []
         # En-tête
-        elements.extend(self._create_entete(data['entete']))
+        elements.extend(self._create_entete(data['entete'], logo_size_mm=22))
 
         # Titre
         elements.append(Paragraph(data.get('titre', _('Clients et Dettes')), self.styles['TitrePrincipal']))
@@ -909,7 +936,7 @@ class PDFGenerator:
 
         elements = []
         # En-tête
-        elements.extend(self._create_entete(data['entete']))
+        elements.extend(self._create_entete(data['entete'], logo_size_mm=22))
 
         # Titre
         elements.append(Paragraph(data.get('titre', _('Rapport général des dettes clients')), self.styles['TitrePrincipal']))

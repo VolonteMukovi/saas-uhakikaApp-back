@@ -94,6 +94,22 @@ def _dettes_rapport_is_special_filter(request):
     )
 
 
+def _format_report_quantity(value, max_decimals=3):
+    """Affiche une quantité sans zéros inutiles (41.00 -> 41)."""
+    if value is None or value == '':
+        return ''
+    try:
+        d = Decimal(str(value))
+        quantum = Decimal('1').scaleb(-max_decimals)
+        d = d.quantize(quantum)
+        s = f"{d:f}"
+        if '.' in s:
+            s = s.rstrip('0').rstrip('.')
+        return s
+    except Exception:
+        return str(value)
+
+
 class RapportsViewSet(viewsets.ViewSet):
     """
     ViewSet pour la génération des différents rapports.
@@ -883,20 +899,11 @@ class RapportsViewSet(viewsets.ViewSet):
         return response
     
     @action(detail=False, methods=['get'], url_path='bon-achat')
-    def bon_achat(self, request):
+    def _build_bon_achat_data(self, request, *, for_pdf=False):
         """
-        Bon d'achat - Liste des approvisionnements effectués.
-        
-        Liste tous les approvisionnements (entrées) à partir d'une date donnée.
-        
-        Paramètres:
-        - date_debut: Date de début (obligatoire, format: YYYY-MM-DD)
-        - date_fin: Date de fin (optionnel, format: YYYY-MM-DD)
-        - article_id: Filtrer par article spécifique (optionnel)
-        
-        GET /api/rapports/bon-achat/?date_debut=2025-11-01
-        GET /api/rapports/bon-achat/?date_debut=2025-11-01&date_fin=2025-11-30
-        GET /api/rapports/bon-achat/?date_debut=2025-11-01&article_id=CAPE0001
+        Construit les données du bon d'achat.
+        - for_pdf=False: pagination JSON active
+        - for_pdf=True: liste complète (sans pagination) pour export PDF
         """
         user = request.user
         entreprise = user.get_entreprise(request)
@@ -971,10 +978,21 @@ class RapportsViewSet(viewsets.ViewSet):
                 'total_montant': total['total_montant'] or Decimal('0.00')
             })
         
-        # Pagination
-        paginator = StandardResultsSetPagination()
-        page_lignes = paginator.paginate_queryset(lignes_entree, request)
-        serializer = BonAchatSerializer(page_lignes, many=True)
+        if for_pdf:
+            lignes_list = list(lignes_entree)
+            serializer = BonAchatSerializer(lignes_list, many=True)
+            pagination_meta = None
+        else:
+            # Pagination JSON uniquement
+            paginator = StandardResultsSetPagination()
+            page_lignes = paginator.paginate_queryset(lignes_entree, request)
+            serializer = BonAchatSerializer(page_lignes, many=True)
+            pagination_meta = {
+                'count': paginator.page.paginator.count if page_lignes is not None else len(serializer.data),
+                'next': paginator.get_next_link() if page_lignes is not None else None,
+                'previous': paginator.get_previous_link() if page_lignes is not None else None,
+                'page_size': paginator.get_page_size(request) if page_lignes is not None else None,
+            }
         
         # Générer l'en-tête complet
         entete = self._get_entete_entreprise(entreprise, user)
@@ -993,12 +1011,33 @@ class RapportsViewSet(viewsets.ViewSet):
             'recapitulatif': recapitulatif,
             'achats': serializer.data
         }
-        if page_lignes is not None:
-            resp['count'] = paginator.page.paginator.count
-            resp['next'] = paginator.get_next_link()
-            resp['previous'] = paginator.get_previous_link()
-            resp['page_size'] = paginator.get_page_size(request)
-        return Response(resp)
+        if not for_pdf and pagination_meta is not None:
+            resp['count'] = pagination_meta['count']
+            resp['next'] = pagination_meta['next']
+            resp['previous'] = pagination_meta['previous']
+            resp['page_size'] = pagination_meta['page_size']
+        return resp
+
+    @action(detail=False, methods=['get'], url_path='bon-achat')
+    def bon_achat(self, request):
+        """
+        Bon d'achat - Liste des approvisionnements effectués.
+        
+        Liste tous les approvisionnements (entrées) à partir d'une date donnée.
+        
+        Paramètres:
+        - date_debut: Date de début (obligatoire, format: YYYY-MM-DD)
+        - date_fin: Date de fin (optionnel, format: YYYY-MM-DD)
+        - article_id: Filtrer par article spécifique (optionnel)
+        
+        GET /api/rapports/bon-achat/?date_debut=2025-11-01
+        GET /api/rapports/bon-achat/?date_debut=2025-11-01&date_fin=2025-11-30
+        GET /api/rapports/bon-achat/?date_debut=2025-11-01&article_id=CAPE0001
+        """
+        data = self._build_bon_achat_data(request, for_pdf=False)
+        if isinstance(data, Response):
+            return data
+        return Response(data)
     
     @action(detail=False, methods=['get'], url_path='bon-achat/pdf')
     def bon_achat_pdf(self, request):
@@ -1011,13 +1050,10 @@ class RapportsViewSet(viewsets.ViewSet):
         GET /api/rapports/bon-achat/pdf/?date_debut=2025-11-01
         GET /api/rapports/bon-achat/pdf/?date_debut=2025-11-01&date_fin=2025-11-30
         """
-        # Récupérer les données JSON
-        json_response = self.bon_achat(request)
-        
-        if json_response.status_code != 200:
-            return json_response
-        
-        data = json_response.data
+        # Données complètes (sans pagination) pour le PDF
+        data = self._build_bon_achat_data(request, for_pdf=True)
+        if isinstance(data, Response):
+            return data
         
         # Générer le PDF
         pdf_generator = PDFGenerator()
@@ -1330,7 +1366,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 'datetime': e['date_entree'],
                 'designation': e['entree__libele'] or _("Entrée"),
                 'q_in': e['quantite'],
-                'pu_in': float(e['prix_unitaire']),
+                'pu_in': e['prix_unitaire'] or Decimal('0'),
                 'q_out': 0
             })
         for s in sorties:
@@ -1338,7 +1374,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 'datetime': s['date_sortie'],
                 'designation': s.get('sortie__motif') or _("Sortie"),
                 'q_in': 0,
-                'pu_in': 0.0,
+                'pu_in': Decimal('0'),
                 'q_out': s['quantite']
             })
         
@@ -1368,7 +1404,7 @@ class RapportsViewSet(viewsets.ViewSet):
         # Calcul FIFO
         fifo_layers = []
         stock_qty = 0
-        stock_val = 0.0
+        stock_val = Decimal('0')
 
         for mv in mouvements:
             date_str = mv['datetime'].strftime('%d/%m/%Y %H:%M') if mv['datetime'] else ""
@@ -1377,7 +1413,7 @@ class RapportsViewSet(viewsets.ViewSet):
             pu_in = mv['pu_in']
             pt_in = q_in * pu_in
             q_out = mv['q_out']
-            pt_out = 0.0
+            pt_out = Decimal('0')
 
             if q_in:
                 # Entrée
@@ -1399,19 +1435,19 @@ class RapportsViewSet(viewsets.ViewSet):
                 stock_val -= pt_out
 
             # PU sortie = coût moyen sorti (PT / Qté)
-            pu_out = (pt_out / q_out) if q_out else 0.0
+            pu_out = (pt_out / q_out) if q_out else Decimal('0')
 
             # Construction de la ligne (sans devise dans le corps)
             row = [
                 Paragraph(date_str, normal),
                 desig,
-                Paragraph(str(q_in) if q_in else "", normal),
+                Paragraph(_format_report_quantity(q_in) if q_in else "", normal),
                 Paragraph(f"{pu_in:.2f}" if q_in else "", normal),
                 Paragraph(f"{pt_in:.2f}" if q_in else "", normal),
-                Paragraph(str(q_out) if q_out else "", normal),
+                Paragraph(_format_report_quantity(q_out) if q_out else "", normal),
                 Paragraph(f"{pu_out:.2f}" if q_out else "", normal),
                 Paragraph(f"{pt_out:.2f}" if q_out else "", normal),
-                Paragraph(str(stock_qty), normal),
+                Paragraph(_format_report_quantity(stock_qty), normal),
                 Paragraph(f"{(stock_val/stock_qty):.2f}" if stock_qty else "", normal),
                 Paragraph(f"{stock_val:.2f}", normal)
             ]
@@ -1422,7 +1458,7 @@ class RapportsViewSet(viewsets.ViewSet):
             "", Paragraph(f"<b>{_('SOLDE FINAL')}</b>", normal),
             "", "", "",
             "", "", "",
-            Paragraph(f"<b>{stock_qty}</b>", normal),
+            Paragraph(f"<b>{_format_report_quantity(stock_qty)}</b>", normal),
             Paragraph("", normal),
             Paragraph(f"<b>{stock_val:.2f}</b>", normal)
         ]
