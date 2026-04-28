@@ -38,17 +38,11 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
-from django.contrib.contenttypes.models import ContentType
-
-from stock.db_compat import (
-    build_mouvementcaisse_queryset,
-    mouvementcaisse_column_names,
-    mouvementcaisse_has_content_type_id,
-)
 from stock.models import (
     Stock,
     LigneEntree,
     LigneSortie,
+    Sortie,
     Article,
     Entree,
     Entreprise,
@@ -230,8 +224,16 @@ class RapportsViewSet(viewsets.ViewSet):
         qs = (
             Article.objects.filter(entreprise_id=eid)
             .annotate(
-                inv_qte=Coalesce(Subquery(stock_sq.values('Qte')[:1]), Value(0)),
-                inv_seuil=Coalesce(Subquery(stock_sq.values('seuilAlert')[:1]), Value(0)),
+                inv_qte=Coalesce(
+                    Subquery(stock_sq.values('Qte')[:1]),
+                    Value(Decimal('0.000')),
+                    output_field=DecimalField(max_digits=12, decimal_places=3),
+                ),
+                inv_seuil=Coalesce(
+                    Subquery(stock_sq.values('seuilAlert')[:1]),
+                    Value(Decimal('0.000')),
+                    output_field=DecimalField(max_digits=12, decimal_places=3),
+                ),
             )
             .select_related(
                 'sous_type_article',
@@ -1117,29 +1119,58 @@ class RapportsViewSet(viewsets.ViewSet):
         return response
 
     def _parse_ventes_dates(self, request):
-        """Période stricte obligatoire : date_debut et date_fin (YYYY-MM-DD)."""
-        ds = request.query_params.get('date_debut')
-        df = request.query_params.get('date_fin')
+        """
+        Période des ventes avec priorités:
+        1) date_jour (prioritaire)
+        2) mois + annee
+        3) date_debut + date_fin
+        """
+        date_jour = (request.query_params.get('date_jour') or '').strip()
+        mois = (request.query_params.get('mois') or '').strip()
+        annee = (request.query_params.get('annee') or '').strip()
+        ds = (request.query_params.get('date_debut') or '').strip()
+        df = (request.query_params.get('date_fin') or '').strip()
+
+        if date_jour:
+            try:
+                d = date.fromisoformat(date_jour[:10])
+            except ValueError:
+                raise ValidationError({'detail': _('Format date_jour invalide (YYYY-MM-DD).')})
+            return d, d
+
+        if mois or annee:
+            if not (mois and annee):
+                raise ValidationError({'detail': _('Les paramètres mois et annee doivent être fournis ensemble.')})
+            try:
+                m = int(mois)
+                y = int(annee)
+            except ValueError:
+                raise ValidationError({'detail': _('mois et annee doivent être numériques.')})
+            if m < 1 or m > 12:
+                raise ValidationError({'detail': _('mois doit être compris entre 1 et 12.')})
+            if y < 1900 or y > 2100:
+                raise ValidationError({'detail': _('annee invalide.')})
+            from calendar import monthrange
+            d0 = date(y, m, 1)
+            d1 = date(y, m, monthrange(y, m)[1])
+            return d0, d1
+
         if not ds or not df:
             raise ValidationError(
                 {
                     'detail': _(
-                        'Les paramètres date_debut et date_fin (format YYYY-MM-DD) sont obligatoires '
-                        'pour le rapport des ventes.'
+                        'Fournissez soit date_jour, soit mois+annee, soit date_debut et date_fin '
+                        '(format YYYY-MM-DD) pour le rapport des ventes.'
                     )
                 }
             )
         try:
-            d0 = date.fromisoformat(str(ds).strip()[:10])
-            d1 = date.fromisoformat(str(df).strip()[:10])
+            d0 = date.fromisoformat(ds[:10])
+            d1 = date.fromisoformat(df[:10])
         except ValueError:
-            raise ValidationError(
-                {'detail': _('Formats date_debut / date_fin invalides (YYYY-MM-DD).')}
-            )
+            raise ValidationError({'detail': _('Formats date_debut / date_fin invalides (YYYY-MM-DD).')})
         if d0 > d1:
-            raise ValidationError(
-                {'detail': _('date_debut doit être antérieure ou égale à date_fin.')}
-            )
+            raise ValidationError({'detail': _('date_debut doit être antérieure ou égale à date_fin.')})
         return d0, d1
 
     def _build_ventes_report(self, request, *, for_pdf=False):
@@ -1152,9 +1183,32 @@ class RapportsViewSet(viewsets.ViewSet):
         user = request.user
         entreprise = user.get_entreprise(request)
         d0, d1 = self._parse_ventes_dates(request)
+        client_id = (request.query_params.get('client_id') or '').strip()
+        client_nom = (request.query_params.get('client_nom') or '').strip()
+        reference = (request.query_params.get('reference') or '').strip()
+        statut_paiement = (request.query_params.get('statut_paiement') or '').strip().upper()
+        montant_min_raw = (request.query_params.get('montant_min') or '').strip()
+        montant_max_raw = (request.query_params.get('montant_max') or '').strip()
         eid, branch_id = self._get_tenant_ids_strict(request)
         if not eid:
             raise ValidationError({'detail': _('Contexte entreprise manquant.')})
+
+        montant_min = None
+        montant_max = None
+        if montant_min_raw:
+            try:
+                montant_min = Decimal(montant_min_raw.replace(',', '.'))
+            except Exception:
+                raise ValidationError({'detail': _('montant_min invalide.')})
+        if montant_max_raw:
+            try:
+                montant_max = Decimal(montant_max_raw.replace(',', '.'))
+            except Exception:
+                raise ValidationError({'detail': _('montant_max invalide.')})
+        if montant_min is not None and montant_max is not None and montant_min > montant_max:
+            raise ValidationError({'detail': _('montant_min doit être inférieur ou égal à montant_max.')})
+        if statut_paiement and statut_paiement not in ('COMPTANT', 'CREDIT'):
+            raise ValidationError({'detail': _('statut_paiement doit être COMPTANT ou CREDIT.')})
 
         base_sortie = {'sortie__entreprise_id': eid}
         if user.is_agent(request) and branch_id is not None:
@@ -1171,6 +1225,62 @@ class RapportsViewSet(viewsets.ViewSet):
             .order_by('sortie__date_creation', 'sortie_id', 'id')
         )
 
+        if client_id:
+            lignes_qs = lignes_qs.filter(sortie__client_id=client_id)
+        if client_nom:
+            lignes_qs = lignes_qs.filter(sortie__client__nom__icontains=client_nom)
+        if reference:
+            ref_q = Q(sortie__motif__icontains=reference)
+            if reference.isdigit():
+                ref_q = ref_q | Q(sortie_id=int(reference))
+            ref_up = reference.upper()
+            if ref_up.startswith('FACT-'):
+                fact_part = ref_up.replace('FACT-', '').strip()
+                if fact_part.isdigit():
+                    ref_q = ref_q | Q(sortie_id=int(fact_part))
+            lignes_qs = lignes_qs.filter(ref_q)
+        if montant_min is not None or montant_max is not None:
+            line_total = ExpressionWrapper(
+                F('quantite') * F('prix_unitaire'),
+                output_field=DecimalField(max_digits=20, decimal_places=2),
+            )
+            if montant_min is not None:
+                lignes_qs = lignes_qs.annotate(_line_total=line_total).filter(_line_total__gte=montant_min)
+            if montant_max is not None:
+                lignes_qs = lignes_qs.annotate(_line_total=line_total).filter(_line_total__lte=montant_max)
+
+        if statut_paiement:
+            dettes_non_soldees = DetteClient.objects.filter(
+                sortie_id=OuterRef('sortie_id'),
+                statut__in=['EN_COURS', 'RETARD'],
+            )
+            lignes_qs = lignes_qs.annotate(_has_credit=Exists(dettes_non_soldees))
+            if statut_paiement == 'CREDIT':
+                lignes_qs = lignes_qs.filter(Q(sortie__statut='EN_CREDIT') | Q(_has_credit=True))
+            else:  # COMPTANT
+                lignes_qs = lignes_qs.filter(sortie__statut='PAYEE', _has_credit=False)
+
+        sortie_scope = Sortie.objects.filter(
+            entreprise_id=eid,
+            date_creation__date__gte=d0,
+            date_creation__date__lte=d1,
+        )
+        if user.is_agent(request) and branch_id is not None:
+            sortie_scope = sortie_scope.filter(succursale_id=branch_id)
+        if client_id:
+            sortie_scope = sortie_scope.filter(client_id=client_id)
+        if client_nom:
+            sortie_scope = sortie_scope.filter(client__nom__icontains=client_nom)
+        if reference:
+            ref_q_scope = Q(motif__icontains=reference)
+            if reference.isdigit():
+                ref_q_scope = ref_q_scope | Q(id=int(reference))
+            sortie_scope = sortie_scope.filter(ref_q_scope)
+        if statut_paiement == 'CREDIT':
+            sortie_scope = sortie_scope.filter(statut='EN_CREDIT')
+        elif statut_paiement == 'COMPTANT':
+            sortie_scope = sortie_scope.filter(statut='PAYEE')
+
         # Totaux sur la période complète (requêtes agrégées, sans charger toutes les lignes)
         agg = lignes_qs.aggregate(
             total_qte=Sum('quantite'),
@@ -1181,8 +1291,29 @@ class RapportsViewSet(viewsets.ViewSet):
                 )
             ),
         )
-        tot_qte = int(agg['total_qte'] or 0)
+        tot_qte = Decimal(str(agg['total_qte'] or 0))
         tot_m_vente = (agg['total_montant'] or Decimal('0')).quantize(Decimal('0.01'))
+        total_benefice = Decimal('0.00')
+        for ls in lignes_qs:
+            if ls.lots_utilises.exists():
+                benef_ligne = sum(
+                    (Decimal(str(lu.quantite)) * (Decimal(str(lu.prix_vente)) - Decimal(str(lu.prix_achat))))
+                    for lu in ls.lots_utilises.all()
+                )
+            else:
+                pu_achat_ls = ls.get_cout_achat_unitaire()
+                if not isinstance(pu_achat_ls, Decimal):
+                    pu_achat_ls = Decimal(str(pu_achat_ls))
+                pu_vente_ls = ls.prix_unitaire
+                if not isinstance(pu_vente_ls, Decimal):
+                    pu_vente_ls = Decimal(str(pu_vente_ls))
+                benef_ligne = Decimal(str(ls.quantite)) * (pu_vente_ls - pu_achat_ls)
+            total_benefice += benef_ligne
+        total_benefice = total_benefice.quantize(Decimal('0.01'))
+        total_sorties = sortie_scope.count()
+        total_clients = sortie_scope.exclude(client_id__isnull=True).values('client_id').distinct().count()
+        sorties_credit = sortie_scope.filter(statut='EN_CREDIT').count()
+        sorties_comptant = sortie_scope.filter(statut='PAYEE').count()
 
         pagination_meta = None
         if for_pdf:
@@ -1223,21 +1354,6 @@ class RapportsViewSet(viewsets.ViewSet):
 
         # Une fois le queryset slicé (pagination), Django interdit .distinct() dessus : on matérialise la page.
         page_lines = list(page_slice_qs)
-        sortie_ids = list(dict.fromkeys(l.sortie_id for l in page_lines))
-        ref_ventes = {}
-        mc_cols = mouvementcaisse_column_names()
-        mc_qs = build_mouvementcaisse_queryset(mc_cols)
-        ct_dette_ref = ContentType.objects.get_for_model(DetteClient)
-        if sortie_ids:
-            q_ref = mc_qs.filter(
-                sortie_id__in=sortie_ids,
-                type='ENTREE',
-            ).exclude(reference_piece='')
-            if mouvementcaisse_has_content_type_id(mc_cols):
-                q_ref = q_ref.exclude(content_type=ct_dette_ref)
-            for mv in q_ref:
-                if mv.sortie_id not in ref_ventes:
-                    ref_ventes[mv.sortie_id] = mv.reference_piece
 
         lignes_ventes = []
         for ligne in page_lines:
@@ -1249,17 +1365,27 @@ class RapportsViewSet(viewsets.ViewSet):
             if not isinstance(pu_vente, Decimal):
                 pu_vente = Decimal(str(pu_vente))
             q = ligne.quantite
-
-            ref = f'Sortie #{s.id}'
-            if s.id in ref_ventes:
-                ref += f' ({ref_ventes[s.id]})'
+            qd = Decimal(str(q or 0))
+            if ligne.lots_utilises.exists():
+                benefice_ligne = sum(
+                    (Decimal(str(lu.quantite)) * (Decimal(str(lu.prix_vente)) - Decimal(str(lu.prix_achat))))
+                    for lu in ligne.lots_utilises.all()
+                ).quantize(Decimal('0.01'))
+            else:
+                benefice_ligne = (qd * (pu_vente - pu_achat)).quantize(Decimal('0.01'))
+            ref = f"FACT-{int(s.id):06d}"
 
             lignes_ventes.append(
                 {
+                    'sortie_id': s.id,
+                    'date': s.date_creation.strftime('%Y-%m-%d %H:%M') if s.date_creation else '',
+                    'client': s.client.nom if s.client else _('Client anonyme'),
+                    'statut_paiement': 'CREDIT' if (s.statut == 'EN_CREDIT') else 'COMPTANT',
                     'article': ligne.article.nom_scientifique,
                     'pu_achat': str(pu_achat.quantize(Decimal('0.01'))),
                     'pu_vente': str(pu_vente),
                     'quantite': q,
+                    'benefice': str(benefice_ligne),
                     'reference': ref,
                 }
             )
@@ -1272,7 +1398,43 @@ class RapportsViewSet(viewsets.ViewSet):
             'total_quantite': tot_qte,
             'total_montant_vente': str(tot_m_vente),
             'meta_generation': self._build_meta_generation(user),
+            'filtres': {
+                'client_id': client_id or None,
+                'client_nom': client_nom or None,
+                'reference': reference or None,
+                'statut_paiement': statut_paiement or None,
+                'montant_min': str(montant_min) if montant_min is not None else None,
+                'montant_max': str(montant_max) if montant_max is not None else None,
+                'date_jour': (request.query_params.get('date_jour') or None),
+                'mois': (request.query_params.get('mois') or None),
+                'annee': (request.query_params.get('annee') or None),
+            },
+            'resume_global': {
+                'total_sorties': total_sorties,
+                'total_clients': total_clients,
+                'sorties_comptant': sorties_comptant,
+                'sorties_credit': sorties_credit,
+                'total_quantite': str(tot_qte),
+                'total_montant_vente': str(tot_m_vente),
+                'total_benefice': str(total_benefice),
+            },
         }
+        # Titre dynamique selon filtres actifs
+        titre_suffix = []
+        if request.query_params.get('date_jour'):
+            titre_suffix.append(_("Journalier"))
+        elif request.query_params.get('mois') and request.query_params.get('annee'):
+            titre_suffix.append(_("Mensuel"))
+        else:
+            titre_suffix.append(_("Période"))
+        if client_id or client_nom:
+            titre_suffix.append(_("Client"))
+        if statut_paiement:
+            titre_suffix.append(statut_paiement)
+        if montant_min is not None or montant_max is not None:
+            titre_suffix.append(_("Montant"))
+        if titre_suffix:
+            out['titre'] = f"{out['titre']} ({' | '.join(titre_suffix)})"
         if pagination_meta is not None:
             out['pagination'] = pagination_meta
         return out
@@ -1283,7 +1445,12 @@ class RapportsViewSet(viewsets.ViewSet):
         Rapport des ventes sur une période stricte.
 
         Paramètres obligatoires:
-        - date_debut, date_fin : YYYY-MM-DD (bornes inclusives).
+        - date_jour (YYYY-MM-DD), ou mois+annee, ou date_debut+date_fin.
+
+        Filtres optionnels:
+        - client_id, client_nom, reference
+        - montant_min, montant_max
+        - statut_paiement = COMPTANT | CREDIT
 
         Pagination (requêtes BDD directes : LIMIT/OFFSET + agrégats SQL pour les totaux période) :
         - page (défaut 1), page_size (défaut 25, max 200).
@@ -1293,7 +1460,10 @@ class RapportsViewSet(viewsets.ViewSet):
         Contenu:
         - Lignes : article, quantité, PU achat (FIFO), PU vente, référence (sortie + pièce caisse si présente).
 
+        GET /api/rapports/ventes/?date_jour=2026-01-31
+        GET /api/rapports/ventes/?mois=1&annee=2026
         GET /api/rapports/ventes/?date_debut=2026-01-01&date_fin=2026-01-31&page=1&page_size=25
+        GET /api/rapports/ventes/?date_debut=2026-01-01&date_fin=2026-01-31&client_id=CLI0001&statut_paiement=CREDIT
         """
         try:
             return Response(self._build_ventes_report(request))
@@ -1305,7 +1475,9 @@ class RapportsViewSet(viewsets.ViewSet):
         """
         Export PDF du rapport des ventes (mêmes paramètres que /ventes/).
 
-        GET /api/rapports/ventes/pdf/?date_debut=2026-01-01&date_fin=2026-01-31
+        GET /api/rapports/ventes/pdf/?date_jour=2026-01-31
+        GET /api/rapports/ventes/pdf/?mois=1&annee=2026
+        GET /api/rapports/ventes/pdf/?date_debut=2026-01-01&date_fin=2026-01-31&client_id=CLI0001&statut_paiement=COMPTANT
         """
         try:
             data = self._build_ventes_report(request, for_pdf=True)
@@ -1389,7 +1561,34 @@ class RapportsViewSet(viewsets.ViewSet):
             f"{nom_article} <font size='8'>({article.article_id})</font>"
         )
         elements.append(Paragraph(title_with_article, title_style))
-        elements.append(Spacer(1, 4*mm))
+        elements.append(Spacer(1, 2*mm))
+
+        stock_row = Stock.objects.filter(article=article).first()
+        type_article = getattr(getattr(article, 'sous_type_article', None), 'type_article', None)
+        info_style = ParagraphStyle(
+            'ArticleInfoLine',
+            parent=normal,
+            fontSize=8.5,
+            leading=11,
+            spaceAfter=1,
+        )
+        elements.append(Paragraph(
+            f"<b>{_('Code')}:</b> {article.article_id or ''}   |   "
+            f"<b>{_('Unité')}:</b> {getattr(getattr(article, 'unite', None), 'nom', '—')}",
+            info_style,
+        ))
+        elements.append(Paragraph(
+            f"<b>{_('Type')}:</b> {getattr(type_article, 'libelle', '—')}   |   "
+            f"<b>{_('Sous-type')}:</b> {getattr(getattr(article, 'sous_type_article', None), 'libelle', '—')}",
+            info_style,
+        ))
+        elements.append(Paragraph(
+            f"<b>{_('Stock')}:</b> {_format_report_quantity(getattr(stock_row, 'Qte', 0) or 0)}   |   "
+            f"<b>{_('Seuil')}:</b> {_format_report_quantity(getattr(stock_row, 'seuilAlert', 0) or 0)}   |   "
+            f"<b>{_('Prix vente')}:</b> {Decimal(str(getattr(stock_row, 'prix_vente', 0) or 0)).quantize(Decimal('0.01')):.2f}",
+            info_style,
+        ))
+        elements.append(Spacer(1, 5*mm))
 
         # Récupération des mouvements
         entrees_qs = LigneEntree.objects.filter(article=article)
@@ -1532,13 +1731,15 @@ class RapportsViewSet(viewsets.ViewSet):
             ('ROWBACKGROUNDS', (0,2), (-1,-1), [colors.whitesmoke, None]),
             ('TOPPADDING', (0,0), (-1,1), 6),
             ('BOTTOMPADDING', (0,0), (-1,1), 6),
+            ('BACKGROUND', (0, len(table_data)-1), (-1, len(table_data)-1), colors.HexColor('#2c3e50')),
+            ('TEXTCOLOR', (0, len(table_data)-1), (-1, len(table_data)-1), colors.whitesmoke),
+            ('FONTNAME', (0, len(table_data)-1), (-1, len(table_data)-1), 'Helvetica-Bold'),
         ]))
 
         elements.append(table)
         elements.append(Spacer(1, 4*mm))
-        elements.append(Paragraph(f"© {entreprise.nom.upper()}", normal))
-
-        doc.build(elements)
+        data_footer = {'meta_generation': self._build_meta_generation(user)}
+        pdf_gen._build_with_footer(doc, elements, data_footer)
         buffer.seek(0)
         return HttpResponse(
             buffer,
