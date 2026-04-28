@@ -89,8 +89,8 @@ def apply_sortie_on_commande_livree(commande: Commande) -> Sortie:
 
     for it in items:
         article_obj = it.article
-        qte = int(it.quantite)
-        if qte < 1:
+        qte = Decimal(str(it.quantite))
+        if qte <= 0:
             raise ValidationError({"statut": _("Quantité invalide sur une ligne de commande.")})
 
         stock_disponible = (

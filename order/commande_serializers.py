@@ -3,7 +3,7 @@ from django.utils.translation import gettext as _
 from rest_framework import serializers
 
 from stock.models import Article, Client
-from stock.serializers import ArticleSerializer
+from stock.serializers import ArticleSerializer, LocalizedDecimalField
 from stock.services.tenant_context import get_tenant_ids
 
 from .models import Commande, CommandeItem, CommandeResponse
@@ -50,14 +50,15 @@ class CommandeItemWriteSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True,
     )
+    quantite = LocalizedDecimalField(max_digits=12, decimal_places=3)
 
     class Meta:
         model = CommandeItem
         fields = ("article_id", "nom_article", "quantite")
 
     def validate_quantite(self, value):
-        if value is None or value < 1:
-            raise serializers.ValidationError(_("La quantité doit être au moins 1."))
+        if value is None or value <= 0:
+            raise serializers.ValidationError(_("La quantité doit être supérieure à 0."))
         return value
 
     def validate(self, attrs):

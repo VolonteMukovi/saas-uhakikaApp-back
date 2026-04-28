@@ -6,7 +6,7 @@ from django.db.models import Sum
 from rest_framework import serializers
 
 from stock.models import Article, Devise
-from stock.serializers import ArticleSerializer
+from stock.serializers import ArticleSerializer, LocalizedDecimalField
 from stock.services.tenant_context import get_tenant_ids
 
 from .models import Fournisseur, FraisLot, Lot, LotItem
@@ -18,7 +18,7 @@ class LotClosureApprovisionnementSerializer(serializers.Serializer):
 
     article_id = serializers.CharField()
     prix_vente = serializers.DecimalField(max_digits=14, decimal_places=2)
-    seuil_alerte = serializers.IntegerField(min_value=0)
+    seuil_alerte = LocalizedDecimalField(max_digits=12, decimal_places=3, min_value=0)
     date_expiration = serializers.DateField(required=False, allow_null=True)
 
     def validate_article_id(self, value):
@@ -165,6 +165,7 @@ class LotItemSerializer(serializers.ModelSerializer):
         required=False,
     )
     article = ArticleSerializer(read_only=True)
+    quantite = LocalizedDecimalField(max_digits=12, decimal_places=3)
 
     class Meta:
         model = LotItem

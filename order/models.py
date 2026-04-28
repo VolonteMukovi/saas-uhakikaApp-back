@@ -201,7 +201,7 @@ class LotItem(models.Model):
     lot = models.ForeignKey(Lot, on_delete=models.CASCADE, related_name="items")
     article = models.ForeignKey("stock.Article", on_delete=models.PROTECT, related_name="lot_items")
 
-    quantite = models.PositiveIntegerField()
+    quantite = models.DecimalField(max_digits=12, decimal_places=3)
     prix_achat_unitaire = models.DecimalField(max_digits=14, decimal_places=2)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -316,7 +316,7 @@ class CommandeItem(models.Model):
         default="",
         help_text="Produit non référencé au catalogue (si pas d’article_id).",
     )
-    quantite = models.PositiveIntegerField()
+    quantite = models.DecimalField(max_digits=12, decimal_places=3)
 
     class Meta:
         ordering = ["id"]
