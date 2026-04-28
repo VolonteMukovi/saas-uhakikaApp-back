@@ -371,75 +371,42 @@ class RapportViewSet(viewsets.ViewSet):
 
         # Entreprise pour l'en-tête
         entreprise = user.get_entreprise(request) or Entreprise.objects.first()
-
-        # PDF
-        buffer = io.BytesIO()
-        from reportlab.lib.pagesizes import A4
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib import colors
         from rapports.utils.entete import get_entete_entreprise
         from rapports.utils.pdf_generator import PDFGenerator
 
-        styles = getSampleStyleSheet()
-        normal = styles['Normal']
-        normal.fontSize = 9
-        small = ParagraphStyle('Small', parent=normal, fontSize=8)
-        title_style = ParagraphStyle('Title', parent=styles['Heading2'], alignment=1, fontSize=12, spaceAfter=2)
-        header_small = ParagraphStyle('HeaderSmall', parent=normal, fontSize=8, alignment=1)
-
-        doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=14, rightMargin=14, topMargin=22, bottomMargin=18)
-        elements = []
-
-        # En-tête simplifié (nom, logo, slogan, téléphone uniquement)
-        entete = get_entete_entreprise(entreprise)
-        pdf_gen = PDFGenerator()
-        elements.extend(pdf_gen._create_entete(entete))
-
-        periode_label = _("Période")
-        elements.append(Paragraph(f"<b>{_('JOURNAL COMPLET DES OPÉRATIONS')}</b> - {periode_label}: {periode_txt}", normal))
-        gen_par = _("Généré le %(date)s par %(user)s") % {
-            'date': timezone.now().strftime('%d/%m/%Y à %H:%M'),
-            'user': getattr(user, 'username', _('Système'))
+        resume = {
+            'total_operations': len(events),
+            'approvisionnements': sum(1 for e in events if e.get('type') == 'APPROVISIONNEMENT'),
+            'ventes': sum(1 for e in events if e.get('type') == 'VENTE'),
+            'caisse_entrees': sum(1 for e in events if e.get('type') == 'CAISSE_ENTREE'),
+            'caisse_sorties': sum(1 for e in events if e.get('type') == 'CAISSE_SORTIE'),
+            'paiements_dettes': sum(1 for e in events if e.get('type') == 'PAIEMENT_DETTE'),
         }
-        elements.append(Paragraph(gen_par, header_small))
-        elements.append(Spacer(1, 6))
+        data = {
+            'entete': get_entete_entreprise(entreprise),
+            'titre': _('JOURNAL COMPLET DES OPÉRATIONS'),
+            'periode': {'label': periode_txt, 'date_debut': date_min, 'date_fin': date_max},
+            'filtres': {
+                'month': month_param,
+                'year': year_param,
+                'date_min': date_min,
+                'date_max': date_max,
+            },
+            'resume_global': resume,
+            'operations': events,
+            'meta_generation': {
+                'printed_at': timezone.now().strftime('%d/%m/%Y %H:%M'),
+                'printed_by': getattr(user, 'username', _('Système')),
+            },
+        }
 
-        data = [[
-            Paragraph(f'<b>{_("Date/Heure")}</b>', small),
-            Paragraph(f'<b>{_("Type")}</b>', small),
-            Paragraph(f'<b>{_("Désignation / Motif")}</b>', small),
-            Paragraph(f'<b>{_("Montant")}</b>', small),
-            Paragraph(f'<b>{_("Réf.")}</b>', small),
-        ]]
-        for ev in events:
-            data.append([
-                Paragraph(ev['date'].strftime('%d/%m/%Y %H:%M'), small),
-                Paragraph(ev.get('type_display', ev['type'].replace('_', ' ')), small),
-                Paragraph(ev['designation'].replace('<', ' '), small),
-                Paragraph(ev['montant_texte'], small),
-                Paragraph(str(ev['ref'])[:30], small),
-            ])
-
-        if len(data) == 1:
-            elements.append(Paragraph(_('Aucune opération pour la période.'), normal))
-        else:
-            table = Table(data, repeatRows=1, colWidths=[72, 58, 200, 88, 72])
-            table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('ALIGN', (3, 1), (3, -1), 'RIGHT'),
-                ('FONTSIZE', (0, 0), (-1, -1), 8),
-            ]))
-            elements.append(table)
-
-        elements.append(Spacer(1, 8))
-        total_ops = _("Total : %(count)s opération(s)") % {'count': len(events)}
-        elements.append(Paragraph(f"<i>{total_ops}</i>", small))
-        doc.build(elements)
-        buffer.seek(0)
-        return HttpResponse(buffer, content_type='application/pdf', headers={'Content-Disposition': 'inline; filename="journal_complet.pdf"'})
+        pdf_gen = PDFGenerator()
+        buffer = pdf_gen.generate_journal_operations_pdf(data)
+        return HttpResponse(
+            buffer,
+            content_type='application/pdf',
+            headers={'Content-Disposition': 'inline; filename="journal_complet.pdf"'},
+        )
 
     # Les actions de bons POS supprimées ici.
 
@@ -3118,6 +3085,45 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             'nb_devises_actives': len(soldes_par_devise),
             'total_mouvements_global': qs.count()
         })
+
+    @action(detail=False, methods=['get'], url_path='solde/pdf')
+    def solde_caisse_pdf(self, request):
+        """Export PDF de l'état de caisse (soldes par devise)."""
+        json_resp = self.solde_caisse(request)
+        if getattr(json_resp, 'status_code', 200) != 200:
+            return json_resp
+
+        user = request.user
+        entreprise = user.get_entreprise(request)
+        from rapports.utils.entete import get_entete_entreprise
+        from rapports.utils.pdf_generator import PDFGenerator
+
+        payload = dict(json_resp.data or {})
+        payload.update({
+            'entete': get_entete_entreprise(entreprise),
+            'titre': _("ÉTAT DE LA CAISSE"),
+            'resume_global': {
+                'nb_devises_actives': payload.get('nb_devises_actives', 0),
+                'total_mouvements_global': payload.get('total_mouvements_global', 0),
+                'devise_principale': payload.get('devise_principale'),
+            },
+            'filtres': {
+                'type': request.query_params.get('type'),
+                'date_min': request.query_params.get('date_min'),
+                'date_max': request.query_params.get('date_max'),
+            },
+            'meta_generation': {
+                'printed_at': timezone.now().strftime('%d/%m/%Y %H:%M'),
+                'printed_by': getattr(user, 'username', _('Système')),
+            },
+        })
+
+        pdf_generator = PDFGenerator()
+        pdf_buffer = pdf_generator.generate_etat_caisse_pdf(payload)
+        response = HttpResponse(pdf_buffer, content_type='application/pdf')
+        filename = f"etat_caisse_{timezone.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
 
     @action(detail=False, methods=['get'], url_path='tableau-bord')
     def tableau_bord_multi_devises(self, request):
