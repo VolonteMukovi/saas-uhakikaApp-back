@@ -23,11 +23,21 @@ from .models import (
 )
 from django.db import transaction, models
 from django.utils.translation import gettext as _
+from decimal import Decimal, InvalidOperation
 
 from order.services.lot_closure import entree_is_from_lot_closure
 
 from stock.services.article_names import article_duplicate_exists, normalize_nom_scientifique
 from stock.services.tenant_context import get_tenant_ids
+
+
+class LocalizedDecimalField(serializers.DecimalField):
+    """Accepte les nombres décimaux avec point ou virgule."""
+
+    def to_internal_value(self, data):
+        if isinstance(data, str):
+            data = data.strip().replace(",", ".")
+        return super().to_internal_value(data)
 
 
 class DeviseSerializer(serializers.ModelSerializer):
@@ -204,6 +214,7 @@ class LigneSortieSerializer(serializers.ModelSerializer):
 
     lots_utilises = serializers.SerializerMethodField(read_only=True)
     benefices_lots = serializers.SerializerMethodField(read_only=True)
+    quantite = LocalizedDecimalField(max_digits=12, decimal_places=3)
     
     class Meta:
         model = LigneSortie
@@ -691,6 +702,8 @@ class LigneEntreeSerializer(serializers.ModelSerializer):
         required=True
     )
     devise = DeviseSerializer(read_only=True)
+    quantite = LocalizedDecimalField(max_digits=12, decimal_places=3)
+    seuil_alerte = LocalizedDecimalField(max_digits=12, decimal_places=3)
     devise_id = serializers.PrimaryKeyRelatedField(
         queryset=Devise.objects.all(), 
         source='devise', 

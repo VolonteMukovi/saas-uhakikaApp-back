@@ -164,8 +164,8 @@ class Entree(models.Model):
 
 class LigneEntree(models.Model):  
     article = models.ForeignKey(Article, on_delete=models.CASCADE)
-    quantite = models.PositiveIntegerField()
-    quantite_restante = models.PositiveIntegerField(default=0, help_text="Quantité encore disponible dans ce lot (FIFO)")
+    quantite = models.DecimalField(max_digits=12, decimal_places=3)
+    quantite_restante = models.DecimalField(max_digits=12, decimal_places=3,default=0, help_text="Quantité encore disponible dans ce lot (FIFO)")
     prix_unitaire = models.DecimalField(max_digits=10, decimal_places=2, help_text="Prix d'achat unitaire")
     prix_vente = models.DecimalField(max_digits=10, decimal_places=2, help_text="Prix de vente unitaire défini à l'entrée")
     date_expiration = models.DateField(null=True, blank=True, help_text="Date d'expiration du produit (optionnelle)")
@@ -174,7 +174,7 @@ class LigneEntree(models.Model):
     # Devise de la ligne (nullable)
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='ligneentrees', null=True, blank=True)
     # Seuil d'alerte obligatoire pour chaque ligne d'entrée
-    seuil_alerte = models.PositiveIntegerField(help_text="Seuil d'alerte pour cet article",default=0)
+    seuil_alerte = models.DecimalField(max_digits=12, decimal_places=3, help_text="Seuil d'alerte pour cet article",default=0)
 
     class Meta:
         ordering = ['date_entree', 'id']  # FIFO : plus ancien en premier
@@ -195,8 +195,8 @@ class LigneEntree(models.Model):
 
 class Stock(models.Model):
     article = models.OneToOneField(Article, on_delete=models.CASCADE)
-    Qte = models.PositiveIntegerField(default=0)
-    seuilAlert = models.PositiveIntegerField(default=0)
+    Qte = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    seuilAlert = models.DecimalField(max_digits=12, decimal_places=3, default=0)
 
 
     def __str__(self):
@@ -489,7 +489,7 @@ class LigneSortie(models.Model):
     
     sortie = models.ForeignKey(Sortie, related_name='lignes', on_delete=models.CASCADE)
     article = models.ForeignKey(Article, related_name='sorties', on_delete=models.CASCADE)
-    quantite = models.PositiveIntegerField()
+    quantite = models.DecimalField(max_digits=12, decimal_places=3)
     prix_unitaire = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Prix réellement encaissé (peut différer du prix de vente du lot en cas de promotion/réduction)")
     date_sortie = models.DateTimeField(auto_now_add=True)
     # Devise de la ligne de sortie (nullable)
@@ -520,7 +520,7 @@ class LigneSortieLot(models.Model):
     """
     ligne_sortie = models.ForeignKey(LigneSortie, on_delete=models.CASCADE, related_name='lots_utilises')
     lot_entree = models.ForeignKey(LigneEntree, on_delete=models.CASCADE, related_name='sorties_utilisees')
-    quantite = models.PositiveIntegerField(help_text="Quantité prélevée de ce lot")
+    quantite = models.DecimalField(max_digits=12, decimal_places=3, help_text="Quantité prélevée de ce lot")
     prix_achat = models.DecimalField(max_digits=10, decimal_places=2, help_text="Prix d'achat du lot (copié)")
     prix_vente = models.DecimalField(max_digits=10, decimal_places=2, help_text="Prix de vente du lot (copié)")
     
@@ -551,7 +551,7 @@ class BeneficeLot(models.Model):
     """
     lot_entree = models.ForeignKey(LigneEntree, on_delete=models.CASCADE, related_name='benefices')
     ligne_sortie = models.ForeignKey(LigneSortie, on_delete=models.CASCADE, related_name='benefices_lots', null=True, blank=True)
-    quantite_vendue = models.PositiveIntegerField()
+    quantite_vendue = models.DecimalField(max_digits=12, decimal_places=3)
     prix_achat = models.DecimalField(max_digits=10, decimal_places=2)
     prix_vente = models.DecimalField(max_digits=10, decimal_places=2)
     benefice_unitaire = models.DecimalField(max_digits=10, decimal_places=2, help_text="Prix vente - Prix achat")

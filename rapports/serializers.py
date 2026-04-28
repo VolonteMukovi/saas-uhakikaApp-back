@@ -18,8 +18,8 @@ class InventaireArticleSerializer(serializers.Serializer):
     type_article = serializers.CharField(source='article.sous_type_article.type_article.libelle')
     sous_type = serializers.CharField(source='article.sous_type_article.libelle')
     unite = serializers.CharField(source='article.unite.libelle')
-    quantite_stock = serializers.IntegerField(source='Qte')
-    seuil_alerte = serializers.IntegerField(source='seuilAlert')
+    quantite_stock = serializers.DecimalField(source='Qte', max_digits=12, decimal_places=3)
+    seuil_alerte = serializers.DecimalField(source='seuilAlert', max_digits=12, decimal_places=3)
     statut = serializers.SerializerMethodField()
     prix_unitaire = serializers.SerializerMethodField()
     prix_total = serializers.SerializerMethodField()
@@ -67,8 +67,8 @@ class BonEntreeArticleSerializer(serializers.Serializer):
     quantite = serializers.CharField(default='', read_only=True)  # À remplir manuellement
     prix_total = serializers.CharField(default='', read_only=True)  # À remplir manuellement
     article_id = serializers.CharField(source='article.article_id')
-    stock_actuel = serializers.IntegerField(source='Qte')
-    seuil_alerte = serializers.IntegerField(source='seuilAlert')
+    stock_actuel = serializers.DecimalField(source='Qte', max_digits=12, decimal_places=3)
+    seuil_alerte = serializers.DecimalField(source='seuilAlert', max_digits=12, decimal_places=3)
     statut_stock = serializers.SerializerMethodField()
     dernier_prix = serializers.SerializerMethodField()
 
@@ -114,7 +114,7 @@ class BonAchatSerializer(serializers.Serializer):
     article_id = serializers.CharField(source='article.article_id')
     designation = serializers.SerializerMethodField()
     unite = serializers.CharField(source='article.unite.libelle')
-    quantite = serializers.IntegerField()
+    quantite = serializers.DecimalField(max_digits=12, decimal_places=3)
     prix_unitaire = serializers.DecimalField(max_digits=10, decimal_places=2)
     prix_total = serializers.SerializerMethodField()
     devise_sigle = serializers.SerializerMethodField()
