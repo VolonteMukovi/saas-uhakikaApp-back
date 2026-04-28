@@ -723,7 +723,7 @@ class PDFGenerator:
 
     def generate_ventes_pdf(self, data):
         """
-        Rapport des ventes : Article, PU achat, PU vente, Qté, Référence + ligne TOTAL (noir et blanc).
+        Rapport des ventes au même style visuel que le bon d'achat.
         Attendu `data` : entete, titre, periode, lignes_ventes, total_quantite, total_montant_vente.
         """
         buffer = BytesIO()
@@ -738,7 +738,7 @@ class PDFGenerator:
         elements = []
         elements.extend(self._create_entete(data['entete'], logo_size_mm=24))
         elements.append(Paragraph(data['titre'], self.styles['TitrePrincipal']))
-        elements.append(Spacer(1, 10))
+        elements.append(Spacer(1, 8))
         if 'periode' in data:
             periode_text = _('<b>Période :</b> du %(debut)s au %(fin)s') % {
                 'debut': data['periode']['date_debut'],
@@ -746,102 +746,421 @@ class PDFGenerator:
             }
             elements.append(Paragraph(periode_text, self.styles['TexteNormal']))
             elements.append(Spacer(1, 8))
+        filtres = data.get('filtres') or {}
+        filtres_lines = []
+        if filtres.get('date_jour'):
+            filtres_lines.append(_("Date jour: %(d)s") % {'d': filtres['date_jour']})
+        if filtres.get('mois') and filtres.get('annee'):
+            filtres_lines.append(_("Mois: %(m)s/%(y)s") % {'m': filtres['mois'], 'y': filtres['annee']})
+        if filtres.get('client_id'):
+            filtres_lines.append(_("Client ID: %(v)s") % {'v': filtres['client_id']})
+        if filtres.get('client_nom'):
+            filtres_lines.append(_("Client: %(v)s") % {'v': filtres['client_nom']})
+        if filtres.get('statut_paiement'):
+            filtres_lines.append(_("Statut paiement: %(v)s") % {'v': filtres['statut_paiement']})
+        if filtres.get('montant_min') or filtres.get('montant_max'):
+            filtres_lines.append(_("Montant: %(min)s -> %(max)s") % {
+                'min': filtres.get('montant_min') or '-',
+                'max': filtres.get('montant_max') or '-',
+            })
+        if filtres.get('reference'):
+            filtres_lines.append(_("Référence: %(v)s") % {'v': filtres['reference']})
+        if filtres_lines:
+            elements.append(Paragraph("<b>%s</b>" % _("Filtres actifs"), self.styles['TexteNormal']))
+            for line in filtres_lines:
+                elements.append(Paragraph(line, self.styles['TexteNormal']))
+            elements.append(Spacer(1, 6))
+
+        resume = data.get('resume_global') or {}
+        if resume:
+            elements.append(Paragraph("<b>%s</b>" % _("Résumé global"), self.styles['SousTitre']))
+            resume_rows = [
+                [_("Total sorties"), str(resume.get('total_sorties', 0))],
+                [_("Total clients"), str(resume.get('total_clients', 0))],
+                [_("Sorties comptant"), str(resume.get('sorties_comptant', 0))],
+                [_("Sorties crédit"), str(resume.get('sorties_credit', 0))],
+                [_("Total quantité"), str(resume.get('total_quantite', '0'))],
+                [_("Total montant ventes"), str(resume.get('total_montant_vente', '0.00'))],
+                [_("Bénéfice total"), str(resume.get('total_benefice', '0.00'))],
+            ]
+            resume_table = Table(
+                resume_rows,
+                colWidths=[self.usable_width * 0.52, self.usable_width * 0.48],
+            )
+            resume_table.setStyle(TableStyle([
+                ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+                ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                ('GRID', (0, 0), (-1, -1), 0.3, colors.HexColor('#d0d0d0')),
+                ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#f5f7fa')),
+            ]))
+            elements.append(resume_table)
+            elements.append(Spacer(1, 8))
 
         rows = data.get('lignes_ventes') or []
+        elements.append(Paragraph(_("Détail des Ventes"), self.styles['SousTitre']))
+
         table_data = [
             [
+                _('N° Sortie'),
+                _('Date'),
+                _('Client'),
                 _('Article'),
                 _('PU achat'),
                 _('PU vente'),
                 _('Qté'),
+                _('Total'),
+                _('Bénéfice'),
+                _('Statut'),
                 _('Référence'),
             ]
         ]
 
+        total_general = Decimal('0.00')
         for row in rows:
             art = row.get('article') or row.get('nom_scientifique') or '—'
             q = row.get('quantite')
             q_s = self._format_quantity(q) if q is not None else '—'
-            pua = row.get('pu_achat') or row.get('prix_achat_unitaire') or '—'
-            puv = row.get('pu_vente') or row.get('prix_vente_unitaire') or '—'
-            ref = str(row.get('reference', ''))[:48]
+            pua = Decimal(str(row.get('pu_achat') or row.get('prix_achat_unitaire') or '0'))
+            puv = Decimal(str(row.get('pu_vente') or row.get('prix_vente_unitaire') or '0'))
+            qd = Decimal(str(q or 0))
+            line_total = (qd * puv).quantize(Decimal('0.01'))
+            total_general += line_total
+            benefice_line = Decimal(str(row.get('benefice') or '0')).quantize(Decimal('0.01'))
+            ref = str(row.get('reference', ''))[:36]
+            date_s = str(row.get('date') or '')[:16]
+            client_s = str(row.get('client') or '—')[:28]
+            statut_s = str(row.get('statut_paiement') or '—')
             table_data.append(
                 [
+                    str(row.get('sortie_id') or '—'),
+                    date_s,
+                    client_s,
                     str(art)[:40] + ('...' if len(str(art)) > 40 else ''),
-                    str(pua),
-                    str(puv),
+                    f"{pua.quantize(Decimal('0.01')):.2f}",
+                    f"{puv.quantize(Decimal('0.01')):.2f}",
                     q_s,
+                    f"{line_total:.2f}",
+                    f"{benefice_line:.2f}",
+                    statut_s,
                     ref,
                 ]
             )
 
-        tot_q = data.get('total_quantite')
-        tot_mv = data.get('total_montant_vente')
-        if tot_q is None or tot_mv is None:
-            tq = Decimal('0')
-            tsum = Decimal('0.00')
-            for r in rows:
-                q = Decimal(str(r.get('quantite') or 0))
-                tq += q
-                puv = r.get('pu_vente') or r.get('prix_vente_unitaire') or '0'
-                tsum += (Decimal(q) * Decimal(str(puv))).quantize(Decimal('0.01'))
-            if tot_q is None:
-                tot_q = tq
-            if tot_mv is None:
-                tot_mv = str(tsum.quantize(Decimal('0.01')))
-        tot_q = tot_q if tot_q is not None else Decimal('0')
-        tot_mv = tot_mv if tot_mv is not None else '0.00'
-
+        tot_q = data.get('total_quantite') if data.get('total_quantite') is not None else Decimal('0')
+        tot_mv = data.get('total_montant_vente') if data.get('total_montant_vente') is not None else str(total_general)
         table_data.append(
             [
-                Paragraph(f"<b>{_('TOTAL')}</b>", self.styles['Normal']),
+                '',
+                '',
+                Paragraph(f"<b>{_('TOTAL GÉNÉRAL')}</b>", self.styles['Normal']),
                 '—',
-                str(tot_mv),
+                '—',
+                '—',
                 self._format_quantity(tot_q),
+                str(Decimal(str(tot_mv)).quantize(Decimal('0.01'))),
+                str(Decimal(str((data.get('resume_global') or {}).get('total_benefice', '0'))).quantize(Decimal('0.01'))),
+                '—',
                 '—',
             ]
         )
 
         col_widths = [
-            self.usable_width * 0.28,
-            self.usable_width * 0.14,
-            self.usable_width * 0.14,
-            self.usable_width * 0.08,
-            self.usable_width * 0.36,
+            self.usable_width * 0.07,  # N° sortie
+            self.usable_width * 0.11,  # Date
+            self.usable_width * 0.10,  # Client
+            self.usable_width * 0.15,  # Article
+            self.usable_width * 0.09,  # PU achat
+            self.usable_width * 0.09,  # PU vente
+            self.usable_width * 0.07,  # Qté
+            self.usable_width * 0.09,  # Total
+            self.usable_width * 0.09,  # Bénéfice
+            self.usable_width * 0.07,  # Statut
+            self.usable_width * 0.07,  # Réf
         ]
-        last_row = len(table_data) - 1
+        last_row_idx = len(table_data) - 1
         table = Table(table_data, colWidths=col_widths, repeatRows=1)
         table_style = [
-            ('BACKGROUND', (0, 0), (-1, 0), colors.white),
-            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#34495e')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
             ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 9),
+            ('FONTSIZE', (0, 0), (-1, 0), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+            ('TOPPADDING', (0, 0), (-1, 0), 6),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 7),
+            ('ALIGN', (0, 1), (3, -1), 'LEFT'),
+            ('ALIGN', (4, 1), (8, -1), 'RIGHT'),
+            ('ALIGN', (9, 1), (10, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
             ('TOPPADDING', (0, 0), (-1, -1), 5),
         ]
-        if last_row > 1:
-            table_style.extend(
-                [
-                    ('ALIGN', (1, 1), (4, last_row - 1), 'RIGHT'),
-                    ('ALIGN', (0, 1), (0, last_row - 1), 'LEFT'),
-                    ('FONTNAME', (0, 1), (-1, last_row - 1), 'Helvetica'),
-                    ('FONTSIZE', (0, 1), (-1, last_row - 1), 8),
-                ]
-            )
-        table_style.extend(
-            [
-                ('FONTNAME', (0, last_row), (-1, last_row), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, last_row), (-1, last_row), 9),
-                ('ALIGN', (0, last_row), (0, last_row), 'LEFT'),
-                ('ALIGN', (1, last_row), (4, last_row), 'RIGHT'),
-                ('LINEABOVE', (0, last_row), (-1, last_row), 0.75, colors.black),
-            ]
-        )
+
+        for i in range(1, last_row_idx):
+            if i % 2 == 0:
+                table_style.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor('#ecf0f1')))
+
+        table_style.append(('BACKGROUND', (0, last_row_idx), (-1, last_row_idx), colors.HexColor('#2c3e50')))
+        table_style.append(('TEXTCOLOR', (0, last_row_idx), (-1, last_row_idx), colors.whitesmoke))
+        table_style.append(('FONTNAME', (0, last_row_idx), (-1, last_row_idx), 'Helvetica-Bold'))
+        table_style.append(('ALIGN', (2, last_row_idx), (2, last_row_idx), 'RIGHT'))
+        table_style.append(('ALIGN', (6, last_row_idx), (8, last_row_idx), 'RIGHT'))
+
         table.setStyle(TableStyle(table_style))
         elements.append(table)
+        self._build_with_footer(doc, elements, data)
+        buffer.seek(0)
+        return buffer
+
+    def generate_journal_operations_pdf(self, data):
+        """Générer le PDF du journal complet des opérations avec style harmonisé."""
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            rightMargin=self.margin,
+            leftMargin=self.margin,
+            topMargin=self.margin,
+            bottomMargin=self.margin,
+        )
+
+        elements = []
+        elements.extend(self._create_entete(data['entete'], logo_size_mm=24))
+        elements.append(Paragraph(data.get('titre', _('JOURNAL COMPLET DES OPÉRATIONS')), self.styles['TitrePrincipal']))
+        elements.append(Spacer(1, 8))
+
+        periode = data.get('periode') or {}
+        periode_label = periode.get('label')
+        if not periode_label and periode.get('date_debut') and periode.get('date_fin'):
+            periode_label = _("Du %(debut)s au %(fin)s") % {
+                'debut': periode['date_debut'],
+                'fin': periode['date_fin'],
+            }
+        if periode_label:
+            elements.append(Paragraph(f"<b>{_('Période')}:</b> {periode_label}", self.styles['TexteNormal']))
+            elements.append(Spacer(1, 6))
+
+        filtres = data.get('filtres') or {}
+        filtres_lines = []
+        if filtres.get('month') and filtres.get('year'):
+            filtres_lines.append(_("Mois/Année: %(m)s/%(y)s") % {'m': filtres['month'], 'y': filtres['year']})
+        if filtres.get('date_min') or filtres.get('date_max'):
+            filtres_lines.append(_("Dates: %(d0)s -> %(d1)s") % {
+                'd0': filtres.get('date_min') or '-',
+                'd1': filtres.get('date_max') or '-',
+            })
+        if filtres_lines:
+            elements.append(Paragraph("<b>%s</b>" % _("Filtres actifs"), self.styles['TexteNormal']))
+            for line in filtres_lines:
+                elements.append(Paragraph(line, self.styles['TexteNormal']))
+            elements.append(Spacer(1, 6))
+
+        resume = data.get('resume_global') or {}
+        if resume:
+            elements.append(Paragraph("<b>%s</b>" % _("Résumé global"), self.styles['SousTitre']))
+            resume_rows = [
+                [_("Total opérations"), str(resume.get('total_operations', 0))],
+                [_("Approvisionnements"), str(resume.get('approvisionnements', 0))],
+                [_("Ventes"), str(resume.get('ventes', 0))],
+                [_("Caisse entrées"), str(resume.get('caisse_entrees', 0))],
+                [_("Caisse sorties"), str(resume.get('caisse_sorties', 0))],
+                [_("Paiements dettes"), str(resume.get('paiements_dettes', 0))],
+            ]
+            resume_table = Table(
+                resume_rows,
+                colWidths=[self.usable_width * 0.52, self.usable_width * 0.48],
+            )
+            resume_table.setStyle(TableStyle([
+                ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+                ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                ('GRID', (0, 0), (-1, -1), 0.3, colors.HexColor('#d0d0d0')),
+                ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#f5f7fa')),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ]))
+            elements.append(resume_table)
+            elements.append(Spacer(1, 8))
+
+        elements.append(Paragraph(_("Détail des opérations"), self.styles['SousTitre']))
+        table_data = [[
+            _('Date/Heure'),
+            _('Type'),
+            _('Désignation / Motif'),
+            _('Montant'),
+            _('Référence'),
+        ]]
+        for op in data.get('operations') or []:
+            dt = op.get('date')
+            if hasattr(dt, 'strftime'):
+                dt_txt = dt.strftime('%d/%m/%Y %H:%M')
+            else:
+                dt_txt = str(dt or '')
+            table_data.append([
+                dt_txt,
+                str(op.get('type_display') or op.get('type') or ''),
+                str(op.get('designation') or '')[:90],
+                str(op.get('montant_texte') or '-'),
+                str(op.get('ref') or '')[:36],
+            ])
+
+        if len(table_data) == 1:
+            elements.append(Paragraph(_('Aucune opération pour la période.'), self.styles['TexteNormal']))
+        else:
+            col_widths = [
+                self.usable_width * 0.18,
+                self.usable_width * 0.16,
+                self.usable_width * 0.40,
+                self.usable_width * 0.14,
+                self.usable_width * 0.12,
+            ]
+            table = Table(table_data, colWidths=col_widths, repeatRows=1)
+            table_style = [
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#34495e')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 8),
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 1), (-1, -1), 7),
+                ('ALIGN', (0, 1), (2, -1), 'LEFT'),
+                ('ALIGN', (3, 1), (3, -1), 'RIGHT'),
+                ('ALIGN', (4, 1), (4, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                ('TOPPADDING', (0, 0), (-1, -1), 5),
+            ]
+            for i in range(1, len(table_data)):
+                if i % 2 == 0:
+                    table_style.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor('#ecf0f1')))
+            table.setStyle(TableStyle(table_style))
+            elements.append(table)
+
+        self._build_with_footer(doc, elements, data)
+        buffer.seek(0)
+        return buffer
+
+    def generate_etat_caisse_pdf(self, data):
+        """Générer le PDF de l'état de caisse (soldes par devise)."""
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            rightMargin=self.margin,
+            leftMargin=self.margin,
+            topMargin=self.margin,
+            bottomMargin=self.margin,
+        )
+
+        elements = []
+        elements.extend(self._create_entete(data['entete'], logo_size_mm=24))
+        elements.append(Paragraph(data.get('titre', _("ÉTAT DE LA CAISSE")), self.styles['TitrePrincipal']))
+        elements.append(Spacer(1, 8))
+
+        filtres = data.get('filtres') or {}
+        filtres_txt = []
+        if filtres.get('date_min') or filtres.get('date_max'):
+            filtres_txt.append(
+                _("Période: %(d0)s -> %(d1)s") % {
+                    'd0': filtres.get('date_min') or '-',
+                    'd1': filtres.get('date_max') or '-',
+                }
+            )
+        if filtres.get('type'):
+            filtres_txt.append(_("Type mouvement: %(t)s") % {'t': filtres.get('type')})
+        if filtres_txt:
+            elements.append(Paragraph("<b>%s</b>" % _("Filtres actifs"), self.styles['TexteNormal']))
+            for line in filtres_txt:
+                elements.append(Paragraph(line, self.styles['TexteNormal']))
+            elements.append(Spacer(1, 6))
+
+        summary = data.get('resume_global') or {}
+        resume_rows = [
+            [_("Nombre devises actives"), str(summary.get('nb_devises_actives', 0))],
+            [_("Total mouvements"), str(summary.get('total_mouvements_global', 0))],
+            [_("Devise principale"), str(summary.get('devise_principale') or '-')],
+        ]
+        resume_table = Table(resume_rows, colWidths=[self.usable_width * 0.55, self.usable_width * 0.45])
+        resume_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('GRID', (0, 0), (-1, -1), 0.3, colors.HexColor('#d0d0d0')),
+            ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#f5f7fa')),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ]))
+        elements.append(resume_table)
+        elements.append(Spacer(1, 8))
+
+        elements.append(Paragraph(_("Soldes par devise"), self.styles['SousTitre']))
+        table_data = [[
+            _('Devise'),
+            _('Total Entrées'),
+            _('Total Sorties'),
+            _('Solde'),
+            _('Nb mouvements'),
+            _('Statut'),
+        ]]
+        for d in data.get('soldes_par_devise') or []:
+            devise_label = f"{d.get('devise_sigle', '')} ({d.get('devise_symbole', '')})".strip()
+            statut = 'POSITIF' if Decimal(str(d.get('solde') or '0')) > 0 else ('NEGATIF' if Decimal(str(d.get('solde') or '0')) < 0 else 'EQUILIBRE')
+            table_data.append([
+                devise_label,
+                str(d.get('total_entrees', '0.00')),
+                str(d.get('total_sorties', '0.00')),
+                str(d.get('solde', '0.00')),
+                str(d.get('nb_mouvements', 0)),
+                statut,
+            ])
+
+        if len(table_data) == 1:
+            elements.append(Paragraph(_('Aucune donnée caisse pour cette sélection.'), self.styles['TexteNormal']))
+        else:
+            col_widths = [
+                self.usable_width * 0.20,
+                self.usable_width * 0.18,
+                self.usable_width * 0.18,
+                self.usable_width * 0.18,
+                self.usable_width * 0.13,
+                self.usable_width * 0.13,
+            ]
+            table = Table(table_data, colWidths=col_widths, repeatRows=1)
+            style = [
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#34495e')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 8),
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 1), (-1, -1), 8),
+                ('ALIGN', (0, 1), (0, -1), 'LEFT'),
+                ('ALIGN', (1, 1), (4, -1), 'RIGHT'),
+                ('ALIGN', (5, 1), (5, -1), 'CENTER'),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ]
+            for i in range(1, len(table_data)):
+                if i % 2 == 0:
+                    style.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor('#ecf0f1')))
+            table.setStyle(TableStyle(style))
+            elements.append(table)
+
         self._build_with_footer(doc, elements, data)
         buffer.seek(0)
         return buffer
