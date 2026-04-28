@@ -42,6 +42,7 @@ from stock.permissions import EntreprisePermission, IsAdminOrUser as StockIsAdmi
 from users.authentication import JWTAuthenticationWithContext
 from order.authentication import ClientJWTAuthentication
 from order.permissions import IsClientAuthenticated
+from django.conf import settings
 
 
 class BusinessPermissionMixin:
@@ -59,10 +60,11 @@ import io
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+from reportlab.graphics.barcode import code128
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import qrcode
 from datetime import datetime
 from rest_framework.decorators import action, api_view, permission_classes
@@ -71,6 +73,18 @@ from drf_yasg.utils import swagger_auto_schema
 
 # Configuration du logger pour tracer les suppressions automatiques d'articles
 logger = logging.getLogger(__name__)
+
+
+def _parse_decimal_quantity(raw_value):
+    """Parse une quantité en acceptant virgule ou point."""
+    if isinstance(raw_value, Decimal):
+        value = raw_value
+    else:
+        text = str(raw_value).strip().replace(",", ".")
+        value = Decimal(text)
+    if value <= 0:
+        raise serializers.ValidationError({'quantite': 'La quantité doit être supérieure à 0.'})
+    return value
 
 
 class EnterpriseFilterMixin:
@@ -654,10 +668,10 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 
                 # Conversion sécurisée des données
                 try:
-                    qte = int(ligne.get('quantite', 0))
-                except (ValueError, TypeError):
+                    qte = _parse_decimal_quantity(ligne.get('quantite', 0))
+                except (InvalidOperation, TypeError, ValueError):
                     raise serializers.ValidationError({
-                        'quantite': 'La quantité doit être un nombre entier valide.'
+                        'quantite': 'La quantité doit être un nombre décimal valide.'
                     })
                 
                 # Prix réellement encaissé (peut être fourni manuellement pour promotions, réductions, etc.)
@@ -1176,15 +1190,10 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     })
                 
                 try:
-                    qte = int(ligne.get('quantite', 0))
-                except (ValueError, TypeError):
+                    qte = _parse_decimal_quantity(ligne.get('quantite', 0))
+                except (InvalidOperation, TypeError, ValueError):
                     raise serializers.ValidationError({
-                        'quantite': 'La quantité doit être un nombre entier valide.'
-                    })
-                
-                if qte <= 0:
-                    raise serializers.ValidationError({
-                        'quantite': 'La quantité doit être supérieure à 0.'
+                        'quantite': 'La quantité doit être un nombre décimal valide.'
                     })
                 
                 # Prix réellement encaissé (peut être fourni manuellement)
@@ -1379,134 +1388,36 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         user = request.user
         sortie = self.get_object()
         entreprise = user.get_entreprise(request)
-        POS_WIDTH = 80 * mm
+        POS_WIDTH = 58 * mm
+        lm, rm, tm, bm = 1.2 * mm, 1.2 * mm, 2 * mm, 2 * mm
+        content_width = POS_WIDTH - lm - rm
         buffer = io.BytesIO()
         styles = getSampleStyleSheet()
-
-        # Polices réduites pour facture compacte (impression POS). wordWrap pour colonne Article. Alignement à gauche.
-        normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=7, leading=8, wordWrap='CJK')
-        article_cell_style = ParagraphStyle('ArticleCell', parent=normal, wordWrap='CJK', allowWidows=0, allowOrphans=0)
-        title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=10, leading=11, alignment=TA_LEFT, spaceAfter=1*mm)
-        info_style = ParagraphStyle('Info', fontName='Helvetica', fontSize=6, leading=7, alignment=TA_LEFT)
-        footer_style = ParagraphStyle('Footer', fontName='Helvetica', fontSize=6, leading=7, alignment=TA_LEFT, textColor=colors.black)
-
+        mono = ParagraphStyle(
+            'MonoTicket',
+            parent=styles['Normal'],
+            fontName='Courier',
+            fontSize=6.4,
+            leading=7.1,
+            alignment=TA_LEFT,
+            wordWrap='CJK',
+        )
         elements = []
 
-        # En-tête simplifié (nom, logo, téléphone) — pas de slogan sur facture pour éviter doublon avec "Imprimé par" en bas
-        from rapports.utils.entete import get_entete_entreprise
-        from rapports.utils.pdf_generator import PDFGenerator
-        entete = get_entete_entreprise(entreprise)
-        entete = {'entreprise': {**entete['entreprise'], 'slogan': ''}}  # ne pas afficher le slogan en haut
-        pdf_gen = PDFGenerator()
-        elements.extend(pdf_gen._create_entete(entete, compact=True))
-        # Pas de spacer supplémentaire : en-tête compact place déjà le titre juste en dessous
-
-        # Titre facture (traduit)
-        elements.append(Paragraph(f"<b>{_('FACTURE DE VENTE')}</b>", title_style))
-
-        # Infos facture (traduites) — pas de devise dans l'en-tête
-        devise_sortie = getattr(sortie, 'devise', None)
-        if not devise_sortie:
-            devise_sortie = Devise.objects.filter(est_principal=True).first()
-        elements.append(Paragraph(f"{_('N° Facture')}: FACT-{sortie.pk:06d}", info_style))
-        elements.append(Paragraph(f"{_('Date')}: {timezone.now().strftime('%d/%m/%Y %H:%M')}", info_style))
-        elements.append(Spacer(1, 1*mm))
-
-        # Client (labels traduits, données brutes)
-        if sortie.client:
-            elements.append(Paragraph(f"<b>{_('Client')}:</b> {sortie.client.nom}", normal))
-            if sortie.client.adresse:
-                elements.append(Paragraph(f"<b>{_('Adresse')}:</b> {sortie.client.adresse}", normal))
-            if sortie.client.telephone:
-                elements.append(Paragraph(f"<b>{_('Tél')}:</b> {sortie.client.telephone}", normal))
-            if sortie.client.email:
-                elements.append(Paragraph(f"<b>{_('Email')}:</b> {sortie.client.email}", normal))
-            elements.append(Spacer(1, 1*mm))
-
-        # Tableau articles — fond blanc, pas de couleur bleue
-        lignes = sortie.lignes.all()
-        # P.U. en abrégé : même taille que Qté (facture) — contexte "facture" pour EN "UP"
-        pu_label = pgettext('facture', 'P.U.')
-        table_data = [
-            [
-                Paragraph(f"<b>{_('Article')}</b>", article_cell_style),
-                Paragraph(f"<b>{_('Qté')}</b>", normal),
-                Paragraph(f"<b>{pu_label}</b>", normal),
-                Paragraph(f"<b>{_('Total')}</b>", normal)
-            ]
-        ]
-        total_general = Decimal('0.00')
-        for ligne in lignes:
-            article = ligne.article
-            qte = ligne.quantite or 0
-            pu_raw = getattr(ligne, 'prix_unitaire', None)
-            if pu_raw is None:
-                pu = Decimal('0.00')
-            elif isinstance(pu_raw, Decimal):
-                pu = pu_raw
+        from pos.printer_service import MP2258Printer
+        ticket_lines = MP2258Printer().build_facture_ticket_lines(sortie, entreprise, user)
+        for raw in ticket_lines:
+            txt = (raw or '').rstrip('\n')
+            if txt.strip() == '':
+                elements.append(Spacer(1, 0.6 * mm))
             else:
-                pu = Decimal(str(pu_raw))
-            qte_dec = Decimal(str(qte))
-            total = (qte_dec * pu).quantize(Decimal('0.01'))
-            total_general = (total_general + total).quantize(Decimal('0.01'))
-            pu_formatted = f"{pu.quantize(Decimal('0.01')):.2f}"
-            total_formatted = f"{total:.2f}"
-            table_data.append([
-                Paragraph(_article_display_name(article), article_cell_style),
-                Paragraph(str(qte), normal),
-                Paragraph(pu_formatted, normal),
-                Paragraph(total_formatted, normal)
-            ])
+                # preformatted look: Courier + spaces preserved
+                safe = txt.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace(' ', '&nbsp;')
+                elements.append(Paragraph(safe, mono))
 
-        total_formatted = f"{total_general:.2f}"
-        total_display = f"{total_formatted} {devise_sortie.symbole}" if (devise_sortie and getattr(devise_sortie, 'symbole', None)) else total_formatted
-        table_data.append([
-            Paragraph(f"<b>{_('TOTAL')}</b>", article_cell_style),
-            Paragraph("", normal),
-            Paragraph("", normal),
-            Paragraph(f"<b>{total_display}</b>", normal)
-        ])
-
-        # Article 25 %, Qté 10 %, P.U. 10 % (même largeur que Qté), Total le reste — titres centrés
-        article_table = Table(table_data, colWidths=[POS_WIDTH*0.25, POS_WIDTH*0.10, POS_WIDTH*0.10, POS_WIDTH*0.55])
-        article_table.setStyle(TableStyle([
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 0), (-1, -1), 7),
-            ('BACKGROUND', (0, 0), (-1, -1), colors.white),
-            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),   # titres centrés
-            ('ALIGN', (0, 1), (0, -1), 'LEFT'),    # colonne Article à gauche
-            ('ALIGN', (1, 1), (-1, -1), 'RIGHT'),  # Qté, P.U., Total à droite
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
-            ('LEFTPADDING', (0, 0), (-1, -1), 2),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 2),
-            ('TOPPADDING', (0, 0), (-1, -1), 2),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-        ]))
-        elements.append(article_table)
-        elements.append(Spacer(1, 2*mm))
-
-        # Pied de facture (remerciement, imprimeur, date, décorateur) — poussé en bas par le spacer
-        lm = rm = tm = bm = 4*mm
-        avail_width = POS_WIDTH - lm - rm
-        footer_parts = [
-            Paragraph(_("Merci pour votre achat !"), normal),
-            Spacer(1, 0.5*mm),
-            Paragraph(_("Imprimé par: %(user)s") % {'user': user.get_full_name() or user.username}, footer_style),
-            Paragraph(_("Le %(date)s") % {'date': timezone.now().strftime('%d/%m/%Y à %H:%M')}, footer_style),
-            Spacer(1, 1*mm),
-            Paragraph("—" * 30, footer_style),
-        ]
+        avail_width = content_width
         main_height = sum(flow.wrap(avail_width, 100000)[1] for flow in elements)
-        footer_height = sum(flow.wrap(avail_width, 100000)[1] for flow in footer_parts)
-        min_height = POS_WIDTH + 20*mm
-        POS_HEIGHT = max(main_height + footer_height + tm + bm + 3*mm, min_height)
-        # Spacer pour coller le pied en bas de la page (évite qu'il remonte en haut)
-        spacer_bottom = POS_HEIGHT - tm - bm - main_height - footer_height
-        if spacer_bottom > 0:
-            elements.append(Spacer(1, spacer_bottom))
-        elements.extend(footer_parts)
+        POS_HEIGHT = main_height + tm + bm + 4.0 * mm
 
         doc = SimpleDocTemplate(
             buffer,
@@ -1515,15 +1426,108 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             rightMargin=rm,
             topMargin=tm,
             bottomMargin=bm,
-            allowSplitting=0
+            allowSplitting=0,
         )
         doc.build(elements)
         buffer.seek(0)
         return HttpResponse(
             buffer,
             content_type='application/pdf',
-            headers={'Content-Disposition': f'inline; filename="FACTURE_{sortie.pk}.pdf"'}
+            headers={'Content-Disposition': f'inline; filename="FACTURE_{sortie.pk}.pdf"'},
         )
+
+    @action(detail=True, methods=['post'], url_path='facture-pos-print', permission_classes=[IsAuthenticated])
+    def facture_pos_print(self, request, pk=None):
+        """
+        Impression ticket POS (ESC/POS) pour MP-2258 via port série.
+        Nécessite POS_PRINTER_PORT configuré (ex: COM3).
+        """
+        user = request.user
+        sortie = self.get_object()
+        entreprise = user.get_entreprise(request)
+
+        backend = str(getattr(settings, 'POS_PRINTER_BACKEND', 'serial') or 'serial').lower()
+        if backend == 'windows':
+            printer_name = (getattr(settings, 'POS_PRINTER_NAME', '') or '').strip()
+            if not printer_name:
+                return Response({'error': "Imprimante Windows non configurée (POS_PRINTER_NAME)."}, status=501)
+        else:
+            port = getattr(settings, 'POS_PRINTER_PORT', None)
+            if not port:
+                return Response({'error': "Port imprimante non configuré (POS_PRINTER_PORT)."}, status=501)
+
+        try:
+            from pos.printer_service import MP2258Printer
+        except Exception as e:
+            return Response(
+                {'error': f"Service ESC/POS indisponible: {e}"},
+                status=501,
+            )
+
+        printer = None
+        try:
+            printer = MP2258Printer()
+            printer.print_facture(sortie, entreprise, user)
+            return Response({'status': 'impression lancée'})
+        except ImportError as e:
+            return Response(
+                {'error': f"Dépendance manquante pour ESC/POS: {e}. Installez python-escpos."},
+                status=501,
+            )
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+        finally:
+            try:
+                if printer:
+                    printer.close()
+            except Exception:
+                pass
+
+    @action(detail=True, methods=['post'], url_path='bon-pos-print', permission_classes=[IsAuthenticated])
+    def bon_sortie_pos_print(self, request, pk=None):
+        """
+        Impression ticket reçu (bon de sortie) en ESC/POS.
+        """
+        user = request.user
+        sortie = self.get_object()
+        entreprise = user.get_entreprise(request)
+
+        backend = str(getattr(settings, 'POS_PRINTER_BACKEND', 'serial') or 'serial').lower()
+        if backend == 'windows':
+            printer_name = (getattr(settings, 'POS_PRINTER_NAME', '') or '').strip()
+            if not printer_name:
+                return Response({'error': "Imprimante Windows non configurée (POS_PRINTER_NAME)."}, status=501)
+        else:
+            port = getattr(settings, 'POS_PRINTER_PORT', None)
+            if not port:
+                return Response({'error': "Port imprimante non configuré (POS_PRINTER_PORT)."}, status=501)
+
+        try:
+            from pos.printer_service import MP2258Printer
+        except Exception as e:
+            return Response(
+                {'error': f"Service ESC/POS indisponible: {e}"},
+                status=501,
+            )
+
+        printer = None
+        try:
+            printer = MP2258Printer()
+            printer.print_recu(sortie, entreprise, user)
+            return Response({'status': 'impression lancée'})
+        except ImportError as e:
+            return Response(
+                {'error': f"Dépendance manquante pour ESC/POS: {e}. Installez python-escpos."},
+                status=501,
+            )
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+        finally:
+            try:
+                if printer:
+                    printer.close()
+            except Exception:
+                pass
 
     @action(detail=True, methods=['get'], url_path='bon-pos', permission_classes=[IsAuthenticated])
     def bon_sortie_pos(self, request, pk=None):
@@ -1630,15 +1634,10 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
             })
         
         try:
-            nouvelle_quantite = int(nouvelle_quantite)
-        except (ValueError, TypeError):
+            nouvelle_quantite = _parse_decimal_quantity(nouvelle_quantite)
+        except (InvalidOperation, ValueError, TypeError):
             raise serializers.ValidationError({
-                'quantite': 'La quantité doit être un nombre entier valide.'
-            })
-        
-        if nouvelle_quantite <= 0:
-            raise serializers.ValidationError({
-                'quantite': 'La quantité doit être supérieure à 0.'
+                'quantite': 'La quantité doit être un nombre décimal valide.'
             })
         
         old_quantite = instance.quantite
@@ -2211,7 +2210,10 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             else:
                 article_lookup = None
 
-            qte = Decimal(str(ligne.get('quantite', 0)))
+            try:
+                qte = _parse_decimal_quantity(ligne.get('quantite', 0))
+            except (InvalidOperation, TypeError, ValueError):
+                raise serializers.ValidationError({'quantite': 'La quantité doit être un nombre décimal valide.'})
             prix_unitaire_raw = ligne.get('prix_unitaire', 0)
             try:
                 prix_unitaire = Decimal(str(prix_unitaire_raw))
@@ -2232,7 +2234,10 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     'prix_vente': 'Le prix de vente doit être supérieur à 0.'
                 })
             
-            seuil_alerte = int(ligne.get('seuil_alerte', 0))
+            try:
+                seuil_alerte = Decimal(str(ligne.get('seuil_alerte', 0)).replace(",", "."))
+            except (InvalidOperation, TypeError, ValueError):
+                seuil_alerte = Decimal('0')
             devise_id = ligne.get('devise_id') or ligne.get('devise')
             date_expiration = ligne.get('date_expiration')
 
@@ -2616,9 +2621,10 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             except Article.DoesNotExist:
                 raise serializers.ValidationError(f"Article {article_id} introuvable.")
             
-            qte = int(ligne.get('quantite', 0))
-            if qte <= 0:
-                raise serializers.ValidationError("La quantité doit être supérieure à 0.")
+            try:
+                qte = _parse_decimal_quantity(ligne.get('quantite', 0))
+            except (InvalidOperation, TypeError, ValueError):
+                raise serializers.ValidationError("La quantité doit être un nombre décimal valide.")
             
             prix_unitaire_raw = ligne.get('prix_unitaire', 0)
             try:
@@ -2640,7 +2646,10 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     'prix_vente': 'Le prix de vente doit être supérieur à 0.'
                 })
             
-            seuil_alerte = int(ligne.get('seuil_alerte', 0))
+            try:
+                seuil_alerte = Decimal(str(ligne.get('seuil_alerte', 0)).replace(",", "."))
+            except (InvalidOperation, TypeError, ValueError):
+                seuil_alerte = Decimal('0')
             devise_id = ligne.get('devise_id') or ligne.get('devise')
             devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=entree.entreprise_id) if devise_id else default_dev
             date_expiration = ligne.get('date_expiration')
@@ -4113,15 +4122,17 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         entreprise = user.get_entreprise(request)
 
         POS_WIDTH = 80 * mm
+        lm = rm = tm = bm = 4 * mm
+        content_width = POS_WIDTH - lm - rm
         buffer = io.BytesIO()
         styles = getSampleStyleSheet()
 
         # Polices réduites, design compact (impression POS) — même comportement que facture
         normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=7, leading=8, wordWrap='CJK')
         article_cell_style = ParagraphStyle('ArticleCell', parent=normal, wordWrap='CJK', allowWidows=0, allowOrphans=0)
-        title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=10, leading=11, alignment=TA_LEFT, spaceAfter=1*mm)
+        title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=10, leading=11, alignment=TA_CENTER, spaceAfter=1*mm)
         header_style = ParagraphStyle('Header', fontName='Helvetica-Bold', fontSize=8, leading=9, alignment=TA_LEFT)
-        info_style = ParagraphStyle('Info', fontName='Helvetica', fontSize=6, leading=7, alignment=TA_LEFT)
+        info_style = ParagraphStyle('Info', fontName='Helvetica', fontSize=6, leading=7, alignment=TA_CENTER)
         footer_style = ParagraphStyle('Footer', fontName='Helvetica', fontSize=6, leading=7, alignment=TA_LEFT, textColor=colors.black)
         right_style = ParagraphStyle('Right', fontName='Helvetica', fontSize=7, leading=8, alignment=TA_RIGHT)
 
@@ -4133,7 +4144,7 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         entete = get_entete_entreprise(entreprise)
         entete = {'entreprise': {**entete['entreprise'], 'slogan': ''}}
         pdf_gen = PDFGenerator()
-        elements.extend(pdf_gen._create_entete(entete, compact=True))
+        elements.extend(pdf_gen._create_entete(entete, compact=False, centered=True, logo_size_mm=12))
 
         # Titre au début : REÇU DE PAIEMENT
         elements.append(Paragraph(f"<b>{_('REÇU DE PAIEMENT')}</b>", title_style))
@@ -4182,7 +4193,8 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
                         Paragraph(f"{pu:.2f} {symbole}", normal),
                         Paragraph(f"{total_ligne:.2f} {symbole}", normal),
                     ])
-                prod_table = Table(prod_data, colWidths=[POS_WIDTH*0.25, POS_WIDTH*0.10, POS_WIDTH*0.15, POS_WIDTH*0.50])
+                prod_table = Table(prod_data, colWidths=[content_width*0.25, content_width*0.10, content_width*0.15, content_width*0.50])
+                prod_table.hAlign = 'CENTER'
                 prod_table.setStyle(TableStyle([
                     ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
                     ('FONTSIZE', (0, 0), (-1, -1), 7),
@@ -4207,7 +4219,8 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
             [Paragraph(f"<b>{_('Libellé')}</b>", normal), Paragraph(f"<b>{_('Valeur')}</b>", normal), Paragraph(f"<b>{_('Reste')}</b>", normal)],
             [Paragraph(_("Montant payé (ce reçu)"), normal), Paragraph(f"<b>{paiement.montant:.2f} {symbole}</b>", normal), Paragraph(f"<b>{solde_apres:.2f} {symbole}</b>", normal)],
         ]
-        table_paiement = Table(table_paiement_data, colWidths=[POS_WIDTH*0.25, POS_WIDTH*0.25, POS_WIDTH*0.50])
+        table_paiement = Table(table_paiement_data, colWidths=[content_width*0.25, content_width*0.25, content_width*0.50])
+        table_paiement.hAlign = 'CENTER'
         table_paiement.setStyle(TableStyle([
             ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
             ('FONTSIZE', (0, 0), (-1, -1), 7),
@@ -4245,7 +4258,8 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
                     Paragraph(f"{p.montant:.2f} {symbole}", normal),
                     Paragraph(moyen_h or '-', normal),
                 ])
-            hist_table = Table(hist_data, colWidths=[POS_WIDTH*0.35, POS_WIDTH*0.30, POS_WIDTH*0.35])
+            hist_table = Table(hist_data, colWidths=[content_width*0.35, content_width*0.30, content_width*0.35])
+            hist_table.hAlign = 'CENTER'
             hist_table.setStyle(TableStyle([
                 ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
                 ('FONTSIZE', (0, 0), (-1, -1), 7),
@@ -4260,25 +4274,20 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
             elements.append(hist_table)
             elements.append(Spacer(1, 1*mm))
 
-        # Pied de page (comme facture POS) — poussé en bas par un spacer, avec décorateur
-        lm = rm = tm = bm = 4*mm
-        avail_width = POS_WIDTH - lm - rm
+        # Pied de page compact (sans "push bottom") pour éviter les pages en trop.
+        avail_width = content_width
         imprim_par = (paiement.utilisateur.get_full_name() or paiement.utilisateur.username) if paiement.utilisateur else (user.get_full_name() or user.username)
         footer_parts = [
             Paragraph(_("Merci pour votre confiance. Conservez ce reçu comme justificatif de paiement."), normal),
             Spacer(1, 0.5*mm),
             Paragraph(_("Imprimé par: %(user)s") % {'user': imprim_par}, footer_style),
             Paragraph(_("Le %(date)s") % {'date': timezone.now().strftime('%d/%m/%Y à %H:%M')}, footer_style),
-            Spacer(1, 1*mm),
+            Spacer(1, 0.5*mm),
             Paragraph("—" * 30, footer_style),
         ]
         main_height = sum(flow.wrap(avail_width, 100000)[1] for flow in elements)
         footer_height = sum(flow.wrap(avail_width, 100000)[1] for flow in footer_parts)
-        min_height = POS_WIDTH + 20*mm
-        POS_HEIGHT = max(main_height + footer_height + tm + bm + 3*mm, min_height)
-        spacer_bottom = POS_HEIGHT - tm - bm - main_height - footer_height
-        if spacer_bottom > 0:
-            elements.append(Spacer(1, spacer_bottom))
+        POS_HEIGHT = main_height + footer_height + tm + bm + 1.5*mm
         elements.extend(footer_parts)
 
         doc = SimpleDocTemplate(
