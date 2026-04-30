@@ -1491,24 +1491,11 @@ class RapportsViewSet(viewsets.ViewSet):
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         return response
 
-    @action(detail=True, methods=['get'], url_path='fiche-stock')
-    def fiche_stock_article_pdf(self, request, pk=None):
-        """
-        Fiche de stock pour un article spécifique.
-        
-        Affiche tous les mouvements (entrées et sorties) d'un article avec calcul FIFO.
-        La devise est affichée une seule fois dans l'en-tête.
-        
-        Paramètres optionnels:
-        - date_min: Date de début (format: YYYY-MM-DD)
-        - date_max: Date de fin (format: YYYY-MM-DD)
-        
-        GET /api/rapports/{article_id}/fiche-stock/
-        GET /api/rapports/{article_id}/fiche-stock/?date_min=2025-01-01&date_max=2025-12-31
-        """
+    def _build_fiche_stock_data(self, request, pk=None):
+        """Construit les données (JSON/PDF) de la fiche de stock avec calcul FIFO."""
         user = request.user
         if not user.is_authenticated:
-            return Response({'detail': "Utilisateur non authentifié."}, status=status.HTTP_403_FORBIDDEN)
+            raise PermissionDenied(_("Utilisateur non authentifié."))
         entreprise = user.get_entreprise(request)
         eid, branch_id = self._get_tenant_ids_strict(request)
         article_qs = Article.objects.filter(pk=pk)
@@ -1518,77 +1505,13 @@ class RapportsViewSet(viewsets.ViewSet):
             article_qs = article_qs.filter(succursale_id=branch_id)
         article = article_qs.first()
         if not article:
-            return Response({'detail': "Article non trouvé ou accès refusé."}, status=status.HTTP_404_NOT_FOUND)
-        
-        # Filtres optionnels
+            raise NotFound(_("Article non trouvé ou accès refusé."))
+
         date_min = request.query_params.get('date_min')
         date_max = request.query_params.get('date_max')
 
-        buffer = io.BytesIO()
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=A4,
-            leftMargin=10*mm,
-            rightMargin=10*mm,
-            topMargin=20*mm,
-            bottomMargin=20*mm,
-        )
-
-        styles = getSampleStyleSheet()
-        normal = styles['Normal']
-        normal.wordWrap = 'CJK'
-        title_style = ParagraphStyle(
-            'Title',
-            parent=styles['Heading2'],
-            alignment=1,
-            fontSize=14,
-            spaceAfter=4*mm
-        )
-
-        elements = []
-
-        # En-tête simplifié (nom, logo, slogan, téléphone uniquement)
-        entete = get_entete_entreprise(entreprise)
-        pdf_gen = PDFGenerator()
-        elements.extend(pdf_gen._create_entete(entete))
-
-        # Titre : FICHE DE STOCK + nom de l'article (code en petite police)
-        nom_article = article.nom_scientifique
-        if article.nom_commercial:
-            nom_article += f" ({article.nom_commercial})"
-        title_with_article = (
-            f"<b>{_('FICHE DE STOCK')}</b> — "
-            f"{nom_article} <font size='8'>({article.article_id})</font>"
-        )
-        elements.append(Paragraph(title_with_article, title_style))
-        elements.append(Spacer(1, 2*mm))
-
         stock_row = Stock.objects.filter(article=article).first()
         type_article = getattr(getattr(article, 'sous_type_article', None), 'type_article', None)
-        info_style = ParagraphStyle(
-            'ArticleInfoLine',
-            parent=normal,
-            fontSize=8.5,
-            leading=11,
-            spaceAfter=1,
-        )
-        elements.append(Paragraph(
-            f"<b>{_('Code')}:</b> {article.article_id or ''}   |   "
-            f"<b>{_('Unité')}:</b> {getattr(getattr(article, 'unite', None), 'nom', '—')}",
-            info_style,
-        ))
-        elements.append(Paragraph(
-            f"<b>{_('Type')}:</b> {getattr(type_article, 'libelle', '—')}   |   "
-            f"<b>{_('Sous-type')}:</b> {getattr(getattr(article, 'sous_type_article', None), 'libelle', '—')}",
-            info_style,
-        ))
-        elements.append(Paragraph(
-            f"<b>{_('Stock')}:</b> {_format_report_quantity(getattr(stock_row, 'Qte', 0) or 0)}   |   "
-            f"<b>{_('Seuil')}:</b> {_format_report_quantity(getattr(stock_row, 'seuilAlert', 0) or 0)}   |   "
-            f"<b>{_('Prix vente')}:</b> {Decimal(str(getattr(stock_row, 'prix_vente', 0) or 0)).quantize(Decimal('0.01')):.2f}",
-            info_style,
-        ))
-        elements.append(Spacer(1, 5*mm))
 
         # Récupération des mouvements
         entrees_qs = LigneEntree.objects.filter(article=article)
@@ -1629,38 +1552,17 @@ class RapportsViewSet(viewsets.ViewSet):
         # Tri chronologique (entrées avant sorties pour même datetime)
         mouvements.sort(key=lambda m: (m['datetime'], 0 if m['q_in']>0 else 1))
 
-        # En-têtes du tableau : Date, Désignation, Entrées (Qté, PU, PT), Sorties (Qté, PU, PT), Stock (Qté, PU, PT)
-        header1 = [
-            _("Date"), _("Désignation"),
-            _("Entrées"), "", "",
-            _("Sorties"), "", "",
-            _("Stock"), "", ""
-        ]
-
-        header2 = [
-            "", "",
-            _("Qté"), _("PU"), _("PT"),
-            _("Qté"), _("PU"), _("PT"),
-            _("Qté"), _("PU"), _("PT")
-        ]
-        
-        table_data = [
-            [Paragraph(h, normal) for h in header1],
-            [Paragraph(h, normal) for h in header2]
-        ]
-
         # Calcul FIFO
         fifo_layers = []
-        stock_qty = 0
+        stock_qty = Decimal('0')
         stock_val = Decimal('0')
+        rows = []
 
         for mv in mouvements:
-            date_str = mv['datetime'].strftime('%d/%m/%Y %H:%M') if mv['datetime'] else ""
-            desig = Paragraph(mv['designation'], normal)
-            q_in = mv['q_in']
+            q_in = Decimal(str(mv['q_in'] or 0))
             pu_in = mv['pu_in']
             pt_in = q_in * pu_in
-            q_out = mv['q_out']
+            q_out = Decimal(str(mv['q_out'] or 0))
             pt_out = Decimal('0')
 
             if q_in:
@@ -1684,67 +1586,172 @@ class RapportsViewSet(viewsets.ViewSet):
 
             # PU sortie = coût moyen sorti (PT / Qté)
             pu_out = (pt_out / q_out) if q_out else Decimal('0')
+            stock_pu = (stock_val / stock_qty) if stock_qty else Decimal('0')
+            rows.append(
+                {
+                    'datetime': mv['datetime'].strftime('%Y-%m-%d %H:%M') if mv['datetime'] else '',
+                    'designation': mv['designation'],
+                    'entree': {
+                        'quantite': str(q_in),
+                        'pu': str(pu_in.quantize(Decimal('0.01'))),
+                        'pt': str(pt_in.quantize(Decimal('0.01'))),
+                    } if q_in else None,
+                    'sortie': {
+                        'quantite': str(q_out),
+                        'pu': str(pu_out.quantize(Decimal('0.01'))),
+                        'pt': str(pt_out.quantize(Decimal('0.01'))),
+                    } if q_out else None,
+                    'stock': {
+                        'quantite': str(stock_qty),
+                        'pu': str(stock_pu.quantize(Decimal('0.01'))) if stock_qty else '',
+                        'pt': str(stock_val.quantize(Decimal('0.01'))),
+                    },
+                }
+            )
 
-            # Construction de la ligne (sans devise dans le corps)
+        return {
+            'entete': get_entete_entreprise(entreprise),
+            'titre': _("FICHE DE STOCK"),
+            'article_details': {
+                'article_id': article.article_id,
+                'nom_scientifique': article.nom_scientifique,
+                'nom_commercial': article.nom_commercial,
+                'type_article': getattr(type_article, 'libelle', None),
+                'sous_type_article': getattr(getattr(article, 'sous_type_article', None), 'libelle', None),
+                'unite': getattr(getattr(article, 'unite', None), 'nom', None),
+                'stock_actuel': str(getattr(stock_row, 'Qte', 0) or 0),
+                'seuil_alerte': str(getattr(stock_row, 'seuilAlert', 0) or 0),
+                'prix_vente_reference': str(Decimal(str(getattr(stock_row, 'prix_vente', 0) or 0)).quantize(Decimal('0.01'))),
+            },
+            'filtres': {'date_min': date_min, 'date_max': date_max},
+            'mouvements': rows,
+            'solde_final': {
+                'quantite': str(stock_qty),
+                'valeur': str(stock_val.quantize(Decimal('0.01'))),
+            },
+            'meta_generation': self._build_meta_generation(user),
+        }
+
+    @action(detail=True, methods=['get'], url_path='fiche-stock/json')
+    def fiche_stock_article_json(self, request, pk=None):
+        """Retourne la fiche de stock en JSON (même logique FIFO que le PDF)."""
+        try:
+            return Response(self._build_fiche_stock_data(request, pk=pk))
+        except (PermissionDenied, NotFound) as exc:
+            return Response({'detail': str(exc)}, status=getattr(exc, 'status_code', status.HTTP_400_BAD_REQUEST))
+
+    @action(detail=True, methods=['get'], url_path='fiche-stock')
+    def fiche_stock_article_pdf(self, request, pk=None):
+        """Fiche de stock PDF pour un article spécifique."""
+        try:
+            data = self._build_fiche_stock_data(request, pk=pk)
+        except (PermissionDenied, NotFound) as exc:
+            return Response({'detail': str(exc)}, status=getattr(exc, 'status_code', status.HTTP_400_BAD_REQUEST))
+
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            leftMargin=10 * mm,
+            rightMargin=10 * mm,
+            topMargin=20 * mm,
+            bottomMargin=20 * mm,
+        )
+
+        styles = getSampleStyleSheet()
+        normal = styles['Normal']
+        normal.wordWrap = 'CJK'
+        title_style = ParagraphStyle(
+            'Title',
+            parent=styles['Heading2'],
+            alignment=1,
+            fontSize=14,
+            spaceAfter=4 * mm,
+        )
+
+        elements = []
+        pdf_gen = PDFGenerator()
+        elements.extend(pdf_gen._create_entete(data['entete']))
+
+        a = data.get('article_details') or {}
+        nom_article = a.get('nom_scientifique') or ''
+        if a.get('nom_commercial'):
+            nom_article += f" ({a.get('nom_commercial')})"
+        elements.append(
+            Paragraph(
+                f"<b>{_('FICHE DE STOCK')}</b> — {nom_article} <font size='8'>({a.get('article_id') or ''})</font>",
+                title_style,
+            )
+        )
+        elements.append(Spacer(1, 2 * mm))
+        info_style = ParagraphStyle('ArticleInfoLine', parent=normal, fontSize=8.5, leading=11, spaceAfter=1)
+        elements.append(Paragraph(f"<b>{_('Code')}:</b> {a.get('article_id') or ''}   |   <b>{_('Unité')}:</b> {a.get('unite') or '—'}", info_style))
+        elements.append(Paragraph(f"<b>{_('Type')}:</b> {a.get('type_article') or '—'}   |   <b>{_('Sous-type')}:</b> {a.get('sous_type_article') or '—'}", info_style))
+        elements.append(Paragraph(f"<b>{_('Stock')}:</b> {_format_report_quantity(a.get('stock_actuel') or 0)}   |   <b>{_('Seuil')}:</b> {_format_report_quantity(a.get('seuil_alerte') or 0)}   |   <b>{_('Prix vente')}:</b> {a.get('prix_vente_reference') or '0.00'}", info_style))
+        elements.append(Spacer(1, 5 * mm))
+
+        header1 = [_("Date"), _("Désignation"), _("Entrées"), "", "", _("Sorties"), "", "", _("Stock"), "", ""]
+        header2 = ["", "", _("Qté"), _("PU"), _("PT"), _("Qté"), _("PU"), _("PT"), _("Qté"), _("PU"), _("PT")]
+        table_data = [[Paragraph(h, normal) for h in header1], [Paragraph(h, normal) for h in header2]]
+
+        for mv in data.get('mouvements') or []:
+            entree = mv.get('entree') or {}
+            sortie = mv.get('sortie') or {}
+            stock = mv.get('stock') or {}
             row = [
-                Paragraph(date_str, normal),
-                desig,
-                Paragraph(_format_report_quantity(q_in) if q_in else "", normal),
-                Paragraph(f"{pu_in:.2f}" if q_in else "", normal),
-                Paragraph(f"{pt_in:.2f}" if q_in else "", normal),
-                Paragraph(_format_report_quantity(q_out) if q_out else "", normal),
-                Paragraph(f"{pu_out:.2f}" if q_out else "", normal),
-                Paragraph(f"{pt_out:.2f}" if q_out else "", normal),
-                Paragraph(_format_report_quantity(stock_qty), normal),
-                Paragraph(f"{(stock_val/stock_qty):.2f}" if stock_qty else "", normal),
-                Paragraph(f"{stock_val:.2f}", normal)
+                Paragraph(str(mv.get('datetime') or ''), normal),
+                Paragraph(str(mv.get('designation') or ''), normal),
+                Paragraph(_format_report_quantity(entree.get('quantite')) if entree else "", normal),
+                Paragraph(str(entree.get('pu') or ''), normal),
+                Paragraph(str(entree.get('pt') or ''), normal),
+                Paragraph(_format_report_quantity(sortie.get('quantite')) if sortie else "", normal),
+                Paragraph(str(sortie.get('pu') or ''), normal),
+                Paragraph(str(sortie.get('pt') or ''), normal),
+                Paragraph(_format_report_quantity(stock.get('quantite')), normal),
+                Paragraph(str(stock.get('pu') or ''), normal),
+                Paragraph(str(stock.get('pt') or ''), normal),
             ]
             table_data.append(row)
 
-        # Ligne finale
-        final_row = [
-            "", Paragraph(f"<b>{_('SOLDE FINAL')}</b>", normal),
-            "", "", "",
-            "", "", "",
-            Paragraph(f"<b>{_format_report_quantity(stock_qty)}</b>", normal),
-            Paragraph("", normal),
-            Paragraph(f"<b>{stock_val:.2f}</b>", normal)
-        ]
-        table_data.append(final_row)
-
-        # Création du tableau (11 colonnes)
-        table = Table(
-            table_data,
-            repeatRows=2,
-            hAlign='CENTER'
+        sf = data.get('solde_final') or {}
+        table_data.append(
+            [
+                "",
+                Paragraph(f"<b>{_('SOLDE FINAL')}</b>", normal),
+                "", "", "", "", "", "",
+                Paragraph(f"<b>{_format_report_quantity(sf.get('quantite'))}</b>", normal),
+                Paragraph("", normal),
+                Paragraph(f"<b>{sf.get('valeur') or '0.00'}</b>", normal),
+            ]
         )
+
+        table = Table(table_data, repeatRows=2, hAlign='CENTER')
         table.setStyle(TableStyle([
-            ('SPAN', (2,0), (4,0)),  # Fusionner "Entrées"
-            ('SPAN', (5,0), (7,0)),  # Fusionner "Sorties" (Qté, PU, PT)
-            ('SPAN', (8,0), (10,0)),  # Fusionner "Stock"
-            ('BACKGROUND', (0,0), (-1,1), colors.lightgrey),
-            ('FONTNAME', (0,0), (-1,1), 'Helvetica-Bold'),
-            ('ALIGN', (0,0), (-1,1), 'CENTER'),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-            ('ALIGN', (2,2), (-1,-1), 'RIGHT'),
-            ('ROWBACKGROUNDS', (0,2), (-1,-1), [colors.whitesmoke, None]),
-            ('TOPPADDING', (0,0), (-1,1), 6),
-            ('BOTTOMPADDING', (0,0), (-1,1), 6),
-            ('BACKGROUND', (0, len(table_data)-1), (-1, len(table_data)-1), colors.HexColor('#2c3e50')),
-            ('TEXTCOLOR', (0, len(table_data)-1), (-1, len(table_data)-1), colors.whitesmoke),
-            ('FONTNAME', (0, len(table_data)-1), (-1, len(table_data)-1), 'Helvetica-Bold'),
+            ('SPAN', (2, 0), (4, 0)),
+            ('SPAN', (5, 0), (7, 0)),
+            ('SPAN', (8, 0), (10, 0)),
+            ('BACKGROUND', (0, 0), (-1, 1), colors.lightgrey),
+            ('FONTNAME', (0, 0), (-1, 1), 'Helvetica-Bold'),
+            ('ALIGN', (0, 0), (-1, 1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('ALIGN', (2, 2), (-1, -1), 'RIGHT'),
+            ('ROWBACKGROUNDS', (0, 2), (-1, -1), [colors.whitesmoke, None]),
+            ('TOPPADDING', (0, 0), (-1, 1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, 1), 6),
+            ('BACKGROUND', (0, len(table_data) - 1), (-1, len(table_data) - 1), colors.HexColor('#2c3e50')),
+            ('TEXTCOLOR', (0, len(table_data) - 1), (-1, len(table_data) - 1), colors.whitesmoke),
+            ('FONTNAME', (0, len(table_data) - 1), (-1, len(table_data) - 1), 'Helvetica-Bold'),
         ]))
 
         elements.append(table)
-        elements.append(Spacer(1, 4*mm))
-        data_footer = {'meta_generation': self._build_meta_generation(user)}
-        pdf_gen._build_with_footer(doc, elements, data_footer)
+        elements.append(Spacer(1, 4 * mm))
+        pdf_gen._build_with_footer(doc, elements, {'meta_generation': data.get('meta_generation') or {}})
         buffer.seek(0)
         return HttpResponse(
             buffer,
             content_type='application/pdf',
-            headers={'Content-Disposition': f'inline; filename="FICHE_DE_STOCK_{article.pk}.pdf"'}
+            headers={'Content-Disposition': f'inline; filename="FICHE_DE_STOCK_{a.get("article_id") or pk}.pdf"'},
         )
 
 
