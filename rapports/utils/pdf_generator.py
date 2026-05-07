@@ -5,7 +5,7 @@ Marges: 20mm de chaque côté
 """
 from io import BytesIO
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from django.utils.translation import gettext as _
 from django.utils import timezone
 from reportlab.lib import colors
@@ -106,7 +106,7 @@ class PDFGenerator:
         ))
 
     @staticmethod
-    def _format_quantity(value, max_decimals=3):
+    def _format_quantity(value, max_decimals=5):
         """Affiche une quantité sans zéros inutiles (41.00 -> 41, 41.50 -> 41.5)."""
         if value is None or value == '':
             return ''
@@ -334,9 +334,9 @@ class PDFGenerator:
             except (TypeError, ValueError, ArithmeticError):
                 pass
             if not isinstance(pu, str):
-                pu = f"{Decimal(str(pu)).quantize(Decimal('0.01')):.2f}" if pu is not None else "0.00"
+                pu = f"{Decimal(str(pu)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN):.5f}" if pu is not None else "0.00"
             if not isinstance(pt, str):
-                pt = f"{Decimal(str(pt)).quantize(Decimal('0.01')):.2f}" if pt is not None else "0.00"
+                pt = f"{Decimal(str(pt)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN):.5f}" if pt is not None else "0.00"
             nom_affichage = article['nom_scientifique']
             if article.get('nom_commercial'):
                 nom_affichage += f" ({article['nom_commercial']})"
@@ -354,7 +354,7 @@ class PDFGenerator:
             ])
 
         # Ligne de total général (Prix total = somme de tous les prix total)
-        total_pt_str = f"{total_prix_total.quantize(Decimal('0.01')):.2f}"
+        total_pt_str = f"{total_prix_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN):.5f}"
         table_data.append([
             '',
             _('TOTAL GÉNÉRAL'),
@@ -671,7 +671,7 @@ class PDFGenerator:
             _('TOTAL GÉNÉRAL'),
             '',
             '',
-            f"{total_general.quantize(Decimal('0.01')):.2f}"
+            f"{total_general.quantize(Decimal('0.00001'), rounding=ROUND_DOWN):.5f}"
         ])
         last_row_idx = len(table_data) - 1
         
@@ -831,9 +831,9 @@ class PDFGenerator:
             pua = Decimal(str(row.get('pu_achat') or row.get('prix_achat_unitaire') or '0'))
             puv = Decimal(str(row.get('pu_vente') or row.get('prix_vente_unitaire') or '0'))
             qd = Decimal(str(q or 0))
-            line_total = (qd * puv).quantize(Decimal('0.01'))
+            line_total = (qd * puv).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             total_general += line_total
-            benefice_line = Decimal(str(row.get('benefice') or '0')).quantize(Decimal('0.01'))
+            benefice_line = Decimal(str(row.get('benefice') or '0')).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             ref = str(row.get('reference', ''))[:36]
             date_s = str(row.get('date') or '')[:16]
             client_s = str(row.get('client') or '—')[:28]
@@ -844,11 +844,11 @@ class PDFGenerator:
                     date_s,
                     client_s,
                     str(art)[:40] + ('...' if len(str(art)) > 40 else ''),
-                    f"{pua.quantize(Decimal('0.01')):.2f}",
-                    f"{puv.quantize(Decimal('0.01')):.2f}",
+                    f"{pua.quantize(Decimal('0.00001'), rounding=ROUND_DOWN):.5f}",
+                    f"{puv.quantize(Decimal('0.00001'), rounding=ROUND_DOWN):.5f}",
                     q_s,
-                    f"{line_total:.2f}",
-                    f"{benefice_line:.2f}",
+                    f"{line_total:.5f}",
+                    f"{benefice_line:.5f}",
                     statut_s,
                     ref,
                 ]
@@ -865,8 +865,8 @@ class PDFGenerator:
                 '—',
                 '—',
                 self._format_quantity(tot_q),
-                str(Decimal(str(tot_mv)).quantize(Decimal('0.01'))),
-                str(Decimal(str((data.get('resume_global') or {}).get('total_benefice', '0'))).quantize(Decimal('0.01'))),
+                str(Decimal(str(tot_mv)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                str(Decimal(str((data.get('resume_global') or {}).get('total_benefice', '0'))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
                 '—',
                 '—',
             ]

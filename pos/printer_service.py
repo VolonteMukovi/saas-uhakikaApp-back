@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 import unicodedata
 from collections import OrderedDict
 
@@ -22,7 +22,7 @@ def _article_display_name(article) -> str:
     return str(getattr(article, "article_id", str(article)))
 
 
-def _fmt_qty(v, max_decimals: int = 3) -> str:
+def _fmt_qty(v, max_decimals: int = 5) -> str:
     if v is None or v == "":
         return "0"
     try:
@@ -39,7 +39,7 @@ def _fmt_qty(v, max_decimals: int = 3) -> str:
 
 def _fmt_money(v) -> str:
     try:
-        return f"{Decimal(str(v or 0)).quantize(Decimal('0.01')):.2f}"
+        return f"{Decimal(str(v or 0)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN):.5f}"
     except Exception:
         return str(v or 0)
 
@@ -221,8 +221,8 @@ class MP2258Printer:
             pu_raw = getattr(ligne, "prix_unitaire", 0) or 0
             qte = Decimal(str(qte_raw or 0))
             pu = Decimal(str(pu_raw or 0))
-            tot = (qte * pu).quantize(Decimal("0.01"))
-            total_general = (total_general + tot).quantize(Decimal("0.01"))
+            tot = (qte * pu).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            total_general = (total_general + tot).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             line_devise = getattr(ligne, "devise", None) or devise_sortie
             line_currency = _currency_label(line_devise)
 
@@ -233,10 +233,10 @@ class MP2258Printer:
                 pu_s = f"{pu_s}{line_currency}"
                 tot_s = f"{tot_s}{line_currency}"
                 prev = totals_by_currency.get(line_currency, Decimal("0.00"))
-                totals_by_currency[line_currency] = (prev + tot).quantize(Decimal("0.01"))
+                totals_by_currency[line_currency] = (prev + tot).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             else:
                 prev = totals_by_currency.get("", Decimal("0.00"))
-                totals_by_currency[""] = (prev + tot).quantize(Decimal("0.01"))
+                totals_by_currency[""] = (prev + tot).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
             lines.append(f"{nom:<{w_art}} {qte_s:>{w_qty}} {pu_s:>{w_pu}} {tot_s:>{w_tot}}\n")
 
@@ -333,8 +333,8 @@ class MP2258Printer:
             pu_raw = getattr(ligne, "prix_unitaire", 0) or 0
             qte = Decimal(str(qte_raw or 0))
             pu = Decimal(str(pu_raw or 0))
-            tot = (qte * pu).quantize(Decimal("0.01"))
-            total_general = (total_general + tot).quantize(Decimal("0.01"))
+            tot = (qte * pu).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            total_general = (total_general + tot).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             line_devise = getattr(ligne, "devise", None) or devise_sortie
             line_currency = _currency_label(line_devise)
 
@@ -345,10 +345,10 @@ class MP2258Printer:
                 pu_s = f"{pu_s}{line_currency}"
                 tot_s = f"{tot_s}{line_currency}"
                 prev = totals_by_currency.get(line_currency, Decimal("0.00"))
-                totals_by_currency[line_currency] = (prev + tot).quantize(Decimal("0.01"))
+                totals_by_currency[line_currency] = (prev + tot).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             else:
                 prev = totals_by_currency.get("", Decimal("0.00"))
-                totals_by_currency[""] = (prev + tot).quantize(Decimal("0.01"))
+                totals_by_currency[""] = (prev + tot).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
             line = f"{nom:<{w_art}} {qte_s:>{w_qty}} {pu_s:>{w_pu}} {tot_s:>{w_tot}}\n"
             p.text(_safe_text(line))

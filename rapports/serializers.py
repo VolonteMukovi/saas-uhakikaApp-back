@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from stock.models import Article, Stock, LigneEntree, Entree
 from decimal import Decimal
+from decimal import ROUND_DOWN
 from django.db.models import Sum, F
 from django.utils.translation import gettext as _
 
@@ -18,8 +19,8 @@ class InventaireArticleSerializer(serializers.Serializer):
     type_article = serializers.CharField(source='article.sous_type_article.type_article.libelle')
     sous_type = serializers.CharField(source='article.sous_type_article.libelle')
     unite = serializers.CharField(source='article.unite.libelle')
-    quantite_stock = serializers.DecimalField(source='Qte', max_digits=12, decimal_places=3)
-    seuil_alerte = serializers.DecimalField(source='seuilAlert', max_digits=12, decimal_places=3)
+    quantite_stock = serializers.DecimalField(source='Qte', max_digits=12, decimal_places=5)
+    seuil_alerte = serializers.DecimalField(source='seuilAlert', max_digits=12, decimal_places=5)
     statut = serializers.SerializerMethodField()
     prix_unitaire = serializers.SerializerMethodField()
     prix_total = serializers.SerializerMethodField()
@@ -45,16 +46,16 @@ class InventaireArticleSerializer(serializers.Serializer):
         total_qty = agg.get('total_qty') or 0
         total_val = agg.get('total_val')
         if total_qty and total_val is not None and total_val > 0:
-            return (total_val / total_qty).quantize(Decimal('0.01'))
+            return (total_val / total_qty).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         last = LigneEntree.objects.filter(article=obj.article).order_by('-date_entree').values('prix_unitaire').first()
         if last and last.get('prix_unitaire') is not None:
-            return Decimal(str(last['prix_unitaire'])).quantize(Decimal('0.01'))
+            return Decimal(str(last['prix_unitaire'])).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         return Decimal('0.00')
 
     def get_prix_total(self, obj):
         """Prix total = prix_unitaire × quantite_stock."""
         pu = self.get_prix_unitaire(obj)
-        return (pu * Decimal(str(obj.Qte))).quantize(Decimal('0.01'))
+        return (pu * Decimal(str(obj.Qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
 
 class BonEntreeArticleSerializer(serializers.Serializer):
@@ -67,8 +68,8 @@ class BonEntreeArticleSerializer(serializers.Serializer):
     quantite = serializers.CharField(default='', read_only=True)  # À remplir manuellement
     prix_total = serializers.CharField(default='', read_only=True)  # À remplir manuellement
     article_id = serializers.CharField(source='article.article_id')
-    stock_actuel = serializers.DecimalField(source='Qte', max_digits=12, decimal_places=3)
-    seuil_alerte = serializers.DecimalField(source='seuilAlert', max_digits=12, decimal_places=3)
+    stock_actuel = serializers.DecimalField(source='Qte', max_digits=12, decimal_places=5)
+    seuil_alerte = serializers.DecimalField(source='seuilAlert', max_digits=12, decimal_places=5)
     statut_stock = serializers.SerializerMethodField()
     dernier_prix = serializers.SerializerMethodField()
 
@@ -82,7 +83,7 @@ class BonEntreeArticleSerializer(serializers.Serializer):
             .first()
         )
         if last_line is not None and last_line.prix_unitaire is not None:
-            return f"{last_line.prix_unitaire:.2f}"
+            return str(Decimal(str(last_line.prix_unitaire)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
         return ''
     
     def get_designation(self, obj):
@@ -114,8 +115,8 @@ class BonAchatSerializer(serializers.Serializer):
     article_id = serializers.CharField(source='article.article_id')
     designation = serializers.SerializerMethodField()
     unite = serializers.CharField(source='article.unite.libelle')
-    quantite = serializers.DecimalField(max_digits=12, decimal_places=3)
-    prix_unitaire = serializers.DecimalField(max_digits=10, decimal_places=2)
+    quantite = serializers.DecimalField(max_digits=12, decimal_places=5)
+    prix_unitaire = serializers.DecimalField(max_digits=10, decimal_places=5)
     prix_total = serializers.SerializerMethodField()
     devise_sigle = serializers.SerializerMethodField()
     date_expiration = serializers.DateField(allow_null=True)
@@ -129,7 +130,7 @@ class BonAchatSerializer(serializers.Serializer):
     
     def get_prix_total(self, obj):
         """Calcule le prix total de la ligne"""
-        return (Decimal(str(obj.quantite)) * obj.prix_unitaire).quantize(Decimal('0.01'))
+        return (Decimal(str(obj.quantite)) * obj.prix_unitaire).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
     
     def get_devise_sigle(self, obj):
         """
@@ -151,4 +152,4 @@ class RecapitulatifAchatSerializer(serializers.Serializer):
     devise_sigle = serializers.CharField()
     devise_symbole = serializers.CharField()
     nombre_lignes = serializers.IntegerField()
-    total_montant = serializers.DecimalField(max_digits=14, decimal_places=2)
+    total_montant = serializers.DecimalField(max_digits=14, decimal_places=5)

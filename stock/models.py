@@ -164,17 +164,17 @@ class Entree(models.Model):
 
 class LigneEntree(models.Model):  
     article = models.ForeignKey(Article, on_delete=models.CASCADE)
-    quantite = models.DecimalField(max_digits=12, decimal_places=3)
-    quantite_restante = models.DecimalField(max_digits=12, decimal_places=3,default=0, help_text="Quantité encore disponible dans ce lot (FIFO)")
-    prix_unitaire = models.DecimalField(max_digits=10, decimal_places=2, help_text="Prix d'achat unitaire")
-    prix_vente = models.DecimalField(max_digits=10, decimal_places=2, help_text="Prix de vente unitaire défini à l'entrée")
+    quantite = models.DecimalField(max_digits=12, decimal_places=5)
+    quantite_restante = models.DecimalField(max_digits=12, decimal_places=5,default=0, help_text="Quantité encore disponible dans ce lot (FIFO)")
+    prix_unitaire = models.DecimalField(max_digits=10, decimal_places=5, help_text="Prix d'achat unitaire")
+    prix_vente = models.DecimalField(max_digits=10, decimal_places=5, help_text="Prix de vente unitaire défini à l'entrée")
     date_expiration = models.DateField(null=True, blank=True, help_text="Date d'expiration du produit (optionnelle)")
     date_entree = models.DateTimeField(auto_now_add=True)
     entree = models.ForeignKey(Entree, related_name='lignes', on_delete=models.CASCADE)
     # Devise de la ligne (nullable)
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='ligneentrees', null=True, blank=True)
     # Seuil d'alerte obligatoire pour chaque ligne d'entrée
-    seuil_alerte = models.DecimalField(max_digits=12, decimal_places=3, help_text="Seuil d'alerte pour cet article",default=0)
+    seuil_alerte = models.DecimalField(max_digits=12, decimal_places=5, help_text="Seuil d'alerte pour cet article",default=0)
 
     class Meta:
         ordering = ['date_entree', 'id']  # FIFO : plus ancien en premier
@@ -195,8 +195,8 @@ class LigneEntree(models.Model):
 
 class Stock(models.Model):
     article = models.OneToOneField(Article, on_delete=models.CASCADE)
-    Qte = models.DecimalField(max_digits=12, decimal_places=3, default=0)
-    seuilAlert = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    Qte = models.DecimalField(max_digits=12, decimal_places=5, default=0)
+    seuilAlert = models.DecimalField(max_digits=12, decimal_places=5, default=0)
 
 
     def __str__(self):
@@ -329,7 +329,7 @@ class DetteClientQuerySet(models.QuerySet):
         )
         return self.annotate(
             montant_paye_agg=Coalesce(
-                Subquery(paye_sq, output_field=DecimalField(max_digits=14, decimal_places=2)),
+                Subquery(paye_sq, output_field=DecimalField(max_digits=14, decimal_places=5)),
                 Value(Decimal('0.00')),
             ),
             solde_restant_agg=F('montant_total') - F('montant_paye_agg'),
@@ -339,7 +339,7 @@ class DetteClientQuerySet(models.QuerySet):
 class DetteClient(models.Model):
     client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='dettes')
     sortie = models.OneToOneField('Sortie', on_delete=models.CASCADE, related_name='dette')
-    montant_total = models.DecimalField(max_digits=12, decimal_places=2)
+    montant_total = models.DecimalField(max_digits=12, decimal_places=5)
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='dettes', null=True, blank=True)
     date_creation = models.DateTimeField(auto_now_add=True)
     date_echeance = models.DateField(blank=True, null=True, help_text="Date limite de paiement")
@@ -421,7 +421,7 @@ class TypeCaisse(models.Model):
 class MouvementCaisse(models.Model):
     TYPE_CHOICES = [('ENTREE', 'Entrée'), ('SORTIE', 'Sortie')]
     date = models.DateTimeField(auto_now_add=True)
-    montant = models.DecimalField(max_digits=12, decimal_places=2)
+    montant = models.DecimalField(max_digits=12, decimal_places=5)
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
     type = models.CharField(max_length=10, choices=TYPE_CHOICES)
     motif = models.TextField(blank=True, default='', help_text='Libellé / motif du mouvement.')
@@ -470,7 +470,7 @@ class DetailMouvementCaisse(models.Model):
 
     mouvement = models.ForeignKey(MouvementCaisse, on_delete=models.CASCADE, related_name='details')
     type_caisse = models.ForeignKey(TypeCaisse, on_delete=models.SET_NULL, null=True, blank=True, related_name='details_mouvements')
-    montant = models.DecimalField(max_digits=12, decimal_places=2)
+    montant = models.DecimalField(max_digits=12, decimal_places=5)
     motif_explicite = models.TextField(blank=True, default='', help_text="Si pas de type_caisse, motif obligatoire ou généré automatiquement.")
     reference_piece = models.CharField(max_length=100, blank=True, default='')
 
@@ -489,8 +489,8 @@ class LigneSortie(models.Model):
     
     sortie = models.ForeignKey(Sortie, related_name='lignes', on_delete=models.CASCADE)
     article = models.ForeignKey(Article, related_name='sorties', on_delete=models.CASCADE)
-    quantite = models.DecimalField(max_digits=12, decimal_places=3)
-    prix_unitaire = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Prix réellement encaissé (peut différer du prix de vente du lot en cas de promotion/réduction)")
+    quantite = models.DecimalField(max_digits=12, decimal_places=5)
+    prix_unitaire = models.DecimalField(max_digits=10, decimal_places=5, default=0, help_text="Prix réellement encaissé (peut différer du prix de vente du lot en cas de promotion/réduction)")
     date_sortie = models.DateTimeField(auto_now_add=True)
     # Devise de la ligne de sortie (nullable)
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='lignesorties', null=True, blank=True)
@@ -520,9 +520,9 @@ class LigneSortieLot(models.Model):
     """
     ligne_sortie = models.ForeignKey(LigneSortie, on_delete=models.CASCADE, related_name='lots_utilises')
     lot_entree = models.ForeignKey(LigneEntree, on_delete=models.CASCADE, related_name='sorties_utilisees')
-    quantite = models.DecimalField(max_digits=12, decimal_places=3, help_text="Quantité prélevée de ce lot")
-    prix_achat = models.DecimalField(max_digits=10, decimal_places=2, help_text="Prix d'achat du lot (copié)")
-    prix_vente = models.DecimalField(max_digits=10, decimal_places=2, help_text="Prix de vente du lot (copié)")
+    quantite = models.DecimalField(max_digits=12, decimal_places=5, help_text="Quantité prélevée de ce lot")
+    prix_achat = models.DecimalField(max_digits=10, decimal_places=5, help_text="Prix d'achat du lot (copié)")
+    prix_vente = models.DecimalField(max_digits=10, decimal_places=5, help_text="Prix de vente du lot (copié)")
     
     class Meta:
         verbose_name = "Lot utilisé dans sortie"
@@ -551,11 +551,11 @@ class BeneficeLot(models.Model):
     """
     lot_entree = models.ForeignKey(LigneEntree, on_delete=models.CASCADE, related_name='benefices')
     ligne_sortie = models.ForeignKey(LigneSortie, on_delete=models.CASCADE, related_name='benefices_lots', null=True, blank=True)
-    quantite_vendue = models.DecimalField(max_digits=12, decimal_places=3)
-    prix_achat = models.DecimalField(max_digits=10, decimal_places=2)
-    prix_vente = models.DecimalField(max_digits=10, decimal_places=2)
-    benefice_unitaire = models.DecimalField(max_digits=10, decimal_places=2, help_text="Prix vente - Prix achat")
-    benefice_total = models.DecimalField(max_digits=12, decimal_places=2, help_text="Bénéfice total pour cette quantité")
+    quantite_vendue = models.DecimalField(max_digits=12, decimal_places=5)
+    prix_achat = models.DecimalField(max_digits=10, decimal_places=5)
+    prix_vente = models.DecimalField(max_digits=10, decimal_places=5)
+    benefice_unitaire = models.DecimalField(max_digits=10, decimal_places=5, help_text="Prix vente - Prix achat")
+    benefice_total = models.DecimalField(max_digits=12, decimal_places=5, help_text="Bénéfice total pour cette quantité")
     date_calcul = models.DateTimeField(auto_now_add=True)
     
     class Meta:

@@ -64,7 +64,7 @@ from reportlab.graphics.barcode import code128
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import qrcode
 from datetime import datetime
 from rest_framework.decorators import action, api_view, permission_classes
@@ -142,7 +142,7 @@ class TenantFilterMixin:
 
 
 def _format_amount(amount: Decimal, devise_obj, entreprise=None):
-    """Return amount formatted with 2 decimals and the currency symbol.
+    """Return amount formatted with 5 decimals and the currency symbol.
     devise_obj may be None; fallback to principal devise.
     """
     try:
@@ -154,7 +154,8 @@ def _format_amount(amount: Decimal, devise_obj, entreprise=None):
     except Exception:
         sym = ''
     try:
-        return f"{Decimal(amount):.2f} {sym}" if sym else f"{Decimal(amount):.2f}"
+        amt = Decimal(str(amount)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        return f"{amt:.5f} {sym}" if sym else f"{amt:.5f}"
     except Exception:
         return str(amount)
 
@@ -201,7 +202,7 @@ def _convert_amount(amount: Decimal, source_dev: Devise, target_dev: Devise, ent
     if rate is None:
         return None
     try:
-        return (Decimal(amount) * rate).quantize(Decimal('0.01'))
+        return (Decimal(amount) * rate).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
     except Exception:
         return None
 
@@ -312,7 +313,10 @@ class RapportViewSet(viewsets.ViewSet):
                 dev = lig.devise or principal
                 sigle = dev.sigle if dev else 'N/A'
                 total_par_devise[sigle] = total_par_devise.get(sigle, Decimal('0')) + lig.quantite * lig.prix_unitaire
-            montant_str = ', '.join(f"{v:.2f} {s}" for s, v in total_par_devise.items()) if total_par_devise else '-'
+            montant_str = ', '.join(
+                f"{Decimal(str(v)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN):.5f} {s}"
+                for s, v in total_par_devise.items()
+            ) if total_par_devise else '-'
             events.append({
                 'date': e.date_op,
                 'type': 'APPROVISIONNEMENT',
@@ -328,7 +332,10 @@ class RapportViewSet(viewsets.ViewSet):
                 dev = lig.devise or principal
                 sigle = dev.sigle if dev else 'N/A'
                 total_par_devise[sigle] = total_par_devise.get(sigle, Decimal('0')) + lig.quantite * lig.prix_unitaire
-            montant_str = ', '.join(f"{v:.2f} {s}" for s, v in total_par_devise.items()) if total_par_devise else '-'
+            montant_str = ', '.join(
+                f"{Decimal(str(v)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN):.5f} {s}"
+                for s, v in total_par_devise.items()
+            ) if total_par_devise else '-'
             client_nom = (s.client.nom if s.client else 'Anonyme')[:40]
             events.append({
                 'date': s.date_creation,
@@ -723,7 +730,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 
                 # Utiliser le prix réellement encaissé si fourni, sinon utiliser le prix moyen des lots
                 prix_unitaire_final = prix_unitaire_encaisse if prix_unitaire_encaisse is not None else prix_vente_moyen_lots
-                prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.01'))
+                prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 
                 # Créer la ligne de sortie avec le prix réellement encaissé
                 ligne_sortie = LigneSortie.objects.create(
@@ -761,8 +768,8 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         quantite_vendue=qte_lot,
                         prix_achat=prix_achat,
                         prix_vente=prix_unitaire_final,  # Prix réellement encaissé (pour calcul bénéfice)
-                        benefice_unitaire=benefice_unitaire.quantize(Decimal('0.01')),
-                        benefice_total=benefice_total.quantize(Decimal('0.01'))
+                        benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                        benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                     )
                 
                 # Calcul du montant pour cette ligne (prix réellement encaissé)
@@ -796,7 +803,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 
                 if total_devise > 0:
                     creer_mouvement_caisse(
-                        montant=montant_caisse.quantize(Decimal('0.01')),
+                        montant=montant_caisse.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                         devise=devise_obj or default_dev,
                         type_mouvement='ENTREE',
                         entreprise_id=sortie.entreprise_id,
@@ -959,7 +966,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 'unite': produit['article__unite__libelle'] or 'N/A',
                 'quantite_vendue': produit['quantite_totale'],
                 'nombre_ventes': produit['nombre_ventes'],
-                'chiffre_affaires': str(Decimal(str(produit['chiffre_affaires'] or 0)).quantize(Decimal('0.01')))
+                'chiffre_affaires': str(Decimal(str(produit['chiffre_affaires'] or 0)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
             })
             rang += 1
         
@@ -973,7 +980,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             'statistiques': {
                 'nombre_produits': len(resultats),
                 'total_quantite_vendue': total_quantite,
-                'total_chiffre_affaires': str(total_ca.quantize(Decimal('0.01'))),
+                'total_chiffre_affaires': str(total_ca.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
                 'date_calcul': timezone.now().isoformat()
             },
             'produits': resultats
@@ -1050,7 +1057,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     
                     # Créer le mouvement de caisse inverse (SORTIE)
                     creer_mouvement_caisse(
-                        montant=total_devise.quantize(Decimal('0.01')),
+                        montant=total_devise.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                         devise=devise_obj or default_dev,
                         type_mouvement='SORTIE',
                         entreprise_id=sortie.entreprise_id,
@@ -1069,7 +1076,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         for l in sortie.lignes.all():
             pu = l.prix_unitaire or Decimal('0')
             total += pu * Decimal(str(l.quantite))
-        return total.quantize(Decimal('0.01'))
+        return total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     def _solde_caisse_par_devise(self, entreprise, devise, succursale_id=None):
         """Calcule le solde de caisse (tenant + devise) pour une devise spécifique."""
@@ -1080,7 +1087,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             qs = qs.filter(succursale_id=succursale_id)
         entrees = qs.filter(type='ENTREE').aggregate(total=Sum('montant'))['total'] or Decimal('0')
         sorties = qs.filter(type='SORTIE').aggregate(total=Sum('montant'))['total'] or Decimal('0')
-        return (entrees - sorties).quantize(Decimal('0.01'))
+        return (entrees - sorties).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     def update(self, request, *args, **kwargs):
         return self._update_common(request, *args, **kwargs, partial=False)
@@ -1244,7 +1251,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 
                 # Utiliser le prix réellement encaissé si fourni, sinon utiliser le prix moyen des lots
                 prix_unitaire_final = prix_unitaire_encaisse if prix_unitaire_encaisse is not None else prix_vente_moyen_lots
-                prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.01'))
+                prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 
                 # Créer la ligne de sortie avec le prix réellement encaissé
                 ligne_sortie = LigneSortie.objects.create(
@@ -1281,8 +1288,8 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         quantite_vendue=qte_lot,
                         prix_achat=prix_achat,
                         prix_vente=prix_unitaire_final,  # Prix réellement encaissé (pour calcul bénéfice)
-                        benefice_unitaire=benefice_unitaire.quantize(Decimal('0.01')),
-                        benefice_total=benefice_total.quantize(Decimal('0.01'))
+                        benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                        benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                     )
                 
                 # Calcul du montant pour cette ligne (prix réellement encaissé)
@@ -1307,7 +1314,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             
             # Ajustement caisse si nécessaire
             new_total = self._total_sortie(instance)
-            diff = (new_total - old_total).quantize(Decimal('0.01'))
+            diff = (new_total - old_total).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             if diff != 0:
                 mouvement_type = 'ENTREE' if diff > 0 else 'SORTIE'
                 montant_abs = abs(diff)
@@ -1525,7 +1532,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         for l in lignes:
             pu = l.prix_unitaire or Decimal('0')
             q = l.quantite or 0
-            tot = (pu * Decimal(str(q))).quantize(Decimal('0.01'))
+            tot = (pu * Decimal(str(q))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             total_general += tot
             # prefer line-level devise, then sortie.devise
             line_dev = getattr(l, 'devise', None) or getattr(sortie, 'devise', None)
@@ -1672,8 +1679,8 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
                     quantite_vendue=quantite_a_prelever,
                     prix_achat=lot.prix_unitaire,
                     prix_vente=lot.prix_vente,
-                    benefice_unitaire=benefice_unitaire.quantize(Decimal('0.01')),
-                    benefice_total=benefice_total.quantize(Decimal('0.01'))
+                    benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                    benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 )
                 
                 lot.quantite_restante -= quantite_a_prelever
@@ -1690,7 +1697,7 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
             
             # Mettre à jour la ligne
             instance.quantite = nouvelle_quantite
-            instance.prix_unitaire = prix_vente_moyen.quantize(Decimal('0.01'))
+            instance.prix_unitaire = prix_vente_moyen.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             if 'devise_id' in request.data:
                 devise_id = request.data.get('devise_id')
                 if devise_id:
@@ -2232,7 +2239,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=tenant_id) if devise_id else default_dev
             devise_sigle = devise_obj.sigle if devise_obj else 'N/A'
             
-            montant_ligne = (q * pu).quantize(Decimal('0.01'))
+            montant_ligne = (q * pu).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             
             if devise_sigle not in totaux_par_devise:
                 totaux_par_devise[devise_sigle] = {
@@ -2540,7 +2547,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 'nombre_lots_gagnants': nombre_lots_gagnants,
                 'nombre_lots_perdants': nombre_lots_perdants,
                 'nombre_lots_total': nombre_lots_total,
-                'taux_reussite': f"{(nombre_lots_gagnants / nombre_lots_total * 100):.2f}%" if nombre_lots_total > 0 else "0%"
+                'taux_reussite': f"{(nombre_lots_gagnants / nombre_lots_total * 100):.5f}%" if nombre_lots_total > 0 else "0%"
             },
             'performance': {
                 'statut': performance,
@@ -2637,10 +2644,10 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     'date_expiration': date_expiration
                 }
         
-        new_total = new_total.quantize(Decimal('0.01'))
+        new_total = new_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         
         # Si augmentation de dépense: vérifier solde
-        diff = (new_total - old_total).quantize(Decimal('0.01'))
+        diff = (new_total - old_total).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         if diff > 0:
             solde = self._solde_caisse(entree.entreprise_id, entree.succursale_id)
             if diff >= solde:
@@ -2765,7 +2772,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         for l in entree.lignes.all():
             pu = l.prix_unitaire or Decimal('0')
             total += pu * Decimal(str(l.quantite))
-        return total.quantize(Decimal('0.01'))
+        return total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     def _solde_caisse(self, tenant_id=None, succursale_id=None):
         """Calcule le solde global de caisse (tenant + éventuellement succursale)."""
@@ -2799,7 +2806,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
 
         entrees = qs.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
         sorties = qs.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        return (entrees - sorties).quantize(Decimal('0.01'))
+        return (entrees - sorties).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     @action(detail=True, methods=['get'], url_path='bon-pos')
     def bon_entree_pos(self, request, pk=None):
@@ -2971,24 +2978,24 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         # Calcul des pourcentages et formatage final
         for sigle, devise_stats in stats_by_devise.items():
             # Formatage des montants
-            devise_stats['total_entrees'] = devise_stats['total_entrees'].quantize(Decimal('0.01'))
-            devise_stats['total_sorties'] = devise_stats['total_sorties'].quantize(Decimal('0.01'))
-            devise_stats['solde'] = devise_stats['solde'].quantize(Decimal('0.01'))
+            devise_stats['total_entrees'] = devise_stats['total_entrees'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            devise_stats['total_sorties'] = devise_stats['total_sorties'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            devise_stats['solde'] = devise_stats['solde'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             
             # Calcul des pourcentages
             if total_global_entrees > 0:
                 devise_stats['pourcentage_entrees'] = (
                     (devise_stats['total_entrees'] / total_global_entrees) * 100
-                ).quantize(Decimal('0.01'))
+                ).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             
             if total_global_sorties > 0:
                 devise_stats['pourcentage_sorties'] = (
                     (devise_stats['total_sorties'] / total_global_sorties) * 100
-                ).quantize(Decimal('0.01'))
+                ).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             
             # Ratios et indicateurs
             devise_stats['ratio_entree_sortie'] = (
-                (devise_stats['total_entrees'] / devise_stats['total_sorties']).quantize(Decimal('0.01'))
+                (devise_stats['total_entrees'] / devise_stats['total_sorties']).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 if devise_stats['total_sorties'] > 0 else Decimal('0.00')
             )
             
@@ -3014,9 +3021,9 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             'total_mouvements': qs.count(),
             'devise_principale': principal_devise.sigle if principal_devise else None,
             'repartition_par_type': {
-                'total_entrees': total_global_entrees.quantize(Decimal('0.01')),
-                'total_sorties': total_global_sorties.quantize(Decimal('0.01')),
-                'solde_global_theorique': (total_global_entrees - total_global_sorties).quantize(Decimal('0.01'))
+                'total_entrees': total_global_entrees.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                'total_sorties': total_global_sorties.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                'solde_global_theorique': (total_global_entrees - total_global_sorties).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             }
         }
         
@@ -3071,9 +3078,9 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         
         # Formatage final
         for devise_info in soldes_par_devise.values():
-            devise_info['solde'] = devise_info['solde'].quantize(Decimal('0.01'))
-            devise_info['total_entrees'] = devise_info['total_entrees'].quantize(Decimal('0.01'))
-            devise_info['total_sorties'] = devise_info['total_sorties'].quantize(Decimal('0.01'))
+            devise_info['solde'] = devise_info['solde'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            devise_info['total_entrees'] = devise_info['total_entrees'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            devise_info['total_sorties'] = devise_info['total_sorties'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         
         # Conversion de dict vers liste triée (devise principale en premier)
         soldes_list = list(soldes_par_devise.values())
@@ -3190,9 +3197,9 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         # Post-traitement pour chaque devise
         for sigle, data in devises_data.items():
             # Formatage des montants
-            data['solde_actuel'] = data['solde_actuel'].quantize(Decimal('0.01'))
-            data['total_entrees'] = data['total_entrees'].quantize(Decimal('0.01'))
-            data['total_sorties'] = data['total_sorties'].quantize(Decimal('0.01'))
+            data['solde_actuel'] = data['solde_actuel'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            data['total_entrees'] = data['total_entrees'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            data['total_sorties'] = data['total_sorties'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             
             # Tri des mouvements récents par date (plus récents en premier)
             data['mouvements_recents'].sort(key=lambda x: x['date'], reverse=True)
@@ -3281,7 +3288,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         # Formatage et tri
         soldes_list = []
         for devise_data in soldes_finaux.values():
-            devise_data['solde'] = devise_data['solde'].quantize(Decimal('0.01'))
+            devise_data['solde'] = devise_data['solde'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             devise_data['statut'] = 'positif' if devise_data['solde'] >= 0 else 'negatif'
             soldes_list.append(devise_data)
         
@@ -3324,7 +3331,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                 'id': mv.id,
                 'date': mv.date,
                 'type': mv.type,
-                'montant': mv.montant.quantize(Decimal('0.01')),
+                'montant': mv.montant.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                 'motif': mv.motif_affiche(),
                 'moyen': '',
                 'reference_piece': mv.reference_piece,
@@ -3390,10 +3397,10 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                     'est_principale': stat['devise__est_principal'] or False
                 },
                 'totaux': {
-                    'entrees': total_entrees.quantize(Decimal('0.01')),
-                    'sorties': total_sorties.quantize(Decimal('0.01')),
-                    'solde': (total_entrees - total_sorties).quantize(Decimal('0.01')),
-                    'volume_total': volume_total.quantize(Decimal('0.01'))
+                    'entrees': total_entrees.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                    'sorties': total_sorties.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                    'solde': (total_entrees - total_sorties).quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                    'volume_total': volume_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 },
                 'compteurs': {
                     'nb_entrees': stat['nb_entrees'] or 0,
@@ -3401,8 +3408,8 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                     'nb_total': (stat['nb_entrees'] or 0) + (stat['nb_sorties'] or 0)
                 },
                 'moyennes': {
-                    'montant_moyen_entree': (stat['montant_moyen_entree'] or Decimal('0.00')).quantize(Decimal('0.01')),
-                    'montant_moyen_sortie': (stat['montant_moyen_sortie'] or Decimal('0.00')).quantize(Decimal('0.01'))
+                    'montant_moyen_entree': (stat['montant_moyen_entree'] or Decimal('0.00')).quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                    'montant_moyen_sortie': (stat['montant_moyen_sortie'] or Decimal('0.00')).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 }
             }
             
@@ -3414,7 +3421,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             if total_volume_global > 0:
                 devise_info['pourcentage_volume'] = (
                     (volume / total_volume_global) * 100
-                ).quantize(Decimal('0.01'))
+                ).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             else:
                 devise_info['pourcentage_volume'] = Decimal('0.00')
         
@@ -3427,7 +3434,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             'devises': devises_comparaison,
             'resume_global': {
                 'nb_devises': len(devises_comparaison),
-                'volume_global': total_volume_global.quantize(Decimal('0.01')),
+                'volume_global': total_volume_global.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                 'devise_dominante': devises_comparaison[0]['devise']['sigle'] if devises_comparaison else None
             },
             'timestamp': timezone.now()
@@ -3505,17 +3512,17 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             for l in lignes:
                 pu = l.prix_unitaire or Decimal('0')
                 q = l.quantite or 0
-                tot = (pu * Decimal(str(q))).quantize(Decimal('0.01'))
+                tot = (pu * Decimal(str(q))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 total_general += tot
                 data.append([
                     Paragraph(_article_display_name(l.article)[:28], normal),
                     Paragraph(str(q), normal),
-                    Paragraph(f"{pu:.2f}", normal),
-                    Paragraph(f"{tot:.2f}", normal)
+                    Paragraph(f"{pu:.5f}", normal),
+                    Paragraph(f"{tot:.5f}", normal)
                 ])
             data.append([
                 Paragraph("<b>TOTAL</b>", header_style), '', '',
-                Paragraph(f"<b>{total_general:.2f} {devise_obj.symbole if devise_obj else ''}</b>", header_style)
+                Paragraph(f"<b>{total_general:.5f} {devise_obj.symbole if devise_obj else ''}</b>", header_style)
             ])
             table = Table(data, colWidths=col_w)
             table.setStyle(TableStyle([
@@ -3553,17 +3560,17 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             for l in lignes:
                 pu = l.prix_unitaire or Decimal('0')
                 q = l.quantite or 0
-                tot = (pu * Decimal(str(q))).quantize(Decimal('0.01'))
+                tot = (pu * Decimal(str(q))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 total_general += tot
                 data.append([
                     Paragraph(_article_display_name(l.article)[:28], normal),
                     Paragraph(str(q), normal),
-                    Paragraph(f"{pu:.2f}", normal),
-                    Paragraph(f"{tot:.2f}", normal)
+                    Paragraph(f"{pu:.5f}", normal),
+                    Paragraph(f"{tot:.5f}", normal)
                 ])
             data.append([
                 Paragraph("<b>TOTAL</b>", header_style), '', '',
-                Paragraph(f"<b>{total_general:.2f} {devise_obj.symbole if devise_obj else ''}</b>", header_style)
+                Paragraph(f"<b>{total_general:.5f} {devise_obj.symbole if devise_obj else ''}</b>", header_style)
             ])
             table = Table(data, colWidths=col_w)
             table.setStyle(TableStyle([
@@ -4175,7 +4182,7 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         # Montant dette (une ligne, sans détail)
         montant_total_dette = dette.montant_total
         solde_apres = dette.solde_restant
-        elements.append(Paragraph(f"<b>{_('Montant dette')}</b>: {montant_total_dette:.2f} {symbole}", normal))
+        elements.append(Paragraph(f"<b>{_('Montant dette')}</b>: {montant_total_dette:.5f} {symbole}", normal))
         elements.append(Spacer(1, 1*mm))
 
         # Produits concernés par la dette — même répartition que facture (Article 25 %, Qté 10 %, P.U. 10 %, Total 55 %)
@@ -4192,12 +4199,12 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
                     nom_article = _article_display_name(article)
                     qte = ligne.quantite or 0
                     pu = Decimal(str(ligne.prix_unitaire or 0))
-                    total_ligne = (Decimal(str(qte)) * pu).quantize(Decimal('0.01'))
+                    total_ligne = (Decimal(str(qte)) * pu).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                     prod_data.append([
                         Paragraph(nom_article, article_cell_style),
                         Paragraph(str(qte), normal),
-                        Paragraph(f"{pu:.2f} {symbole}", normal),
-                        Paragraph(f"{total_ligne:.2f} {symbole}", normal),
+                        Paragraph(f"{pu:.5f} {symbole}", normal),
+                        Paragraph(f"{total_ligne:.5f} {symbole}", normal),
                     ])
                 prod_table = Table(prod_data, colWidths=[content_width*0.25, content_width*0.10, content_width*0.15, content_width*0.50])
                 prod_table.hAlign = 'CENTER'
@@ -4223,7 +4230,7 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         elements.append(Paragraph(f"<b>{_('Détail du paiement')}</b>", header_style))
         table_paiement_data = [
             [Paragraph(f"<b>{_('Libellé')}</b>", normal), Paragraph(f"<b>{_('Valeur')}</b>", normal), Paragraph(f"<b>{_('Reste')}</b>", normal)],
-            [Paragraph(_("Montant payé (ce reçu)"), normal), Paragraph(f"<b>{paiement.montant:.2f} {symbole}</b>", normal), Paragraph(f"<b>{solde_apres:.2f} {symbole}</b>", normal)],
+            [Paragraph(_("Montant payé (ce reçu)"), normal), Paragraph(f"<b>{paiement.montant:.5f} {symbole}</b>", normal), Paragraph(f"<b>{solde_apres:.5f} {symbole}</b>", normal)],
         ]
         table_paiement = Table(table_paiement_data, colWidths=[content_width*0.25, content_width*0.25, content_width*0.50])
         table_paiement.hAlign = 'CENTER'
@@ -4261,7 +4268,7 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
                 moyen_h = mouvement_moyen_affiche(p) or '-'
                 hist_data.append([
                     Paragraph(p.date.strftime('%d/%m/%Y %H:%M'), normal),
-                    Paragraph(f"{p.montant:.2f} {symbole}", normal),
+                    Paragraph(f"{p.montant:.5f} {symbole}", normal),
                     Paragraph(moyen_h or '-', normal),
                 ])
             hist_table = Table(hist_data, colWidths=[content_width*0.35, content_width*0.30, content_width*0.35])

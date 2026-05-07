@@ -11,7 +11,7 @@ from django.utils import translation
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from datetime import datetime, date
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 import io
 import math
 
@@ -227,12 +227,12 @@ class RapportsViewSet(viewsets.ViewSet):
                 inv_qte=Coalesce(
                     Subquery(stock_sq.values('Qte')[:1]),
                     Value(Decimal('0.000')),
-                    output_field=DecimalField(max_digits=12, decimal_places=3),
+                    output_field=DecimalField(max_digits=12, decimal_places=5),
                 ),
                 inv_seuil=Coalesce(
                     Subquery(stock_sq.values('seuilAlert')[:1]),
                     Value(Decimal('0.000')),
-                    output_field=DecimalField(max_digits=12, decimal_places=3),
+                    output_field=DecimalField(max_digits=12, decimal_places=5),
                 ),
             )
             .select_related(
@@ -655,9 +655,9 @@ class RapportsViewSet(viewsets.ViewSet):
             'date_enregistrement': c.date_enregistrement.strftime('%Y-%m-%d %H:%M') if c.date_enregistrement else None,
             'dettes': dettes,
             'totaux_encours': {
-                'montant_total': str(tot_montant_encours_client.quantize(Decimal('0.01'))),
-                'montant_paye': str(tot_paye_encours_client.quantize(Decimal('0.01'))),
-                'solde_restant': str(tot_solde_encours_client.quantize(Decimal('0.01')))
+                'montant_total': str(tot_montant_encours_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                'montant_paye': str(tot_paye_encours_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                'solde_restant': str(tot_solde_encours_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
             }
         })
 
@@ -839,9 +839,9 @@ class RapportsViewSet(viewsets.ViewSet):
                     'email': client.email or '',
                     'is_special': bool(lien.is_special) if lien else False,
                     'totaux_encours': {
-                        'montant_total': str(tot_montant_client.quantize(Decimal('0.01'))),
-                        'montant_paye': str(tot_paye_client.quantize(Decimal('0.01'))),
-                        'solde_restant': str(tot_solde_client.quantize(Decimal('0.01')))
+                        'montant_total': str(tot_montant_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                        'montant_paye': str(tot_paye_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                        'solde_restant': str(tot_solde_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
                     }
                 })
 
@@ -881,9 +881,9 @@ class RapportsViewSet(viewsets.ViewSet):
             'periode': periode,
             'clients': clients_data,
             'totaux_globaux': {
-                'montant_total': str(tot_montant_global.quantize(Decimal('0.01'))),
-                'montant_paye': str(tot_paye_global.quantize(Decimal('0.01'))),
-                'solde_restant': str(tot_solde_global.quantize(Decimal('0.01'))),
+                'montant_total': str(tot_montant_global.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                'montant_paye': str(tot_paye_global.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                'solde_restant': str(tot_solde_global.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
                 'nombre_clients': len(clients_data)
             }
         }
@@ -993,7 +993,7 @@ class RapportsViewSet(viewsets.ViewSet):
             nombre_lignes=Sum('quantite'),
             total_montant=Sum(
                 F('quantite') * F('prix_unitaire'),
-                output_field=DecimalField(max_digits=14, decimal_places=2)
+                output_field=DecimalField(max_digits=14, decimal_places=5)
             )
         )
         
@@ -1242,7 +1242,7 @@ class RapportsViewSet(viewsets.ViewSet):
         if montant_min is not None or montant_max is not None:
             line_total = ExpressionWrapper(
                 F('quantite') * F('prix_unitaire'),
-                output_field=DecimalField(max_digits=20, decimal_places=2),
+                output_field=DecimalField(max_digits=20, decimal_places=5),
             )
             if montant_min is not None:
                 lignes_qs = lignes_qs.annotate(_line_total=line_total).filter(_line_total__gte=montant_min)
@@ -1287,12 +1287,12 @@ class RapportsViewSet(viewsets.ViewSet):
             total_montant=Sum(
                 ExpressionWrapper(
                     F('quantite') * F('prix_unitaire'),
-                    output_field=DecimalField(max_digits=20, decimal_places=2),
+                    output_field=DecimalField(max_digits=20, decimal_places=5),
                 )
             ),
         )
         tot_qte = Decimal(str(agg['total_qte'] or 0))
-        tot_m_vente = (agg['total_montant'] or Decimal('0')).quantize(Decimal('0.01'))
+        tot_m_vente = (agg['total_montant'] or Decimal('0')).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         total_benefice = Decimal('0.00')
         for ls in lignes_qs:
             if ls.lots_utilises.exists():
@@ -1309,7 +1309,7 @@ class RapportsViewSet(viewsets.ViewSet):
                     pu_vente_ls = Decimal(str(pu_vente_ls))
                 benef_ligne = Decimal(str(ls.quantite)) * (pu_vente_ls - pu_achat_ls)
             total_benefice += benef_ligne
-        total_benefice = total_benefice.quantize(Decimal('0.01'))
+        total_benefice = total_benefice.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         total_sorties = sortie_scope.count()
         total_clients = sortie_scope.exclude(client_id__isnull=True).values('client_id').distinct().count()
         sorties_credit = sortie_scope.filter(statut='EN_CREDIT').count()
@@ -1370,9 +1370,9 @@ class RapportsViewSet(viewsets.ViewSet):
                 benefice_ligne = sum(
                     (Decimal(str(lu.quantite)) * (Decimal(str(lu.prix_vente)) - Decimal(str(lu.prix_achat))))
                     for lu in ligne.lots_utilises.all()
-                ).quantize(Decimal('0.01'))
+                ).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             else:
-                benefice_ligne = (qd * (pu_vente - pu_achat)).quantize(Decimal('0.01'))
+                benefice_ligne = (qd * (pu_vente - pu_achat)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             ref = f"FACT-{int(s.id):06d}"
 
             lignes_ventes.append(
@@ -1382,7 +1382,7 @@ class RapportsViewSet(viewsets.ViewSet):
                     'client': s.client.nom if s.client else _('Client anonyme'),
                     'statut_paiement': 'CREDIT' if (s.statut == 'EN_CREDIT') else 'COMPTANT',
                     'article': ligne.article.nom_scientifique,
-                    'pu_achat': str(pu_achat.quantize(Decimal('0.01'))),
+                    'pu_achat': str(pu_achat.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
                     'pu_vente': str(pu_vente),
                     'quantite': q,
                     'benefice': str(benefice_ligne),
@@ -1593,18 +1593,18 @@ class RapportsViewSet(viewsets.ViewSet):
                     'designation': mv['designation'],
                     'entree': {
                         'quantite': str(q_in),
-                        'pu': str(pu_in.quantize(Decimal('0.01'))),
-                        'pt': str(pt_in.quantize(Decimal('0.01'))),
+                        'pu': str(pu_in.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                        'pt': str(pt_in.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
                     } if q_in else None,
                     'sortie': {
                         'quantite': str(q_out),
-                        'pu': str(pu_out.quantize(Decimal('0.01'))),
-                        'pt': str(pt_out.quantize(Decimal('0.01'))),
+                        'pu': str(pu_out.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                        'pt': str(pt_out.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
                     } if q_out else None,
                     'stock': {
                         'quantite': str(stock_qty),
-                        'pu': str(stock_pu.quantize(Decimal('0.01'))) if stock_qty else '',
-                        'pt': str(stock_val.quantize(Decimal('0.01'))),
+                        'pu': str(stock_pu.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)) if stock_qty else '',
+                        'pt': str(stock_val.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
                     },
                 }
             )
@@ -1621,13 +1621,13 @@ class RapportsViewSet(viewsets.ViewSet):
                 'unite': getattr(getattr(article, 'unite', None), 'nom', None),
                 'stock_actuel': str(getattr(stock_row, 'Qte', 0) or 0),
                 'seuil_alerte': str(getattr(stock_row, 'seuilAlert', 0) or 0),
-                'prix_vente_reference': str(Decimal(str(getattr(stock_row, 'prix_vente', 0) or 0)).quantize(Decimal('0.01'))),
+                'prix_vente_reference': str(Decimal(str(getattr(stock_row, 'prix_vente', 0) or 0)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
             },
             'filtres': {'date_min': date_min, 'date_max': date_max},
             'mouvements': rows,
             'solde_final': {
                 'quantite': str(stock_qty),
-                'valeur': str(stock_val.quantize(Decimal('0.01'))),
+                'valeur': str(stock_val.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
             },
             'meta_generation': self._build_meta_generation(user),
         }

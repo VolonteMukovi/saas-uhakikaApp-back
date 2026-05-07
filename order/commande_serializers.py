@@ -50,7 +50,7 @@ class CommandeItemWriteSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True,
     )
-    quantite = LocalizedDecimalField(max_digits=12, decimal_places=3)
+    quantite = LocalizedDecimalField(max_digits=12, decimal_places=5)
 
     class Meta:
         model = CommandeItem

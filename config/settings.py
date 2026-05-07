@@ -135,11 +135,11 @@ REST_FRAMEWORK = {
     # ),
 }
 
-# Configuration JWT : session sécurisée (inactivité 1 h → expiration ; durée max 24 h)
+# Configuration JWT : session sécurisée (expiration à 48 h)
 SIMPLE_JWT = {
-    # Expiration après inactivité : 1 heure (access + refresh)
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(hours=1),
+    # Validité des tokens : 48 heures (access + refresh)
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=48),
+    'REFRESH_TOKEN_LIFETIME': timedelta(hours=48),
 
     # Rotation : nouveau refresh à chaque refresh (sliding) ; ancien blacklisté
     'ROTATE_REFRESH_TOKENS': True,

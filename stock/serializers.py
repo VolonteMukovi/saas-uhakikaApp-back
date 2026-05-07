@@ -214,7 +214,7 @@ class LigneSortieSerializer(serializers.ModelSerializer):
 
     lots_utilises = serializers.SerializerMethodField(read_only=True)
     benefices_lots = serializers.SerializerMethodField(read_only=True)
-    quantite = LocalizedDecimalField(max_digits=12, decimal_places=3)
+    quantite = LocalizedDecimalField(max_digits=12, decimal_places=5)
     
     class Meta:
         model = LigneSortie
@@ -429,6 +429,7 @@ class ClientSerializer(serializers.ModelSerializer):
         if liens_in is not None:
             self._assert_liens_tenant(liens_in, tenant_id)
             for row in liens_in:
+                row.setdefault("is_special", False)
                 ClientEntreprise.objects.create(client=instance, **row)
         elif tenant_id:
             ClientEntreprise.objects.create(
@@ -455,6 +456,7 @@ class ClientSerializer(serializers.ModelSerializer):
             self._assert_liens_tenant(liens_in, tenant_id)
             instance.liens_entreprise.all().delete()
             for row in liens_in:
+                row.setdefault("is_special", False)
                 ClientEntreprise.objects.create(client=instance, **row)
 
         if password is not None:
@@ -702,8 +704,8 @@ class LigneEntreeSerializer(serializers.ModelSerializer):
         required=True
     )
     devise = DeviseSerializer(read_only=True)
-    quantite = LocalizedDecimalField(max_digits=12, decimal_places=3)
-    seuil_alerte = LocalizedDecimalField(max_digits=12, decimal_places=3)
+    quantite = LocalizedDecimalField(max_digits=12, decimal_places=5)
+    seuil_alerte = LocalizedDecimalField(max_digits=12, decimal_places=5)
     devise_id = serializers.PrimaryKeyRelatedField(
         queryset=Devise.objects.all(), 
         source='devise', 
@@ -1104,7 +1106,7 @@ class PaiementDetteReadSerializer(serializers.Serializer):
 
 class PaiementDetteWriteSerializer(serializers.Serializer):
     dette_id = serializers.PrimaryKeyRelatedField(queryset=DetteClient.objects.all(), source='dette')
-    montant_paye = serializers.DecimalField(max_digits=12, decimal_places=2)
+    montant_paye = serializers.DecimalField(max_digits=12, decimal_places=5)
     devise_id = serializers.PrimaryKeyRelatedField(
         queryset=Devise.objects.all(), source='devise', required=False, allow_null=True
     )

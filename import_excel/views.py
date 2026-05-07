@@ -128,9 +128,9 @@ def _parse_decimal_money_excel(cell):
     """
     Parse une cellule Excel en Decimal monétaire (2 décimales max).
     Évite les artefacts float (ex. 2500.0000000003) qui font échouer la validation DRF
-    sur DecimalField(decimal_places=2).
+    sur DecimalField(decimal_places=5).
     """
-    from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+    from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
     if cell is None:
         return None
@@ -140,15 +140,15 @@ def _parse_decimal_money_excel(cell):
             return None
         s = s.replace(',', '.')
         try:
-            return Decimal(s).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            return Decimal(s).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         except (InvalidOperation, ValueError):
             return None
     if isinstance(cell, int):
-        return Decimal(cell).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return Decimal(cell).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
     if isinstance(cell, float):
         # Conversion via string pour limiter les artefacts binaires.
         try:
-            return Decimal(str(cell)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            return Decimal(str(cell)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         except (InvalidOperation, ValueError):
             return None
     return None
@@ -627,7 +627,7 @@ def import_approvisionnement(request):
         devise_id = ligne.get('devise_id')
         quantite = Decimal(str(ligne.get('quantite') or 0))
         prix_unitaire = Decimal(str(ligne.get('prix_unitaire') or 0))
-        montant = (quantite * prix_unitaire).quantize(Decimal('0.01'))
+        montant = (quantite * prix_unitaire).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         if not devise_id:
             devise_id = devise_principale.id if devise_principale else None
         if not devise_id:
@@ -1294,7 +1294,7 @@ def import_sortie(request):
             DetteClient.objects.create(
                 sortie=sortie,
                 client=client_obj,
-                montant_total=total_dette.quantize(Decimal('0.01')),
+                montant_total=total_dette.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                 devise=devise_dette,
                 entreprise_id=sortie.entreprise_id,
                 succursale_id=sortie.succursale_id,
