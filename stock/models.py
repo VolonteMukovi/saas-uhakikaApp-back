@@ -637,5 +637,105 @@ class Devise(models.Model):
         return f"{self.nom} ({self.sigle}){principal_str} - {self.entreprise.nom}"
 
 
+class InventaireSession(models.Model):
+    """Session d'inventaire physique : comparaison stock théorique vs stock compté."""
 
+    STATUT_BROUILLON = 'BROUILLON'
+    STATUT_EN_COURS = 'EN_COURS'
+    STATUT_VALIDE = 'VALIDE'
+    STATUT_ANNULE = 'ANNULE'
+    STATUT_CHOICES = [
+        (STATUT_BROUILLON, 'Brouillon'),
+        (STATUT_EN_COURS, 'En cours'),
+        (STATUT_VALIDE, 'Validé'),
+        (STATUT_ANNULE, 'Annulé'),
+    ]
+
+    PERIMETRE_COMPLET = 'COMPLET'
+    PERIMETRE_EN_STOCK = 'EN_STOCK'
+    PERIMETRE_PARTIEL = 'PARTIEL'
+    PERIMETRE_CHOICES = [
+        (PERIMETRE_COMPLET, 'Catalogue complet'),
+        (PERIMETRE_EN_STOCK, 'Articles en stock uniquement'),
+        (PERIMETRE_PARTIEL, 'Liste d\'articles'),
+    ]
+
+    libelle = models.CharField(max_length=200)
+    date_inventaire = models.DateField()
+    statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default=STATUT_BROUILLON)
+    perimetre = models.CharField(max_length=20, choices=PERIMETRE_CHOICES, default=PERIMETRE_EN_STOCK)
+    type_article_filtre = models.CharField(max_length=100, blank=True, default='')
+    commentaire = models.TextField(blank=True, default='')
+    entreprise = models.ForeignKey(
+        Entreprise, on_delete=models.CASCADE, related_name='inventaires',
+    )
+    succursale = models.ForeignKey(
+        Succursale, on_delete=models.CASCADE, related_name='inventaires',
+        null=True, blank=True,
+    )
+    cree_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='inventaires_crees',
+    )
+    valide_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='inventaires_valides',
+    )
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_demarrage = models.DateTimeField(null=True, blank=True)
+    date_validation = models.DateTimeField(null=True, blank=True)
+    entree_ajustement = models.ForeignKey(
+        'Entree', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='inventaires_ajustement_positif',
+    )
+    sortie_ajustement = models.ForeignKey(
+        'Sortie', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='inventaires_ajustement_negatif',
+    )
+
+    class Meta:
+        ordering = ['-date_creation']
+        indexes = [
+            models.Index(fields=['entreprise_id', 'statut']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+        ]
+
+    def __str__(self):
+        return f"Inventaire #{self.pk} — {self.libelle} ({self.get_statut_display()})"
+
+
+class InventaireLigne(models.Model):
+    """Ligne d'inventaire : stock théorique figé + stock physique saisi."""
+
+    session = models.ForeignKey(
+        InventaireSession, on_delete=models.CASCADE, related_name='lignes',
+    )
+    article = models.ForeignKey(Article, on_delete=models.CASCADE, related_name='lignes_inventaire')
+    stock_theorique = models.DecimalField(max_digits=12, decimal_places=5, default=0)
+    stock_physique = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
+    ecart = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
+    motif_ligne = models.TextField(blank=True, default='')
+
+    class Meta:
+        ordering = ['article__nom_scientifique', 'article_id']
+        unique_together = ('session', 'article')
+        indexes = [
+            models.Index(fields=['session_id', 'article_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.article_id} th={self.stock_theorique} ph={self.stock_physique}"
+
+    def recalculer_ecart(self):
+        if self.stock_physique is None:
+            self.ecart = None
+        else:
+            self.ecart = self.stock_physique - self.stock_theorique
+        return self.ecart
 

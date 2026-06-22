@@ -1,7 +1,6 @@
 """
-En-tête simplifié des rapports : nom, logo, slogan, téléphone uniquement.
-Utilisé par les rapports (rapports/views, rapports/utils/pdf_generator)
-et par les PDF générés dans stock/views (journal, facture POS).
+En-tête simplifié pour les documents POS (tickets PDF).
+Les rapports métier utilisent serialize_entreprise() dans report_envelope.py.
 """
 
 

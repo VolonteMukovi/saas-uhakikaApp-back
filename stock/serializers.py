@@ -22,6 +22,7 @@ from .models import (
     DetailMouvementCaisse,
 )
 from django.db import transaction, models
+from django.utils import timezone
 from django.utils.translation import gettext as _
 from decimal import Decimal, InvalidOperation
 
@@ -760,7 +761,12 @@ class EntreeSerializer(serializers.ModelSerializer):
     class Meta:
         model = Entree
         fields = ['id', 'libele', 'description', 'date_op', 'lignes', 'lot_id']
-        read_only_fields = ['date_op', 'lot_id']
+        read_only_fields = ['lot_id']
+
+    def validate_date_op(self, value):
+        if value is not None and timezone.is_naive(value):
+            return timezone.make_aware(value, timezone.get_current_timezone())
+        return value
 
     def get_lot_id(self, obj):
         from order.models import Lot
@@ -795,14 +801,18 @@ class EntreeSerializer(serializers.ModelSerializer):
         succursale_id = validated_data.pop('succursale_id', None)
         libele = validated_data.pop('libele', '')
         description = validated_data.pop('description', '')
+        date_op = validated_data.pop('date_op', None)
 
         # Création de l'Entree (entreprise / succursale : perform_create ou import Excel)
-        entree = Entree.objects.create(
-            libele=libele,
-            description=description,
-            entreprise_id=entreprise_id,
-            succursale_id=succursale_id,
-        )
+        entree_kwargs = {
+            'libele': libele,
+            'description': description,
+            'entreprise_id': entreprise_id,
+            'succursale_id': succursale_id,
+        }
+        if date_op is not None:
+            entree_kwargs['date_op'] = date_op
+        entree = Entree.objects.create(**entree_kwargs)
 
         # Création des lignes et mise à jour du stock
         # Fallback devise principale si devise_id absent ou None (par entreprise si connue)

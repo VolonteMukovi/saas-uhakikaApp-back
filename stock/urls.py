@@ -1,5 +1,6 @@
 from rest_framework import routers
 from .views import *
+from .inventaire_views import InventaireSessionViewSet
 from django.urls import path, include
 
 router = routers.DefaultRouter()
@@ -22,6 +23,7 @@ router.register(r'clients', ClientViewSet)
 router.register(r'client-entreprises', ClientEntrepriseViewSet, basename='client-entreprise')
 router.register(r'dettes', DetteClientViewSet)
 router.register(r'paiements-dettes', PaiementDetteViewSet, basename='paiementdette')
+router.register(r'inventaires', InventaireSessionViewSet, basename='inventaire')
 
 
 urlpatterns = [

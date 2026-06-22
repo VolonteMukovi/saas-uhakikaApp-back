@@ -221,199 +221,88 @@ class RapportViewSet(viewsets.ViewSet):
     # SortieViewSet et EntreeViewSet pour éviter toute ambiguïté de routes.
 
     @action(detail=False, methods=['get'], url_path='journal')
-    def journal_pdf(self, request):
+    def journal(self, request):
         """
-        Génère le journal complet de toutes les opérations (PDF).
-        Inclut : approvisionnements (entrées), ventes (sorties), mouvements de caisse, paiements de dettes.
+        Journal complet des opérations (JSON pour le frontend).
+
+        Inclut : approvisionnements, ventes, mouvements de caisse, paiements de dettes.
         Filtres : month (1-12), year (ex: 2026). Par défaut = mois et année en cours.
         Ou date_min / date_max (YYYY-MM-DD) pour une plage personnalisée.
+        Pagination : page, page_size (défaut). complet=true pour toute la liste.
+
+        GET /api/rapports/journal/
+        GET /api/rapports/journal/?month=6&year=2026
+        GET /api/rapports/journal/?date_min=2026-01-01&date_max=2026-01-31
         """
+        from rapports.utils.journal_data import build_journal_report_data
+        from rapports.utils.report_envelope import wrap_report_response
+
         user = request.user
         principal = _get_principal_devise()
-        now = timezone.now()
-
         tenant_id, branch_id = _get_tenant_ids(request)
         if not tenant_id:
             return Response({'error': 'Contexte entreprise manquant.'}, status=400)
 
-        # Filtrage : month/year (défaut = mois et année en cours), ou date_min/date_max pour plage personnalisée
-        month_param = request.query_params.get('month')
-        year_param = request.query_params.get('year')
-        date_min = request.query_params.get('date_min')
-        date_max = request.query_params.get('date_max')
-
-        use_month_year = (month_param is not None or year_param is not None) or not (date_min or date_max)
-        if use_month_year:
-            try:
-                year = int(year_param) if year_param else now.year
-                month = int(month_param) if month_param else now.month
-            except (TypeError, ValueError):
-                year, month = now.year, now.month
-            if not (1 <= month <= 12):
-                month = now.month
-            if year < 1900 or year > 2100:
-                year = now.year
-            from calendar import monthrange
-            last_day = monthrange(year, month)[1]
-            date_min = f"{year}-{month:02d}-01"
-            date_max = f"{year}-{month:02d}-{last_day}"
-            periode_txt = f"{month:02d}/{year}"
-        else:
-            periode_txt = _("Du %(debut)s au %(fin)s") % {'debut': date_min or '...', 'fin': date_max or '...'}
-
-        # 1) Entrées (approvisionnements)
-        qs_entrees = Entree.objects.filter(entreprise_id=tenant_id)
-        if branch_id is not None:
-            qs_entrees = qs_entrees.filter(succursale_id=branch_id)
-        qs_entrees = qs_entrees.prefetch_related('lignes', 'lignes__article', 'lignes__devise')
-        if date_min:
-            qs_entrees = qs_entrees.filter(date_op__date__gte=date_min)
-        if date_max:
-            qs_entrees = qs_entrees.filter(date_op__date__lte=date_max)
-
-        # 2) Sorties (ventes)
-        qs_sorties = Sortie.objects.filter(entreprise_id=tenant_id)
-        if branch_id is not None:
-            qs_sorties = qs_sorties.filter(succursale_id=branch_id)
-        qs_sorties = qs_sorties.prefetch_related('lignes', 'lignes__article', 'lignes__devise', 'client')
-        if date_min:
-            qs_sorties = qs_sorties.filter(date_creation__date__gte=date_min)
-        if date_max:
-            qs_sorties = qs_sorties.filter(date_creation__date__lte=date_max)
-
-        # 3) Mouvements de caisse
-        qs_caisse = MouvementCaisse.objects.filter(entreprise_id=tenant_id).select_related('devise', 'sortie', 'entree')
-        if branch_id is not None:
-            qs_caisse = qs_caisse.filter(succursale_id=branch_id)
-        if date_min:
-            qs_caisse = qs_caisse.filter(date__date__gte=date_min)
-        if date_max:
-            qs_caisse = qs_caisse.filter(date__date__lte=date_max)
-
-        # 4) Paiements de dettes (liés à DetteClient)
-        ct_dette = ContentType.objects.get_for_model(DetteClient)
-        qs_paiements = MouvementCaisse.objects.filter(
-            entreprise_id=tenant_id,
-            content_type=ct_dette,
-            type='ENTREE',
-        ).select_related('devise', 'content_type')
-        if branch_id is not None:
-            qs_paiements = qs_paiements.filter(succursale_id=branch_id)
-        if date_min:
-            qs_paiements = qs_paiements.filter(date__date__gte=date_min)
-        if date_max:
-            qs_paiements = qs_paiements.filter(date__date__lte=date_max)
-
-        # Construire la liste unifiée d'événements (date, type, désignation, montant_texte, ref)
-        events = []
-
-        for e in qs_entrees:
-            total_par_devise = {}
-            for lig in e.lignes.all():
-                dev = lig.devise or principal
-                sigle = dev.sigle if dev else 'N/A'
-                total_par_devise[sigle] = total_par_devise.get(sigle, Decimal('0')) + lig.quantite * lig.prix_unitaire
-            montant_str = ', '.join(
-                f"{Decimal(str(v)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN):.5f} {s}"
-                for s, v in total_par_devise.items()
-            ) if total_par_devise else '-'
-            events.append({
-                'date': e.date_op,
-                'type': 'APPROVISIONNEMENT',
-                'type_display': _('Approvisionnement'),
-                'designation': (e.libele or _('Entrée'))[:80],
-                'montant_texte': montant_str,
-                'ref': f'Entrée#{e.id}',
-            })
-
-        for s in qs_sorties:
-            total_par_devise = {}
-            for lig in s.lignes.all():
-                dev = lig.devise or principal
-                sigle = dev.sigle if dev else 'N/A'
-                total_par_devise[sigle] = total_par_devise.get(sigle, Decimal('0')) + lig.quantite * lig.prix_unitaire
-            montant_str = ', '.join(
-                f"{Decimal(str(v)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN):.5f} {s}"
-                for s, v in total_par_devise.items()
-            ) if total_par_devise else '-'
-            client_nom = (s.client.nom if s.client else 'Anonyme')[:40]
-            events.append({
-                'date': s.date_creation,
-                'type': 'VENTE',
-                'type_display': _('Vente'),
-                'designation': f"{(s.motif or _('Vente'))[:50]} - {_('Client')}: {client_nom}",
-                'montant_texte': montant_str,
-                'ref': f'Sortie#{s.id}',
-            })
-
-        for mv in qs_caisse:
-            caisse_type_label = _('Caisse Entrée') if mv.type == 'ENTREE' else _('Caisse Sortie')
-            events.append({
-                'date': mv.date,
-                'type': f'CAISSE_{mv.type}',
-                'type_display': caisse_type_label,
-                'designation': (mv.motif_affiche() or '')[:80].replace('\n', ' '),
-                'montant_texte': _format_amount(mv.montant, mv.devise),
-                'ref': mv.reference_piece or f"MC#{mv.id}",
-            })
-
-        from django.contrib.contenttypes.models import ContentType as CT
-        ct_dette = CT.objects.get_for_model(DetteClient)
-        for p in qs_paiements:
-            dette = None
-            if p.content_type_id == ct_dette.id and p.object_id:
-                dette = DetteClient.objects.filter(pk=p.object_id).select_related('client').first()
-            client_nom = (dette.client.nom if dette and dette.client else '')[:40]
-            events.append({
-                'date': p.date,
-                'type': 'PAIEMENT_DETTE',
-                'type_display': _('Paiement dette'),
-                'designation': f"{_('Paiement dette')} - {client_nom}".strip()[:80],
-                'montant_texte': _format_amount(p.montant, p.devise),
-                'ref': p.reference_piece or f"Paiement#{p.id}",
-            })
-
-        # Tri chronologique
-        events.sort(key=lambda x: x['date'])
-
-        # Entreprise pour l'en-tête
-        entreprise = user.get_entreprise(request) or Entreprise.objects.first()
-        from rapports.utils.entete import get_entete_entreprise
-        from rapports.utils.pdf_generator import PDFGenerator
-
-        resume = {
-            'total_operations': len(events),
-            'approvisionnements': sum(1 for e in events if e.get('type') == 'APPROVISIONNEMENT'),
-            'ventes': sum(1 for e in events if e.get('type') == 'VENTE'),
-            'caisse_entrees': sum(1 for e in events if e.get('type') == 'CAISSE_ENTREE'),
-            'caisse_sorties': sum(1 for e in events if e.get('type') == 'CAISSE_SORTIE'),
-            'paiements_dettes': sum(1 for e in events if e.get('type') == 'PAIEMENT_DETTE'),
-        }
-        data = {
-            'entete': get_entete_entreprise(entreprise),
-            'titre': _('JOURNAL COMPLET DES OPÉRATIONS'),
-            'periode': {'label': periode_txt, 'date_debut': date_min, 'date_fin': date_max},
-            'filtres': {
-                'month': month_param,
-                'year': year_param,
-                'date_min': date_min,
-                'date_max': date_max,
-            },
-            'resume_global': resume,
-            'operations': events,
-            'meta_generation': {
-                'printed_at': timezone.now().strftime('%d/%m/%Y %H:%M'),
-                'printed_by': getattr(user, 'username', _('Système')),
-            },
-        }
-
-        pdf_gen = PDFGenerator()
-        buffer = pdf_gen.generate_journal_operations_pdf(data)
-        return HttpResponse(
-            buffer,
-            content_type='application/pdf',
-            headers={'Content-Disposition': 'inline; filename="journal_complet.pdf"'},
+        body = build_journal_report_data(
+            request=request,
+            user=user,
+            tenant_id=tenant_id,
+            branch_id=branch_id,
+            principal_devise=principal,
         )
+
+        events = body.get('details') or body.get('operations') or []
+        complet = request.query_params.get('complet', '').lower() in ('true', '1', 'yes', 'oui')
+        if not complet and events:
+            try:
+                page = int(request.query_params.get('page', 1))
+            except (TypeError, ValueError):
+                page = 1
+            page = max(1, page)
+            try:
+                from config.pagination import StandardResultsSetPagination
+                page_size = int(
+                    request.query_params.get(
+                        'page_size', StandardResultsSetPagination.page_size
+                    )
+                )
+                max_ps = StandardResultsSetPagination.max_page_size
+            except (TypeError, ValueError):
+                from config.pagination import StandardResultsSetPagination
+                page_size = StandardResultsSetPagination.page_size
+                max_ps = StandardResultsSetPagination.max_page_size
+            page_size = max(1, min(page_size, max_ps))
+            count = len(events)
+            import math
+            total_pages = max(1, math.ceil(count / page_size)) if count else 1
+            if page > total_pages and count:
+                page = total_pages
+            start = (page - 1) * page_size
+            page_events = events[start : start + page_size]
+            body['details'] = page_events
+            body['operations'] = page_events
+            body['pagination'] = {
+                'page': page,
+                'page_size': page_size,
+                'count': count,
+                'total_pages': total_pages,
+                'has_next': start + page_size < count,
+                'has_previous': page > 1,
+            }
+            body.setdefault('filtres', {})['complet'] = False
+        else:
+            body.setdefault('filtres', {})['complet'] = True
+
+        wrapped = wrap_report_response(
+            rapport='journal',
+            titre=body.get('titre', 'journal'),
+            request=request,
+            user=user,
+            data=body,
+            eid=tenant_id,
+            branch_id=branch_id,
+        )
+        return Response(wrapped)
 
     # Les actions de bons POS supprimées ici.
 
@@ -2273,11 +2162,16 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             })
 
         with transaction.atomic():
-            entree = Entree.objects.create(
-                libele=serializer.validated_data.get('libele', ''),
-                entreprise_id=tenant_id,
-                succursale_id=branch_id
-            )
+            entree_kwargs = {
+                'libele': serializer.validated_data.get('libele', ''),
+                'description': serializer.validated_data.get('description', ''),
+                'entreprise_id': tenant_id,
+                'succursale_id': branch_id,
+            }
+            date_op = serializer.validated_data.get('date_op')
+            if date_op is not None:
+                entree_kwargs['date_op'] = date_op
+            entree = Entree.objects.create(**entree_kwargs)
             
             # Traiter chaque article groupé
             for article_id, ligne_data in articles_groupes.items():
@@ -3085,52 +2979,37 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         # Conversion de dict vers liste triée (devise principale en premier)
         soldes_list = list(soldes_par_devise.values())
         soldes_list.sort(key=lambda x: (not x['est_principale'], x['devise_sigle']))
-        
-        return Response({
-            'soldes_par_devise': soldes_list,
-            'devise_principale': principal_devise.sigle if principal_devise else None,
-            'nb_devises_actives': len(soldes_par_devise),
-            'total_mouvements_global': qs.count()
-        })
 
-    @action(detail=False, methods=['get'], url_path='solde/pdf')
-    def solde_caisse_pdf(self, request):
-        """Export PDF de l'état de caisse (soldes par devise)."""
-        json_resp = self.solde_caisse(request)
-        if getattr(json_resp, 'status_code', 200) != 200:
-            return json_resp
+        from rapports.utils.report_envelope import (
+            build_metadata,
+            get_devise_principale,
+            serialize_agence,
+            serialize_entreprise,
+        )
 
-        user = request.user
         entreprise = user.get_entreprise(request)
-        from rapports.utils.entete import get_entete_entreprise
-        from rapports.utils.pdf_generator import PDFGenerator
+        branch_id = getattr(request, 'branch_id', None)
 
-        payload = dict(json_resp.data or {})
-        payload.update({
-            'entete': get_entete_entreprise(entreprise),
-            'titre': _("ÉTAT DE LA CAISSE"),
-            'resume_global': {
-                'nb_devises_actives': payload.get('nb_devises_actives', 0),
-                'total_mouvements_global': payload.get('total_mouvements_global', 0),
-                'devise_principale': payload.get('devise_principale'),
-            },
+        return Response({
+            'rapport': 'etat-caisse',
+            'titre': str(_('ÉTAT DE LA CAISSE')),
+            'entreprise': serialize_entreprise(entreprise, request) if entreprise else None,
+            'agence': serialize_agence(branch_id, entreprise),
+            'devise': get_devise_principale(entreprise),
             'filtres': {
                 'type': request.query_params.get('type'),
                 'date_min': request.query_params.get('date_min'),
                 'date_max': request.query_params.get('date_max'),
             },
-            'meta_generation': {
-                'printed_at': timezone.now().strftime('%d/%m/%Y %H:%M'),
-                'printed_by': getattr(user, 'username', _('Système')),
+            'resume': {
+                'nb_devises_actives': len(soldes_par_devise),
+                'total_mouvements_global': qs.count(),
+                'devise_principale': principal_devise.sigle if principal_devise else None,
             },
+            'soldes_par_devise': soldes_list,
+            'details': soldes_list,
+            'metadata': build_metadata(user, request),
         })
-
-        pdf_generator = PDFGenerator()
-        pdf_buffer = pdf_generator.generate_etat_caisse_pdf(payload)
-        response = HttpResponse(pdf_buffer, content_type='application/pdf')
-        filename = f"etat_caisse_{timezone.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        response['Content-Disposition'] = f'attachment; filename="{filename}"'
-        return response
 
     @action(detail=False, methods=['get'], url_path='tableau-bord')
     def tableau_bord_multi_devises(self, request):
@@ -4114,12 +3993,79 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
             status=status.HTTP_201_CREATED,
         )
 
+    @action(detail=True, methods=['get'], url_path='recu-json', permission_classes=[IsAuthenticated])
+    def recu_json(self, request, pk=None):
+        """
+        Reçu de paiement dette en JSON (impression / PDF côté frontend).
+        GET /api/paiements-dettes/{id}/recu-json/
+        """
+        from django.contrib.contenttypes.models import ContentType as CTModel
+        from rapports.utils.report_envelope import (
+            build_metadata,
+            get_devise_principale,
+            serialize_agence,
+            serialize_entreprise,
+        )
+
+        user = request.user
+        paiement = self.get_object()
+        ct_dette = CTModel.objects.get_for_model(DetteClient)
+        if paiement.content_type_id != ct_dette.id or not paiement.object_id:
+            return Response(
+                {'error': _('Mouvement invalide pour un reçu de paiement de dette.')},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        dette = DetteClient.objects.filter(pk=paiement.object_id).select_related(
+            'client', 'devise', 'sortie',
+        ).first()
+        if not dette:
+            return Response({'error': _('Dette introuvable.')}, status=status.HTTP_404_NOT_FOUND)
+
+        entreprise = user.get_entreprise(request)
+        tenant_id, branch_id = _get_tenant_ids(request)
+        lien = None
+        if dette.client and entreprise:
+            lien = dette.client.liens_entreprise.filter(entreprise_id=entreprise.pk).first()
+
+        paiement_data = PaiementDetteReadSerializer(
+            paiement,
+            context={'request': request, 'include_dette_details': True},
+        ).data
+
+        return Response({
+            'document': 'recu_paiement_dette',
+            'titre': _('REÇU DE PAIEMENT'),
+            'format': 'json',
+            'entreprise': serialize_entreprise(entreprise, request),
+            'agence': serialize_agence(branch_id, entreprise),
+            'devise': get_devise_principale(entreprise),
+            'metadata': build_metadata(user, request),
+            'client': {
+                'id': dette.client_id,
+                'nom': dette.client.nom if dette.client else '',
+                'telephone': getattr(dette.client, 'telephone', '') or '',
+                'is_special': bool(lien.is_special) if lien else False,
+            },
+            'dette': {
+                'id': dette.id,
+                'montant_total': str(dette.montant_total),
+                'montant_paye': str(dette.montant_paye),
+                'solde_restant': str(dette.solde_restant),
+                'statut': dette.statut,
+                'sortie_id': dette.sortie_id,
+            },
+            'paiement': paiement_data,
+            'pdf_url': request.build_absolute_uri(
+                f'/api/paiements-dettes/{paiement.pk}/recu-paiement/'
+            ),
+        })
+
     @action(detail=True, methods=['get'], url_path='recu-paiement', permission_classes=[IsAuthenticated])
     def recu_paiement_pdf(self, request, pk=None):
         """
-        Génère le reçu de paiement (PDF) pour un paiement de dette.
-        S'inspire du design de la facture de vente. Peut être utilisé à chaque paiement (partiel ou total).
+        Reçu de paiement dette en PDF (ticket POS / impression directe).
         GET /api/paiements-dettes/{id}/recu-paiement/
+        Pour JSON structuré : GET .../recu-json/
         """
         from django.contrib.contenttypes.models import ContentType as CTModel
 

@@ -382,6 +382,8 @@ UHAKIKAAPP gère les **dates d'expiration** au niveau des lots d'entrée :
 
 ### 4.8 Gestion des entrées de stock (approvisionnements)
 
+> **Guide frontend (layout page saisie + panier + lazy load liste) :** [docs/ENTREE_STOCK_FRONTEND.md](docs/ENTREE_STOCK_FRONTEND.md)
+
 #### Objectif
 
 Enregistrer tout approvisionnement et **augmenter automatiquement** le stock disponible.
@@ -391,8 +393,10 @@ Enregistrer tout approvisionnement et **augmenter automatiquement** le stock dis
 | Champ | Description |
 |-------|-------------|
 | **Libellé** | Nom de l'opération d'entrée |
-| **Description** | Détails complémentaires |
-| **Date** | Horodatage automatique |
+| **Description** | Détails complémentaires (optionnel) |
+| **Date d'opération** | `date_op` — modifiable à la création ; horodatage serveur si absent |
+| **Référence** | `id` généré automatiquement à l'enregistrement (ne pas saisir côté UI) |
+| **Agence** | Déduite du contexte JWT (`succursale_id`) — pas de champ formulaire |
 | **Lignes** | Articles approvisionnés |
 
 #### Informations d'une ligne d'entrée
@@ -527,7 +531,8 @@ Permettre la vente à crédit tout en **maîtrisant le recouvrement**.
 |--------|----------|
 | Enregistrer un paiement | `POST /api/paiements-dettes/` |
 | Historique paiements | `GET /api/dettes/{id}/paiements/` |
-| Reçu PDF | `GET /api/paiements-dettes/{id}/recu-paiement/` |
+| Reçu JSON (aperçu / impression front) | `GET /api/paiements-dettes/{id}/recu-json/` |
+| Reçu PDF (ticket POS) | `GET /api/paiements-dettes/{id}/recu-paiement/` |
 
 Chaque paiement crée un **`MouvementCaisse ENTREE`** lié à la dette. Le statut est recalculé automatiquement :
 
@@ -715,7 +720,7 @@ Suivre **tous les flux financiers** de l'entreprise en temps réel.
 | `GET /api/mouvements-caisse/resume/` | Statistiques détaillées |
 | `GET /api/mouvements-caisse/comparaison-devises/` | Volumes et pourcentages par devise |
 | `GET /api/mouvements-caisse/mouvements-par-devise/` | Mouvements filtrés par devise |
-| `GET /api/mouvements-caisse/solde/pdf/` | État de caisse PDF |
+| `GET /api/mouvements-caisse/solde/` | État de caisse (JSON par devise) |
 | `GET /api/mouvements-caisse/export/` | Export CSV |
 
 #### Règles métier
@@ -760,20 +765,32 @@ Supporter les entreprises opérant avec **plusieurs monnaies**.
 
 ### 4.17 Gestion des rapports
 
-UHAKIKAAPP propose une suite complète de **rapports JSON** (pour tableaux de bord et intégrations) et **PDF** (pour impression et archivage).
+> **Documentation frontend détaillée :** [docs/RAPPORTS_API_FRONTEND.md](docs/RAPPORTS_API_FRONTEND.md) · **Inventaire physique :** [docs/INVENTAIRE_API.md](docs/INVENTAIRE_API.md) · **§ 4.18** ci-dessous
+
+UHAKIKAAPP expose tous les **rapports métier en JSON** structuré. Le frontend gère l'affichage, l'impression et l'export PDF/Excel.
+
+Chaque réponse inclut : `rapport`, `titre`, `periode`, `entreprise`, `agence`, `devise`, `filtres`, `resume`, `totaux`, `metadata`, et les données métier (`details`, etc.).
 
 #### Tableau des rapports disponibles
 
-| Rapport | JSON | PDF | Rôle et utilité |
-|---------|------|-----|-----------------|
-| **Inventaire** | `/api/rapports/rapports/inventaire/` | `.../inventaire/pdf/` | État complet du stock : quantités, seuils, statuts. Filtres par type, période, statut. **Décision** : réapprovisionnement, inventaire physique. |
-| **Bon d'entrée (réquisition)** | `/api/rapports/rapports/bon-entree/` | `.../bon-entree/pdf/` | Liste des articles en rupture ou alerte à commander. **Décision** : planifier les achats. |
-| **Bon d'achat** | `/api/rapports/rapports/bon-achat/` | `.../bon-achat/pdf/` | Détail des approvisionnements par période ou par entrée. **Décision** : contrôler les achats. |
-| **Dettes client (détail)** | `/api/rapports/rapports/clients-dettes/` | `.../clients-dettes/pdf/` | Toutes les dettes d'un client avec produits vendus. **Décision** : relance ciblée. |
-| **Dettes générales** | `/api/rapports/rapports/clients-dettes-general/` | `.../clients-dettes-general/pdf/` | Synthèse de tous les clients avec solde > 0. Filtre clients spéciaux. **Décision** : vue globale du recouvrement. |
-| **Rapport des ventes** | `/api/rapports/rapports/ventes/` | `.../ventes/pdf/` | Lignes de vente, FIFO, bénéfices par période. **Décision** : analyser la performance commerciale. |
-| **Fiche stock** | `/api/rapports/rapports/{id}/fiche-stock/json/` | `.../fiche-stock/` | Mouvements chronologiques FIFO d'un article. **Décision** : audit d'un produit spécifique. |
-| **Journal complet** | — | `/api/rapports/journal/` | PDF unifié : entrées, ventes, caisse, paiements dettes. **Décision** : audit global de la période. |
+| Rapport | Endpoint JSON | Rôle et utilité |
+|---------|---------------|-----------------|
+| **Inventaire (rapport)** | `GET /api/rapports/inventaire/` | **Rapport d'inventaire** JSON : stock logiciel, comptage, écarts, statuts. `?session_id=` pour une session validée/en cours. Export PDF côté front. |
+| **Bon d'entrée (réquisition)** | `GET /api/rapports/bon-entree/` | Articles en rupture/alerte : stock actuel, dernier PU achat, qté suggérée, montant estimé calculés. |
+| **Bon d'achat** | `GET /api/rapports/bon-achat/` | Approvisionnements par période : lignes avec `pu`, `total`, récapitulatif par devise. |
+| **Dettes client (détail)** | `GET /api/rapports/clients-dettes/?client_id=...` | Dettes détaillées d'un client avec produits vendus. **Décision** : relance ciblée. |
+| **Dettes générales** | `GET /api/rapports/clients-dettes-general/` | Synthèse clients avec solde > 0. Filtre clients spéciaux. **Décision** : vue globale du recouvrement. |
+| **Rapport des ventes** | `GET /api/rapports/ventes/` | Lignes de vente, FIFO, bénéfices par période. **Décision** : analyser la performance commerciale. |
+| **Fiche stock** | `GET /api/rapports/{article_id}/fiche-stock/` | Mouvements chronologiques FIFO d'un article. **Décision** : audit d'un produit spécifique. |
+| **Journal complet** | `GET /api/rapports/journal/` | Entrées, ventes, caisse, paiements dettes. **Décision** : audit global de la période. |
+
+#### Paramètres communs
+
+| Paramètre | Usage |
+|-----------|--------|
+| `complet=true` | Liste intégrale sans pagination (export frontend) |
+| `page`, `page_size` | Pagination pour les grands rapports |
+| `date_debut`, `date_fin` | Période (selon le rapport) |
 
 #### Rapports complémentaires (endpoints dédiés)
 
@@ -782,7 +799,7 @@ UHAKIKAAPP propose une suite complète de **rapports JSON** (pour tableaux de bo
 | **Statistiques stock** | `GET /api/stocks/stats/` | Ruptures, alertes, expirations |
 | **Bénéfices totaux** | `GET /api/entrees/benefices-totaux/` | Gains/pertes, top 10 articles, évaluation performance |
 | **Produits plus vendus** | `GET /api/sorties/produits-plus-vendus/` | Classement des best-sellers |
-| **État caisse** | `GET /api/mouvements-caisse/solde/pdf/` | Situation financière |
+| **État caisse** | `GET /api/mouvements-caisse/solde/` | Soldes par devise, résumé global |
 | **Stats entreprise** | `GET /api/entreprises/{id}/stats/` | Compteurs globaux |
 
 #### Évaluation de performance (bénéfices)
@@ -795,13 +812,158 @@ UHAKIKAAPP propose une suite complète de **rapports JSON** (pour tableaux de bo
 | **PREOCCUPANTE** | Pertes significatives |
 | **CRITIQUE** | Pertes critiques |
 
-#### En-têtes professionnels
+#### En-têtes dans les réponses JSON
 
-Tous les PDF incluent le **logo**, le **nom**, le **slogan** et le **téléphone** de l'entreprise.
+Chaque rapport inclut `entreprise` (nom, logo_url, slogan, téléphone, etc.) et `agence` (succursale courante si applicable) pour l'affichage frontend.
 
 ---
 
-### 4.18 Factures, reçus et impression POS
+### 4.18 Inventaire physique — intégration frontend
+
+> **Documentation API détaillée :** [docs/INVENTAIRE_API.md](docs/INVENTAIRE_API.md)
+
+L'inventaire métier (comptage + correction tracée) est un **module opérationnel** distinct du rapport JSON « état stock ». Le frontend doit implémenter **deux entrées de menu** clairement séparées :
+
+| Écran frontend | Backend | Rôle |
+|----------------|---------|------|
+| **Rapport d'inventaire** | `GET /api/rapports/inventaire/` | Affichage / export : fiche catalogue ou rapport session (`?session_id=`) |
+| **Inventaire physique** | `/api/inventaires/` | Saisie comptage → validation → ajustements |
+
+**Règle de cohérence :** ne jamais modifier le stock côté front (pas de `PATCH /api/stocks/` pour « corriger »). Toute correction passe par **validation d'une session** (`POST .../valider/`), qui crée des mouvements `Entree` / `Sortie` tracés.
+
+#### Parcours utilisateur recommandé (5 écrans)
+
+```text
+1. Liste des sessions     GET  /api/inventaires/
+2. Nouvelle session       POST /api/inventaires/  (+ demarrer: true)
+3. Fiche de comptage      GET  /api/inventaires/{id}/  → tableau lignes
+4. Saisie des quantités   PATCH .../lignes/{id}/  ou  POST .../lignes/bulk/
+5. Récap + validation     GET .../resume/  puis  POST .../valider/
+```
+
+**Écran 1 — Liste** : afficher `libelle`, `date_inventaire`, `statut`, `resume.total_lignes`, `resume.lignes_comptees`. Filtrer visuellement par statut (`BROUILLON`, `EN_COURS`, `VALIDE`, `ANNULE`).
+
+**Écran 2 — Création** : formulaire avec :
+
+| Champ UI | Champ API | Notes |
+|----------|-----------|-------|
+| Libellé | `libelle` | Ex. « Inventaire magasin juin 2026 » |
+| Date | `date_inventaire` | `YYYY-MM-DD` |
+| Périmètre | `perimetre` | `EN_STOCK` (défaut), `COMPLET`, `PARTIEL` |
+| Type (optionnel) | `type_article_filtre` | Libellé type article |
+| Articles (si partiel) | `article_ids[]` | Obligatoire si `PARTIEL` |
+| Démarrer tout de suite | `demarrer: true` | Génère les lignes et passe en `EN_COURS` |
+
+Si `demarrer: false`, afficher un bouton **« Générer la fiche »** → `POST /api/inventaires/{id}/demarrer/`.
+
+**Écran 3 — Fiche de comptage** : tableau une ligne par article. Colonnes **obligatoires** :
+
+| Colonne UI | Source JSON | Éditable |
+|------------|-------------|----------|
+| Code | `article_id` | Non |
+| Désignation | `nom_scientifique`, `nom_commercial` | Non |
+| Unité | `unite` | Non |
+| **Stock logiciel** | `stock_theorique` | **Non** (figé au démarrage) |
+| **Stock physique** | `stock_physique` | **Oui** (saisie comptage) |
+| **Écart** | `ecart` | Non (calculé par le backend) |
+| Motif (optionnel) | `motif_ligne` | Oui si écart ≠ 0 |
+
+**Important :** afficher `stock_theorique` tel que renvoyé par l'API. Ne pas le recalculer depuis `/api/stocks/` en direct : pendant une session `EN_COURS`, le stock réel peut bouger (ventes), mais l'inventaire compare au **stock figé** au moment du démarrage.
+
+**Écran 4 — Saisie** :
+
+- Saisie ligne par ligne : `PATCH /api/inventaires/{id}/lignes/{ligne_id}/` avec `{ "stock_physique": "115.00000", "motif_ligne": "..." }`.
+- Saisie groupée (scan code-barres, import tablette) : `POST /api/inventaires/{id}/lignes/bulk/` avec `{ "lignes": [{ "article_id": "...", "stock_physique": "..." }] }`.
+- Body **JSON** (`Content-Type: application/json`) obligatoire.
+- Après chaque sauvegarde, rafraîchir `ecart` depuis la réponse ou recharger `GET .../{id}/`.
+- **Ne pas calculer l'écart côté front** sauf pour prévisualisation locale ; la source de vérité est `ecart` du backend.
+
+**Écran 5 — Validation** :
+
+- Bandeau `GET /api/inventaires/{id}/resume/` : `lignes_non_comptees`, `ecarts_positifs`, `ecarts_negatifs`, `ecarts_nuls`.
+- Bloquer le bouton **Valider** si `lignes_non_comptees > 0` (le backend renverra une erreur 400 sinon).
+- Afficher la liste des écarts ≠ 0 pour revue responsable.
+- `POST /api/inventaires/{id}/valider/` → session `VALIDE`.
+- Afficher les liens : `entree_ajustement_id`, `sortie_ajustement_id` (navigation vers fiche entrée / sortie ou journal).
+
+#### Statuts session → comportement UI
+
+| Statut | Actions autorisées frontend |
+|--------|----------------------------|
+| `BROUILLON` | Modifier libellé/date, **Démarrer**, **Annuler**, supprimer |
+| `EN_COURS` | Saisir `stock_physique`, **Valider**, **Annuler** |
+| `VALIDE` | Lecture seule ; liens vers ajustements ; impression récap |
+| `ANNULE` | Lecture seule |
+
+#### Impression / export PDF
+
+Le backend ne génère **pas** de PDF d'inventaire. Le front construit le document depuis :
+
+- **Fiche préparatoire** : `GET /api/rapports/inventaire/?seulement_en_stock=true` (mode `catalogue`)
+- **Rapport après comptage** : `GET /api/rapports/inventaire/?session_id={id}` (mode `session`)
+
+Colonnes du **rapport d'inventaire** :
+
+```text
+Article | Code | Stock logiciel | Stock physique | Écart | Statut stock | Statut ligne
+```
+
+Utiliser `statuts` dans la réponse pour les légendes / filtres UI. Laisser **Stock physique** vide sur la fiche imprimée avant comptage (mode catalogue).
+
+#### Différence rapport vs module (anti-confusion)
+
+| Besoin | Endpoint à utiliser |
+|--------|---------------------|
+| « Imprimer la fiche de comptage » | `GET /api/rapports/inventaire/?seulement_en_stock=true` |
+| « Afficher le rapport après comptage » | `GET /api/rapports/inventaire/?session_id={id}` |
+| « Saisir les quantités et valider » | `/api/inventaires/` |
+| Filtrer écarts négatifs dans le rapport | `?session_id=1&statut_ligne=ECART_NEGATIF` |
+
+Le rapport utilise des alias (`quantite`, `pu`, `total`, `statut_code`) — voir [RAPPORTS_API_FRONTEND.md](docs/RAPPORTS_API_FRONTEND.md).  
+Le module inventaire utilise **`stock_theorique`**, **`stock_physique`**, **`ecart`** — **ne pas mélanger** les deux jeux de champs dans le même tableau.
+
+#### Exemple de flux API (séquence frontend)
+
+```javascript
+// 1. Créer et démarrer
+const session = await api.post('/inventaires/', {
+  libelle: 'Inventaire juin 2026',
+  date_inventaire: '2026-06-21',
+  perimetre: 'EN_STOCK',
+  demarrer: true,
+});
+
+// 2. Saisie groupée après comptage
+await api.post(`/inventaires/${session.id}/lignes/bulk/`, {
+  lignes: comptages.map(({ article_id, qte }) => ({
+    article_id,
+    stock_physique: qte,
+  })),
+});
+
+// 3. Récap puis validation
+const { resume } = await api.get(`/inventaires/${session.id}/resume/`);
+if (resume.lignes_non_comptees === 0) {
+  const valide = await api.post(`/inventaires/${session.id}/valider/`);
+  // valide.entree_ajustement_id / sortie_ajustement_id
+}
+```
+
+#### Erreurs à gérer côté front
+
+| Erreur backend | Message utilisateur suggéré |
+|----------------|----------------------------|
+| Lignes non comptées | « Saisissez le stock physique pour tous les articles avant validation. » |
+| FIFO insuffisant (écart négatif) | « Stock incohérent pour {article} : vérifiez les entrées ou contactez l'administrateur. » |
+| Session déjà validée | Désactiver édition ; mode consultation uniquement |
+
+#### Cohérence post-validation
+
+Après validation, le stock affiché dans `/api/stocks/` et le rapport `/rapports/inventaire/` doit refléter les corrections. Le **journal** (`GET /api/rapports/journal/`) et la **fiche stock** par article montrent les mouvements d'ajustement avec le motif `Ajustement inventaire #…`.
+
+---
+
+### 4.19 Factures, reçus et impression POS
 
 #### Objectif
 
@@ -816,7 +978,7 @@ Professionnaliser les transactions et fournir des **preuves** aux clients.
 | **Bon de sortie** | PDF / ESC/POS | Justificatif de sortie stock |
 | **Bon d'entrée** | PDF | Justificatif d'approvisionnement |
 | **Reçu de paiement** | PDF | Preuve de paiement d'une dette |
-| **État de caisse** | PDF | Situation financière |
+| **État de caisse** | JSON (rapport) | Situation financière par devise |
 
 #### Configuration imprimante POS
 
@@ -830,7 +992,7 @@ Variables d'environnement : `POS_PRINTER_PORT`, `POS_PRINTER_BACKEND=serial`, et
 
 ---
 
-### 4.19 Tableau de bord et statistiques
+### 4.20 Tableau de bord et statistiques
 
 #### Indicateurs disponibles
 
@@ -855,7 +1017,7 @@ Variables d'environnement : `POS_PRINTER_PORT`, `POS_PRINTER_BACKEND=serial`, et
 
 ---
 
-### 4.20 Historique, audit et traçabilité
+### 4.21 Historique, audit et traçabilité
 
 #### Mécanismes de traçabilité
 
@@ -876,7 +1038,7 @@ Variables d'environnement : `POS_PRINTER_PORT`, `POS_PRINTER_BACKEND=serial`, et
 
 ---
 
-### 4.21 Import Excel (données en masse)
+### 4.22 Import Excel (données en masse)
 
 #### Objectif
 
@@ -1020,12 +1182,13 @@ UHAKIKAAPP expose une **API REST** complète, conçue pour être consommée par 
 | **Entreprises** | `/api/entreprises/`, `/api/succursales/` |
 | **Utilisateurs** | `/api/users/`, `/api/users/me/` |
 | **Catalogue** | `/api/articles/`, `/api/unites/`, `/api/typearticles/` |
-| **Stock** | `/api/stocks/`, `/api/entrees/`, `/api/sorties/` |
+| **Stock** | `/api/stocks/`, `/api/entrees/`, `/api/sorties/`, `/api/inventaires/` |
 | **Caisse** | `/api/mouvements-caisse/`, `/api/types-caisse/` |
 | **Clients & dettes** | `/api/clients/`, `/api/dettes/`, `/api/paiements-dettes/` |
 | **Fournisseurs & achats** | `/api/fournisseurs/`, `/api/lots/` |
 | **Commandes** | `/api/commandes/` |
-| **Rapports** | `/api/rapports/rapports/...` |
+| **Rapports** | `/api/rapports/...` (lecture seule) |
+| **Inventaire physique** | `/api/inventaires/` (sessions, comptage, validation) |
 | **Portail client** | `/api/client-auth/...`, `/api/client-portal/...` |
 | **Import Excel** | `/api/import-excel/...` |
 
@@ -1220,7 +1383,8 @@ python manage.py runserver
 5. POST /api/articles/       → Création articles
 6. POST /api/entrees/        → Approvisionnement
 7. POST /api/sorties/        → Vente
-8. GET  /api/rapports/rapports/inventaire/pdf/  → Rapport
+8. POST /api/inventaires/    → Inventaire physique (comptage + validation)
+9. GET  /api/rapports/inventaire/  → Rapport état stock (lecture seule)
 ```
 
 ---
@@ -1238,7 +1402,7 @@ python manage.py runserver
 - Des **dettes maîtrisées** avec recouvrement, statuts et reçus.
 - Des **achats fournisseurs** avec suivi en transit et clôture propre.
 - Des **commandes clients** avec livraison automatique et portail dédié.
-- Des **rapports PDF professionnels** pour piloter votre activité.
+- Des **rapports JSON** pour piloter votre activité, et un **module inventaire physique** pour comptage et corrections tracées.
 - Une **API REST documentée** prête pour vos interfaces web et mobiles.
 
 ### Ce que UHAKIKAAPP prépare pour demain
