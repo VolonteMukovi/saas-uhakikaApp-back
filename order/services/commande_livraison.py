@@ -5,7 +5,7 @@ Même logique métier que ``SortieViewSet.create`` (lots, ``Stock``, ``BeneficeL
 """
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 
 from django.db import transaction
 from django.db.models import Sum
@@ -89,8 +89,8 @@ def apply_sortie_on_commande_livree(commande: Commande) -> Sortie:
 
     for it in items:
         article_obj = it.article
-        qte = int(it.quantite)
-        if qte < 1:
+        qte = Decimal(str(it.quantite))
+        if qte <= 0:
             raise ValidationError({"statut": _("Quantité invalide sur une ligne de commande.")})
 
         stock_disponible = (
@@ -160,7 +160,7 @@ def apply_sortie_on_commande_livree(commande: Commande) -> Sortie:
             total_prix_vente += lot.prix_vente * Decimal(str(quantite_a_prelever))
 
         prix_vente_moyen_lots = (
-            (total_prix_vente / Decimal(str(qte))).quantize(Decimal("0.01")) if qte > 0 else Decimal("0.00")
+            (total_prix_vente / Decimal(str(qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN) if qte > 0 else Decimal("0.00")
         )
         prix_unitaire_final = prix_vente_moyen_lots
 
@@ -192,8 +192,8 @@ def apply_sortie_on_commande_livree(commande: Commande) -> Sortie:
                 quantite_vendue=qte_lot,
                 prix_achat=prix_achat,
                 prix_vente=prix_unitaire_final,
-                benefice_unitaire=benefice_unitaire.quantize(Decimal("0.01")),
-                benefice_total=benefice_total.quantize(Decimal("0.01")),
+                benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
             )
 
         montant_ligne = prix_unitaire_final * Decimal(str(qte))
@@ -216,7 +216,7 @@ def apply_sortie_on_commande_livree(commande: Commande) -> Sortie:
             ref_cmd = (commande.reference or "").strip() or str(commande.pk)
             piece = f"LIV-CMD-{ref_cmd}-{devise_key}"[:100]
             creer_mouvement_caisse(
-                montant=total_devise.quantize(Decimal("0.01")),
+                montant=total_devise.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                 devise=devise_obj or default_dev,
                 type_mouvement="ENTREE",
                 entreprise_id=sortie.entreprise_id,

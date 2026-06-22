@@ -1,18 +1,13 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from django.db.models import Sum, Q, F, DecimalField, OuterRef, Subquery, Value, Exists, ExpressionWrapper
+from django.db.models import Sum, Q, F, DecimalField, OuterRef, Subquery, Value, Exists, ExpressionWrapper, Count
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.translation import gettext as _
-from django.utils import translation
-from django.http import HttpResponse
-from django.shortcuts import get_object_or_404
 from datetime import datetime, date
-from decimal import Decimal
-import io
+from decimal import Decimal, ROUND_DOWN, InvalidOperation
 import math
 
 from config.pagination import StandardResultsSetPagination
@@ -32,37 +27,31 @@ class InventaireStockLine:
         self.Qte = qte
         self.seuilAlert = seuil
 
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
+from rest_framework.exceptions import NotFound
 
-from django.contrib.contenttypes.models import ContentType
-
-from stock.db_compat import (
-    build_mouvementcaisse_queryset,
-    mouvementcaisse_column_names,
-    mouvementcaisse_has_content_type_id,
-)
 from stock.models import (
     Stock,
     LigneEntree,
     LigneSortie,
+    Sortie,
     Article,
     Entree,
-    Entreprise,
     DetteClient,
+    InventaireSession,
+    InventaireLigne,
 )
 from .serializers import (
     InventaireArticleSerializer,
+    RapportInventaireSessionLigneSerializer,
+    INVENTAIRE_STATUTS_REFERENCE,
     BonEntreeArticleSerializer,
     BonAchatSerializer,
-    RecapitulatifAchatSerializer
+    RecapitulatifAchatSerializer,
+    _stock_statut_code,
+    _seuil_article,
 )
-from users.permissions import IsSuperAdminOrAdmin, IsAdminOrUser
-from .utils.pdf_generator import PDFGenerator
-from .utils.entete import get_entete_entreprise
+from users.permissions import IsAdminOrUser
+from .utils.report_envelope import wrap_report_response
 
 
 def _dettes_rapport_is_special_filter(request):
@@ -94,16 +83,60 @@ def _dettes_rapport_is_special_filter(request):
     )
 
 
+def _dettes_encours_qs(
+    *,
+    eid,
+    branch_id=None,
+    date_debut_obj=None,
+    date_fin_obj=None,
+    special_kw=None,
+):
+    """
+    Dettes EN_COURS avec solde > 0.
+    Utilise les annotations DB (solde_restant_agg) — pas les @property montant_paye / solde_restant.
+    """
+    qs = DetteClient.objects.with_paiements_aggregate().filter(
+        statut='EN_COURS',
+        solde_restant_agg__gt=0,
+    )
+    if eid:
+        qs = qs.filter(entreprise_id=eid)
+    if branch_id is not None:
+        qs = qs.filter(succursale_id=branch_id)
+    if date_debut_obj:
+        qs = qs.filter(date_creation__date__gte=date_debut_obj)
+    if date_fin_obj:
+        qs = qs.filter(date_creation__date__lte=date_fin_obj)
+    if special_kw is not None and eid:
+        qs = qs.filter(
+            client__liens_entreprise__entreprise_id=eid,
+            client__liens_entreprise__is_special=special_kw['is_special'],
+        )
+    return qs.distinct()
+
+
 class RapportsViewSet(viewsets.ViewSet):
     """
-    ViewSet pour la génération des différents rapports.
+    ViewSet pour les rapports métier (données JSON uniquement).
+    Le frontend gère l'affichage, l'impression et l'export PDF/Excel.
     Accès réservé aux Admin et User (Agent). SuperAdmin n'a pas accès aux rapports métier.
     """
     permission_classes = [IsAdminOrUser]
 
-    def _get_entete_entreprise(self, entreprise, user):
-        """Génère l'en-tête simplifié : nom, logo, slogan, téléphone uniquement."""
-        return get_entete_entreprise(entreprise)
+    def _report_response(self, request, rapport: str, data: dict):
+        """Enveloppe standard + Response DRF."""
+        titre = data.get('titre') or rapport
+        eid, branch_id = self._get_tenant_ids_strict(request)
+        wrapped = wrap_report_response(
+            rapport=rapport,
+            titre=titre,
+            request=request,
+            user=request.user,
+            data=data,
+            eid=eid,
+            branch_id=branch_id,
+        )
+        return Response(wrapped)
 
     def _get_tenant_ids_strict(self, request):
         """
@@ -207,8 +240,18 @@ class RapportsViewSet(viewsets.ViewSet):
         qs = (
             Article.objects.filter(entreprise_id=eid)
             .annotate(
-                inv_qte=Coalesce(Subquery(stock_sq.values('Qte')[:1]), Value(0)),
-                inv_seuil=Coalesce(Subquery(stock_sq.values('seuilAlert')[:1]), Value(0)),
+                inv_qte=Coalesce(
+                    F('stock__Qte'),
+                    Subquery(stock_sq.values('Qte')[:1]),
+                    Value(Decimal('0.000')),
+                    output_field=DecimalField(max_digits=12, decimal_places=5),
+                ),
+                inv_seuil=Coalesce(
+                    F('stock__seuilAlert'),
+                    Subquery(stock_sq.values('seuilAlert')[:1]),
+                    Value(Decimal('0.000')),
+                    output_field=DecimalField(max_digits=12, decimal_places=5),
+                ),
             )
             .select_related(
                 'sous_type_article',
@@ -221,6 +264,157 @@ class RapportsViewSet(viewsets.ViewSet):
             qs = qs.filter(succursale_id=branch_id)
         return qs
 
+    @staticmethod
+    def _inventaire_stats_catalogue(lines):
+        total = len(lines)
+        en_rupture = sum(1 for L in lines if L.Qte <= 0)
+        en_alerte = sum(
+            1 for L in lines
+            if L.Qte > 0 and L.seuilAlert > 0 and L.Qte <= L.seuilAlert
+        )
+        normaux = sum(
+            1 for L in lines
+            if L.Qte > 0 and (L.seuilAlert <= 0 or L.Qte > L.seuilAlert)
+        )
+        return {
+            'total_articles': total,
+            'en_alerte': en_alerte,
+            'en_rupture': en_rupture,
+            'normaux': normaux,
+            'lignes_comptees': 0,
+            'lignes_non_comptees': total,
+            'ecarts_positifs': 0,
+            'ecarts_negatifs': 0,
+            'ecarts_nuls': 0,
+            'conformes': 0,
+        }
+
+    @staticmethod
+    def _inventaire_stats_session(lignes_qs):
+        lignes = list(lignes_qs)
+        total = len(lignes)
+        comptees = sum(1 for l in lignes if l.stock_physique is not None)
+        ecarts_pos = sum(1 for l in lignes if l.ecart is not None and l.ecart > 0)
+        ecarts_neg = sum(1 for l in lignes if l.ecart is not None and l.ecart < 0)
+        ecarts_nuls = sum(1 for l in lignes if l.ecart is not None and l.ecart == 0)
+        en_rupture = sum(
+            1 for l in lignes
+            if _stock_statut_code(l.stock_theorique, _seuil_article(l.article)) == 'RUPTURE'
+        )
+        en_alerte = sum(
+            1 for l in lignes
+            if _stock_statut_code(l.stock_theorique, _seuil_article(l.article)) == 'ALERTE'
+        )
+        normaux = sum(
+            1 for l in lignes
+            if _stock_statut_code(l.stock_theorique, _seuil_article(l.article)) == 'NORMAL'
+        )
+        return {
+            'total_articles': total,
+            'en_alerte': en_alerte,
+            'en_rupture': en_rupture,
+            'normaux': normaux,
+            'lignes_comptees': comptees,
+            'lignes_non_comptees': total - comptees,
+            'ecarts_positifs': ecarts_pos,
+            'ecarts_negatifs': ecarts_neg,
+            'ecarts_nuls': ecarts_nuls,
+            'conformes': ecarts_nuls,
+        }
+
+    def _serialize_inventaire_session(self, request, session, *, force_complet: bool = False):
+        """Rapport d'inventaire basé sur une session opérationnelle (comptage + écarts)."""
+        statut_filtre = request.query_params.get('statut')
+        statut_ligne_filtre = request.query_params.get('statut_ligne')
+        if force_complet:
+            complet = True
+        else:
+            complet = request.query_params.get('complet', 'true').lower() not in (
+                'false', '0', 'no', 'non',
+            )
+
+        lignes_qs = (
+            session.lignes.select_related(
+                'article__unite',
+                'article__sous_type_article',
+                'article__sous_type_article__type_article',
+            )
+            .order_by('article__nom_scientifique', 'article_id')
+        )
+
+        if statut_ligne_filtre:
+            code = statut_ligne_filtre.upper().replace(' ', '_')
+            if code == 'NON_COMPTÉ' or code == 'NON_COMpte':
+                lignes_qs = lignes_qs.filter(stock_physique__isnull=True)
+            elif code == 'CONFORME':
+                lignes_qs = lignes_qs.filter(ecart=0)
+            elif code == 'ECART_POSITIF':
+                lignes_qs = lignes_qs.filter(ecart__gt=0)
+            elif code == 'ECART_NEGATIF':
+                lignes_qs = lignes_qs.filter(ecart__lt=0)
+
+        if statut_filtre:
+            # Filtre stock sur stock théorique figé — post-filter en Python
+            statut_upper = statut_filtre.upper()
+            filtered = []
+            for ligne in lignes_qs:
+                code = _stock_statut_code(ligne.stock_theorique, _seuil_article(ligne.article))
+                if code == statut_upper:
+                    filtered.append(ligne.pk)
+            lignes_qs = lignes_qs.filter(pk__in=filtered)
+
+        stats = self._inventaire_stats_session(
+            session.lignes.select_related('article').order_by('article__nom_scientifique')
+        )
+
+        resp = {
+            'titre': _("RAPPORT D'INVENTAIRE"),
+            'mode': 'session',
+            'session': {
+                'id': session.pk,
+                'libelle': session.libelle,
+                'statut': session.statut,
+                'statut_libelle': session.get_statut_display(),
+                'date_inventaire': session.date_inventaire.isoformat(),
+                'date_demarrage': session.date_demarrage.isoformat() if session.date_demarrage else None,
+                'date_validation': session.date_validation.isoformat() if session.date_validation else None,
+                'perimetre': session.perimetre,
+                'entree_ajustement_id': session.entree_ajustement_id,
+                'sortie_ajustement_id': session.sortie_ajustement_id,
+            },
+            'periode': {
+                'date_debut': session.date_inventaire.isoformat(),
+                'date_fin': session.date_inventaire.isoformat(),
+            },
+            'filtres': {
+                'session_id': session.pk,
+                'statut': statut_filtre,
+                'statut_ligne': statut_ligne_filtre,
+                'complet': complet,
+            },
+            'statuts': INVENTAIRE_STATUTS_REFERENCE,
+            'statistiques': stats,
+            'complet': complet,
+        }
+
+        if complet:
+            data = RapportInventaireSessionLigneSerializer(lignes_qs, many=True).data
+            resp['articles'] = data
+            resp['details'] = data
+            return resp
+
+        paginator = InventaireResultsSetPagination()
+        page_qs = paginator.paginate_queryset(list(lignes_qs), request)
+        data = RapportInventaireSessionLigneSerializer(page_qs, many=True).data
+        resp['articles'] = data
+        resp['details'] = data
+        if page_qs is not None:
+            resp['count'] = paginator.page.paginator.count
+            resp['next'] = paginator.get_next_link()
+            resp['previous'] = paginator.get_previous_link()
+            resp['page_size'] = paginator.get_page_size(request)
+        return resp
+
     def _serialize_inventaire(self, request, *, force_complet: bool = False):
         """
         Corps du rapport d'inventaire (dict prêt pour JSON ou PDF).
@@ -230,10 +424,12 @@ class RapportsViewSet(viewsets.ViewSet):
         dont la date tombe dans [date_debut, date_fin] (tenant-scopé). Sinon : catalogue complet.
         """
         user = request.user
-        entreprise = user.get_entreprise(request)
         date_debut, date_fin, d0, d1 = self._parse_inventaire_date_bounds(request)
         type_article = request.query_params.get('type_article')
         statut_filtre = request.query_params.get('statut')
+        seulement_en_stock = request.query_params.get('seulement_en_stock', 'false').lower() in (
+            'true', '1', 'yes', 'oui',
+        )
         filtrer_mouvements = request.query_params.get('filtrer_mouvements', 'false').lower() in (
             'true',
             '1',
@@ -251,6 +447,8 @@ class RapportsViewSet(viewsets.ViewSet):
             )
 
         qs = self._inventaire_article_queryset(request)
+        if seulement_en_stock:
+            qs = qs.filter(inv_qte__gt=0)
         if filtrer_mouvements:
             qs = self._filter_articles_mouvements_periode(qs, request, d0, d1)
         if type_article:
@@ -262,51 +460,48 @@ class RapportsViewSet(viewsets.ViewSet):
             if statut_upper == 'RUPTURE':
                 qs = qs.filter(inv_qte=0)
             elif statut_upper == 'ALERTE':
-                qs = qs.filter(inv_qte__gt=0, inv_qte__lte=F('inv_seuil'))
+                qs = qs.filter(inv_qte__gt=0, inv_seuil__gt=0, inv_qte__lte=F('inv_seuil'))
             elif statut_upper == 'NORMAL':
-                qs = qs.filter(inv_qte__gt=F('inv_seuil'))
+                qs = qs.filter(inv_qte__gt=0).filter(
+                    Q(inv_qte__gt=F('inv_seuil')) | Q(inv_seuil=0)
+                )
 
         lines = [
             InventaireStockLine(a, a.inv_qte, a.inv_seuil) for a in qs
         ]
-        total_articles = len(lines)
-        en_rupture = sum(1 for L in lines if L.Qte == 0)
-        en_alerte = sum(1 for L in lines if L.Qte > 0 and L.Qte <= L.seuilAlert)
-        normaux = sum(1 for L in lines if L.Qte > L.seuilAlert)
+        stats = self._inventaire_stats_catalogue(lines)
 
-        entete = self._get_entete_entreprise(entreprise, user)
         resp = {
-            'entete': entete,
             'titre': _("RAPPORT D'INVENTAIRE"),
+            'mode': 'catalogue',
+            'session': None,
             'periode': {
                 'date_debut': date_debut,
                 'date_fin': date_fin,
             },
             'filtres': {
                 'filtrer_mouvements': filtrer_mouvements,
-                'description': _(
-                    'Si filtrer_mouvements=true : articles ayant au moins une entrée '
-                    '(date du bon) ou une sortie (date de création) dans l’intervalle.'
-                )
-                if filtrer_mouvements
-                else _('Catalogue complet du tenant : la période sert uniquement à l’affichage.'),
+                'seulement_en_stock': seulement_en_stock,
+                'type_article': type_article,
+                'statut': statut_filtre,
+                'statut_ligne': None,
+                'session_id': None,
+                'complet': complet,
             },
-            'statistiques': {
-                'total_articles': total_articles,
-                'en_alerte': en_alerte,
-                'en_rupture': en_rupture,
-                'normaux': normaux,
-            },
+            'statuts': INVENTAIRE_STATUTS_REFERENCE,
+            'statistiques': stats,
             'complet': complet,
         }
 
         if complet:
             resp['articles'] = InventaireArticleSerializer(lines, many=True).data
+            resp['details'] = resp['articles']
             return resp
 
         paginator = InventaireResultsSetPagination()
         page_lines = paginator.paginate_queryset(lines, request)
         resp['articles'] = InventaireArticleSerializer(page_lines, many=True).data
+        resp['details'] = resp['articles']
         if page_lines is not None:
             resp['count'] = paginator.page.paginator.count
             resp['next'] = paginator.get_next_link()
@@ -317,51 +512,42 @@ class RapportsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='inventaire')
     def inventaire(self, request):
         """
-        Rapport d'inventaire : **tous** les articles catalogue du tenant (entreprise / succursale),
-        avec stock et seuils (0 si aucune fiche Stock).
+        **Rapport d'inventaire** JSON (affichage / export frontend).
 
-        Paramètres optionnels:
-        - date_debut, date_fin: YYYY-MM-DD (validés). Défaut exercice : 01-01 → 31-12 (année courante ou année de date_fin).
-        - filtrer_mouvements: false (défaut) = tout le catalogue du tenant (période = libellé + validation des dates) ;
-          true = ne garder que les articles avec au moins une entrée ou une sortie dans l’intervalle.
-        - type_article: Filtrer par type d'article (libellé)
-        - statut: Filtrer par statut (NORMAL, ALERTE, RUPTURE)
-        - complet: true (défaut) = liste intégrale sans pagination ; false = pagination (page_size jusqu'à 5000)
+        Deux modes :
+        - **catalogue** (défaut) : stock théorique actuel, colonnes inventaire avec
+          `stock_physique` et `ecart` vides (`statut_ligne_code`: NON_APPLICABLE).
+        - **session** (`session_id`) : session opérationnelle avec comptage, écarts,
+          statuts ligne (NON_COMPTÉ, CONFORME, ECART_POSITIF, ECART_NEGATIF).
+
+        Paramètres :
+        - session_id : ID session `/api/inventaires/` (rapport après comptage)
+        - statut : NORMAL | ALERTE | RUPTURE (stock théorique)
+        - statut_ligne : NON_COMPTÉ | CONFORME | ECART_POSITIF | ECART_NEGATIF (mode session)
+        - seulement_en_stock, type_article, filtrer_mouvements, complet, date_debut, date_fin
 
         GET /api/rapports/inventaire/
-        GET /api/rapports/inventaire/?date_debut=2026-01-01&date_fin=2026-12-31
-        GET /api/rapports/inventaire/?filtrer_mouvements=false
-        GET /api/rapports/inventaire/?statut=ALERTE&complet=false
+        GET /api/rapports/inventaire/?session_id=1
+        GET /api/rapports/inventaire/?statut=ALERTE&seulement_en_stock=true
         """
-        return Response(self._serialize_inventaire(request))
+        session_id = request.query_params.get('session_id')
+        if session_id:
+            eid, branch_id = self._get_tenant_ids_strict(request)
+            try:
+                session = InventaireSession.objects.get(pk=int(session_id), entreprise_id=eid)
+            except (InventaireSession.DoesNotExist, ValueError, TypeError):
+                raise ValidationError({'session_id': 'Session d\'inventaire introuvable.'})
+            if branch_id is not None and session.succursale_id not in (None, branch_id):
+                raise PermissionDenied('Session hors de votre succursale.')
+            if session.statut == InventaireSession.STATUT_BROUILLON:
+                raise ValidationError({
+                    'session_id': 'Démarrez la session avant d\'éditer le rapport (POST .../demarrer/).',
+                })
+            data = self._serialize_inventaire_session(request, session)
+        else:
+            data = self._serialize_inventaire(request)
+        return self._report_response(request, 'inventaire', data)
 
-    @action(detail=False, methods=['get'], url_path='inventaire/pdf')
-    def inventaire_pdf(self, request):
-        """
-        Export PDF du rapport d'inventaire.
-        Format A4, prêt pour l'impression.
-        Liste **complète** (tous les articles du tenant), sans pagination.
-
-        Paramètres: mêmes que l'action inventaire (dates, filtrer_mouvements, type_article, statut).
-
-        GET /api/rapports/inventaire/pdf/
-        GET /api/rapports/inventaire/pdf/?date_debut=2026-01-01&date_fin=2026-06-30
-        GET /api/rapports/inventaire/pdf/?filtrer_mouvements=false
-        """
-        data = self._serialize_inventaire(request, force_complet=True)
-
-        pdf_generator = PDFGenerator()
-        pdf_buffer = pdf_generator.generate_inventaire_pdf(data)
-        
-        # Créer la réponse HTTP avec le PDF
-        response = HttpResponse(pdf_buffer, content_type='application/pdf')
-        
-        # Nom du fichier avec la date
-        filename = f"inventaire_{timezone.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        response['Content-Disposition'] = f'attachment; filename="{filename}"'
-        
-        return response
-    
     def _get_bon_entree_queryset_and_stats(self, request):
         """Retourne (queryset stocks, dict statistiques) pour le rapport de réquisition."""
         user = request.user
@@ -392,69 +578,12 @@ class RapportsViewSet(viewsets.ViewSet):
             'en_alerte': en_alerte
         }
 
-    @action(detail=False, methods=['get'], url_path='bon-entree')
-    def bon_entree(self, request):
-        """
-        Rapport de réquisition.
-        
-        Liste les articles dont le stock est au seuil d'alerte ou en rupture.
-        Les colonnes 'quantite' et 'prix_total' sont vides pour être remplies manuellement
-        lors de l'approvisionnement.
-        
-        Paramètres optionnels:
-        - inclure_normaux: true/false (par défaut: false) - Inclure aussi les articles en stock normal
-        
-        GET /api/rapports/bon-entree/
-        GET /api/rapports/bon-entree/?inclure_normaux=true
-        """
+    def _bon_entree_stocks_with_extras(self, request):
+        """Liste complète des stocks réquisition (+ extra_articles optionnels)."""
         user = request.user
-        entreprise = user.get_entreprise(request)
-        stocks, statistiques = self._get_bon_entree_queryset_and_stats(request)
-        
-        # Pagination pour l'API JSON
-        paginator = StandardResultsSetPagination()
-        page_stocks = paginator.paginate_queryset(stocks, request)
-        serializer = BonEntreeArticleSerializer(page_stocks, many=True)
-        entete = self._get_entete_entreprise(entreprise, user)
-        
-        resp = {
-            'entete': entete,
-            'titre': _("RAPPORT DE RÉQUISITION"),
-            'instructions': _('Remplir manuellement les colonnes "Quantité" et "Prix Total" lors de l\'approvisionnement. Les montants sont en devise principale mentionnée dans l\'en-tête.'),
-            'statistiques': statistiques,
-            'articles': serializer.data
-        }
-        if page_stocks is not None:
-            resp['count'] = paginator.page.paginator.count
-            resp['next'] = paginator.get_next_link()
-            resp['previous'] = paginator.get_previous_link()
-            resp['page_size'] = paginator.get_page_size(request)
-        return Response(resp)
-    
-    @action(detail=False, methods=['get'], url_path='bon-entree/pdf')
-    def bon_entree_pdf(self, request):
-        """
-        Export PDF du rapport de réquisition.
-        Format A4, prêt pour l'impression avec colonnes à remplir manuellement.
-        
-        Paramètres: inclure_normaux (optionnel), extra_articles (optionnel, ex. PRLI0007 ou ID1,ID2 pour ajouter des articles en état normal), lang (fr/en).
-        
-        GET /api/rapports/bon-entree/pdf/
-        GET /api/rapports/bon-entree/pdf/?extra_articles=PRLI0007&lang=fr
-        """
-        # Activer la langue de la requête pour que le PDF soit traduit (titre, sous-titres, etc.)
-        lang = (request.GET.get("lang") or getattr(request, "LANGUAGE_CODE", "fr") or "fr").strip().lower()
-        if lang not in ("en", "fr"):
-            lang = "fr"
-        translation.activate(lang)
-
-        # Données pour le PDF : tous les articles (en rupture + en alerte), sans pagination, + extra_articles (ex. état normal)
-        user = request.user
-        entreprise = user.get_entreprise(request)
-        stocks, statistiques = self._get_bon_entree_queryset_and_stats(request)
+        stocks, _ = self._get_bon_entree_queryset_and_stats(request)
         stocks_list = list(stocks)
-        # Articles supplémentaires demandés (ex. état normal) : ?extra_articles=PRLI0007 ou extra_articles=ID1,ID2
-        extra_param = (request.GET.get('extra_articles') or '').strip()
+        extra_param = (request.query_params.get('extra_articles') or '').strip()
         extra_ids = [x.strip() for x in extra_param.split(',') if x.strip()]
         if extra_ids:
             existing_ids = {s.article.article_id for s in stocks_list}
@@ -474,28 +603,108 @@ class RapportsViewSet(viewsets.ViewSet):
                     'article__unite'
                 ).order_by('article__article_id')
                 stocks_list.extend(list(extra_stocks))
-        serializer = BonEntreeArticleSerializer(stocks_list, many=True)
-        entete = self._get_entete_entreprise(entreprise, user)
-        data = {
-            'entete': entete,
+        return stocks_list
+
+    @staticmethod
+    def _enrich_bon_entree_statistiques(statistiques, articles_data):
+        montant = Decimal('0')
+        qte_commande = Decimal('0')
+        for row in articles_data or []:
+            try:
+                montant += Decimal(str(row.get('montant_estime') or row.get('prix_total') or '0'))
+                qte_commande += Decimal(str(row.get('quantite_a_commander') or '0'))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+        enriched = dict(statistiques)
+        enriched['montant_estime_total'] = str(
+            montant.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        )
+        enriched['quantite_a_commander_total'] = str(
+            qte_commande.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        )
+        return enriched
+
+    def _build_bon_entree_data(self, request, *, paginate: bool = True):
+        stocks, statistiques = self._get_bon_entree_queryset_and_stats(request)
+        inclure_normaux = request.query_params.get('inclure_normaux', 'false').lower() == 'true'
+        extra_param = (request.query_params.get('extra_articles') or '').strip()
+
+        if paginate and not extra_param:
+            paginator = StandardResultsSetPagination()
+            page_stocks = paginator.paginate_queryset(stocks, request)
+            articles_data = BonEntreeArticleSerializer(page_stocks, many=True).data
+            stats = self._enrich_bon_entree_statistiques(statistiques, articles_data)
+            resp = {
+                'titre': _("RAPPORT DE RÉQUISITION"),
+                'instructions': _(
+                    'Quantités et montants estimés calculés automatiquement : stock actuel, '
+                    'dernier prix d\'achat, quantité suggérée (jusqu\'au seuil) et montant estimé. '
+                    'Ajustez côté client si besoin avant de passer commande.'
+                ),
+                'filtres': {
+                    'inclure_normaux': inclure_normaux,
+                    'extra_articles': extra_param or None,
+                },
+                'statistiques': stats,
+                'totaux': {
+                    'montant_estime_total': stats.get('montant_estime_total'),
+                    'quantite_a_commander_total': stats.get('quantite_a_commander_total'),
+                },
+                'articles': articles_data,
+                'details': articles_data,
+            }
+            if page_stocks is not None:
+                resp['count'] = paginator.page.paginator.count
+                resp['next'] = paginator.get_next_link()
+                resp['previous'] = paginator.get_previous_link()
+                resp['page_size'] = paginator.get_page_size(request)
+            return resp
+
+        stocks_list = self._bon_entree_stocks_with_extras(request)
+        articles_data = BonEntreeArticleSerializer(stocks_list, many=True).data
+        stats = self._enrich_bon_entree_statistiques(statistiques, articles_data)
+        return {
             'titre': _("RAPPORT DE RÉQUISITION"),
-            'instructions': _('Remplir manuellement les colonnes "Quantité" et "Prix Total" lors de l\'approvisionnement. Les montants sont en devise principale mentionnée dans l\'en-tête.'),
-            'statistiques': statistiques,
-            'articles': serializer.data
+            'instructions': _(
+                'Quantités et montants estimés calculés automatiquement : stock actuel, '
+                'dernier prix d\'achat, quantité suggérée (jusqu\'au seuil) et montant estimé. '
+                'Ajustez côté client si besoin avant de passer commande.'
+            ),
+            'filtres': {
+                'inclure_normaux': inclure_normaux,
+                'extra_articles': extra_param or None,
+            },
+            'statistiques': stats,
+            'totaux': {
+                'montant_estime_total': stats.get('montant_estime_total'),
+                'quantite_a_commander_total': stats.get('quantite_a_commander_total'),
+            },
+            'articles': articles_data,
+            'details': articles_data,
         }
 
-        # Générer le PDF (toutes les _() dans le générateur utilisent la langue active)
-        pdf_generator = PDFGenerator()
-        pdf_buffer = pdf_generator.generate_bon_entree_pdf(data)
-        
-        # Créer la réponse HTTP
-        response = HttpResponse(pdf_buffer, content_type='application/pdf')
-        response["Content-Language"] = lang
-        # Nom du fichier
-        filename = f"rapport_requisition_{timezone.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        response['Content-Disposition'] = f'attachment; filename="{filename}"'
-        
-        return response
+    @action(detail=False, methods=['get'], url_path='bon-entree')
+    def bon_entree(self, request):
+        """
+        Rapport de réquisition (JSON) — préparation des achats.
+
+        Chaque ligne inclut : stock actuel, dernier PU d'achat, quantité suggérée
+        (`quantite_a_commander`) et montant estimé (`montant_estime` / `prix_total`).
+
+        Paramètres:
+        - inclure_normaux: true/false (défaut false)
+        - extra_articles: IDs séparés par virgule (ex. PRLI0007,ID2)
+        - complet: true = sans pagination (défaut si extra_articles présent)
+        - page, page_size: pagination standard
+
+        GET /api/rapports/bon-entree/
+        GET /api/rapports/bon-entree/?inclure_normaux=true&extra_articles=PRLI0007
+        """
+        complet = request.query_params.get('complet', '').lower() in ('true', '1', 'yes', 'oui')
+        has_extras = bool((request.query_params.get('extra_articles') or '').strip())
+        paginate = not (complet or has_extras)
+        data = self._build_bon_entree_data(request, paginate=paginate)
+        return self._report_response(request, 'bon-entree', data)
 
     @action(detail=False, methods=['get'], url_path='clients-dettes')
     def clients_dettes(self, request):
@@ -512,7 +721,6 @@ class RapportsViewSet(viewsets.ViewSet):
         is_special=all pour tout client du tenant ; true / false pour forcer le périmètre.
         """
         user = request.user
-        entreprise = user.get_entreprise(request)
         eid, branch_id = self._get_tenant_ids_strict(request)
 
         try:
@@ -624,47 +832,32 @@ class RapportsViewSet(viewsets.ViewSet):
             'telephone': c.telephone,
             'adresse': c.adresse,
             'email': c.email,
-            'is_special': c.is_special,
+            'is_special': bool(lien.is_special) if lien else False,
             'date_enregistrement': c.date_enregistrement.strftime('%Y-%m-%d %H:%M') if c.date_enregistrement else None,
             'dettes': dettes,
             'totaux_encours': {
-                'montant_total': str(tot_montant_encours_client.quantize(Decimal('0.01'))),
-                'montant_paye': str(tot_paye_encours_client.quantize(Decimal('0.01'))),
-                'solde_restant': str(tot_solde_encours_client.quantize(Decimal('0.01')))
+                'montant_total': str(tot_montant_encours_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                'montant_paye': str(tot_paye_encours_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                'solde_restant': str(tot_solde_encours_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
             }
         })
 
-        entete = self._get_entete_entreprise(entreprise, user) if entreprise else self._get_entete_entreprise(Entreprise.objects.first(), user)
-
-        # Calculer les totaux pour ce client uniquement
         client_totaux = clients_data[0].get('totaux_encours', {}) if clients_data else {}
 
-        return Response({
-            'entete': entete,
+        return self._report_response(request, 'clients-dettes', {
             'titre': _("Dettes du client: %(nom)s") % {'nom': client.nom},
+            'filtres': {
+                'client_id': client_id,
+                'is_special': special_kw,
+            },
             'clients': clients_data,
+            'details': clients_data,
             'totaux_encours': {
                 'montant_total': client_totaux.get('montant_total', '0.00'),
                 'montant_paye': client_totaux.get('montant_paye', '0.00'),
                 'solde_restant': client_totaux.get('solde_restant', '0.00')
             }
         })
-
-    @action(detail=False, methods=['get'], url_path='clients-dettes/pdf')
-    def clients_dettes_pdf(self, request):
-        """Génère le PDF des clients et dettes."""
-        json_response = self.clients_dettes(request)
-        if json_response.status_code != 200:
-            return json_response
-
-        data = json_response.data
-        pdf_generator = PDFGenerator()
-        pdf_buffer = pdf_generator.generate_clients_dettes_pdf(data)
-
-        response = HttpResponse(pdf_buffer, content_type='application/pdf')
-        filename = f"clients_dettes_{timezone.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        response['Content-Disposition'] = f'attachment; filename="{filename}"'
-        return response
 
     @action(detail=False, methods=['get'], url_path='clients-dettes-general')
     def clients_dettes_general(self, request):
@@ -687,7 +880,6 @@ class RapportsViewSet(viewsets.ViewSet):
         - is_special=all → tous les clients (spéciaux + standards), toujours scoping entreprise/succursale.
         """
         user = request.user
-        entreprise = user.get_entreprise(request)
         eid, branch_id = self._get_tenant_ids_strict(request)
 
         try:
@@ -730,45 +922,27 @@ class RapportsViewSet(viewsets.ViewSet):
                 'error': 'La date_debut doit être antérieure ou égale à la date_fin'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Construire le filtre de base pour les dettes
-        filtre_dettes = {
-            'solde_restant__gt': 0,
-            'statut': 'EN_COURS'
-        }
-        
-        # Ajouter le filtre de date si fourni
-        if date_debut_obj:
-            filtre_dettes['date_creation__date__gte'] = date_debut_obj
-        if date_fin_obj:
-            filtre_dettes['date_creation__date__lte'] = date_fin_obj
+        # Dettes en cours (solde > 0) — annotations DB, pas les @property
+        branch_filter = branch_id if user.is_agent(request) else None
+        dettes_encours_qs = _dettes_encours_qs(
+            eid=eid,
+            branch_id=branch_filter,
+            date_debut_obj=date_debut_obj,
+            date_fin_obj=date_fin_obj,
+            special_kw=special_kw,
+        )
 
         clients_avec_dettes = Client.objects.filter(
-            dettes__solde_restant__gt=0,
-            dettes__statut='EN_COURS',
+            id__in=dettes_encours_qs.values('client_id'),
+        ).distinct().order_by('-date_enregistrement', 'nom')
+
+        # Totaux globaux sur toute la période / tous les clients filtrés (pas seulement la page)
+        global_agg = dettes_encours_qs.aggregate(
+            montant_total=Sum('montant_total'),
+            montant_paye=Sum('montant_paye_agg'),
+            solde_restant=Sum('solde_restant_agg'),
         )
-        if eid:
-            clients_avec_dettes = clients_avec_dettes.filter(dettes__entreprise_id=eid)
-        if user.is_agent(request) and branch_id is not None:
-            clients_avec_dettes = clients_avec_dettes.filter(dettes__succursale_id=branch_id)
-
-        if special_kw is not None and eid:
-            clients_avec_dettes = clients_avec_dettes.filter(
-                liens_entreprise__entreprise_id=eid,
-                liens_entreprise__is_special=special_kw['is_special'],
-            ).distinct()
-
-        # Appliquer le filtre de date sur les dettes si nécessaire
-        if date_debut_obj or date_fin_obj:
-            if date_debut_obj:
-                clients_avec_dettes = clients_avec_dettes.filter(
-                    dettes__date_creation__date__gte=date_debut_obj
-                )
-            if date_fin_obj:
-                clients_avec_dettes = clients_avec_dettes.filter(
-                    dettes__date_creation__date__lte=date_fin_obj
-                )
-        
-        clients_avec_dettes = clients_avec_dettes.distinct().order_by('-date_enregistrement', 'nom')
+        nombre_clients_global = clients_avec_dettes.count()
 
         # Pagination : ne traiter que les clients de la page courante
         paginator = StandardResultsSetPagination()
@@ -777,29 +951,20 @@ class RapportsViewSet(viewsets.ViewSet):
             page_clients = clients_avec_dettes
 
         clients_data = []
-        tot_montant_global = Decimal('0.00')
-        tot_paye_global = Decimal('0.00')
-        tot_solde_global = Decimal('0.00')
 
         for client in page_clients:
             lien = client.liens_entreprise.filter(entreprise_id=eid).first() if eid else None
-            # Récupérer toutes les dettes EN_COURS du client avec le filtre de date
-            dettes_encours = DetteClient.objects.filter(
-                client=client,
-                **filtre_dettes
-            ).select_related('devise')
-            if user.is_agent(request) and branch_id is not None:
-                dettes_encours = dettes_encours.filter(succursale_id=branch_id)
+            dettes_client = dettes_encours_qs.filter(client=client).select_related('devise')
 
             # Calculer les totaux pour ce client
             tot_montant_client = Decimal('0.00')
             tot_paye_client = Decimal('0.00')
             tot_solde_client = Decimal('0.00')
 
-            for dette in dettes_encours:
+            for dette in dettes_client:
                 tot_montant_client += dette.montant_total or Decimal('0.00')
-                tot_paye_client += dette.montant_paye or Decimal('0.00')
-                tot_solde_client += dette.solde_restant or Decimal('0.00')
+                tot_paye_client += dette.montant_paye_agg or Decimal('0.00')
+                tot_solde_client += dette.solde_restant_agg or Decimal('0.00')
 
             # Ne garder que les clients avec un solde > 0
             if tot_solde_client > 0:
@@ -811,52 +976,59 @@ class RapportsViewSet(viewsets.ViewSet):
                     'email': client.email or '',
                     'is_special': bool(lien.is_special) if lien else False,
                     'totaux_encours': {
-                        'montant_total': str(tot_montant_client.quantize(Decimal('0.01'))),
-                        'montant_paye': str(tot_paye_client.quantize(Decimal('0.01'))),
-                        'solde_restant': str(tot_solde_client.quantize(Decimal('0.01')))
+                        'montant_total': str(tot_montant_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                        'montant_paye': str(tot_paye_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                        'solde_restant': str(tot_solde_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
                     }
                 })
 
-                # Accumuler les totaux globaux (pour la page uniquement en pagination)
-                tot_montant_global += tot_montant_client
-                tot_paye_global += tot_paye_client
-                tot_solde_global += tot_solde_client
-
-        entete = self._get_entete_entreprise(entreprise, user) if entreprise else self._get_entete_entreprise(Entreprise.objects.first(), user)
-
-        # Construire le titre avec la période si des dates sont fournies
         titre = _('Rapport général des dettes clients')
         periode = None
         if date_debut_obj or date_fin_obj:
             if date_debut_obj and date_fin_obj:
-                titre = _('Rapport général des dettes clients (%(debut)s - %(fin)s)') % {'debut': date_debut_obj.strftime('%d/%m/%Y'), 'fin': date_fin_obj.strftime('%d/%m/%Y')}
-                periode = {
-                    'date_debut': date_debut,
-                    'date_fin': date_fin
+                titre = _('Rapport général des dettes clients (%(debut)s - %(fin)s)') % {
+                    'debut': date_debut_obj.strftime('%d/%m/%Y'),
+                    'fin': date_fin_obj.strftime('%d/%m/%Y'),
                 }
+                periode = {'date_debut': date_debut, 'date_fin': date_fin}
             elif date_debut_obj:
-                titre = _('Rapport général des dettes clients (à partir du %(date)s)') % {'date': date_debut_obj.strftime('%d/%m/%Y')}
-                periode = {
-                    'date_debut': date_debut,
-                    'date_fin': None
+                titre = _('Rapport général des dettes clients (à partir du %(date)s)') % {
+                    'date': date_debut_obj.strftime('%d/%m/%Y'),
                 }
+                periode = {'date_debut': date_debut, 'date_fin': None}
             elif date_fin_obj:
-                titre = _('Rapport général des dettes clients (jusqu\'au %(date)s)') % {'date': date_fin_obj.strftime('%d/%m/%Y')}
-                periode = {
-                    'date_debut': None,
-                    'date_fin': date_fin
+                titre = _('Rapport général des dettes clients (jusqu\'au %(date)s)') % {
+                    'date': date_fin_obj.strftime('%d/%m/%Y'),
                 }
+                periode = {'date_debut': None, 'date_fin': date_fin}
 
         resp = {
-            'entete': entete,
             'titre': titre,
             'periode': periode,
+            'filtres': {
+                'date_debut': date_debut,
+                'date_fin': date_fin,
+                'is_special': special_kw,
+            },
             'clients': clients_data,
+            'details': clients_data,
             'totaux_globaux': {
-                'montant_total': str(tot_montant_global.quantize(Decimal('0.01'))),
-                'montant_paye': str(tot_paye_global.quantize(Decimal('0.01'))),
-                'solde_restant': str(tot_solde_global.quantize(Decimal('0.01'))),
-                'nombre_clients': len(clients_data)
+                'montant_total': str(
+                    (global_agg.get('montant_total') or Decimal('0')).quantize(
+                        Decimal('0.00001'), rounding=ROUND_DOWN
+                    )
+                ),
+                'montant_paye': str(
+                    (global_agg.get('montant_paye') or Decimal('0')).quantize(
+                        Decimal('0.00001'), rounding=ROUND_DOWN
+                    )
+                ),
+                'solde_restant': str(
+                    (global_agg.get('solde_restant') or Decimal('0')).quantize(
+                        Decimal('0.00001'), rounding=ROUND_DOWN
+                    )
+                ),
+                'nombre_clients': nombre_clients_global,
             }
         }
         if page_clients is not None and paginator.page is not None:
@@ -864,82 +1036,72 @@ class RapportsViewSet(viewsets.ViewSet):
             resp['next'] = paginator.get_next_link()
             resp['previous'] = paginator.get_previous_link()
             resp['page_size'] = paginator.get_page_size(request)
-        return Response(resp)
+        return self._report_response(request, 'clients-dettes-general', resp)
 
-    @action(detail=False, methods=['get'], url_path='clients-dettes-general/pdf')
-    def clients_dettes_general_pdf(self, request):
-        """Génère le PDF du rapport général synthétique des dettes clients."""
-        json_response = self.clients_dettes_general(request)
-        if json_response.status_code != 200:
-            return json_response
-
-        data = json_response.data
-        pdf_generator = PDFGenerator()
-        pdf_buffer = pdf_generator.generate_clients_dettes_general_pdf(data)
-
-        response = HttpResponse(pdf_buffer, content_type='application/pdf')
-        filename = f"rapport_dettes_clients_general_{timezone.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        response['Content-Disposition'] = f'attachment; filename="{filename}"'
-        return response
-    
-    @action(detail=False, methods=['get'], url_path='bon-achat')
-    def bon_achat(self, request):
+    def _build_bon_achat_data(self, request, *, complet: bool = False):
         """
-        Bon d'achat - Liste des approvisionnements effectués.
-        
-        Liste tous les approvisionnements (entrées) à partir d'une date donnée.
-        
-        Paramètres:
-        - date_debut: Date de début (obligatoire, format: YYYY-MM-DD)
-        - date_fin: Date de fin (optionnel, format: YYYY-MM-DD)
-        - article_id: Filtrer par article spécifique (optionnel)
-        
-        GET /api/rapports/bon-achat/?date_debut=2025-11-01
-        GET /api/rapports/bon-achat/?date_debut=2025-11-01&date_fin=2025-11-30
-        GET /api/rapports/bon-achat/?date_debut=2025-11-01&article_id=CAPE0001
+        Construit les données du bon d'achat (JSON).
+        - complet=False: pagination JSON active
+        - complet=True: liste intégrale sans pagination
         """
         user = request.user
-        entreprise = user.get_entreprise(request)
-        
+
         # Récupération des paramètres
         date_debut = request.query_params.get('date_debut')
         date_fin = request.query_params.get('date_fin')
         article_id = request.query_params.get('article_id')
+        entree_id = request.query_params.get('entree_id')
         
-        # Validation: date_debut est obligatoire
-        if not date_debut:
-            return Response({
-                'error': 'Le paramètre "date_debut" est obligatoire',
-                'exemple': '/api/rapports/bon-achat/?date_debut=2025-11-01'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Conversion des dates
-        try:
-            date_debut_obj = datetime.strptime(date_debut, '%Y-%m-%d').date()
-            if date_fin:
-                date_fin_obj = datetime.strptime(date_fin, '%Y-%m-%d').date()
-            else:
-                date_fin_obj = timezone.now().date()
-        except ValueError:
-            return Response({
-                'error': 'Format de date invalide. Utilisez le format YYYY-MM-DD',
-                'exemple': '2025-11-01'
-            }, status=status.HTTP_400_BAD_REQUEST)
+        # Mode 1: entree_id fourni -> filtre direct par entrée, sans dates obligatoires.
+        # Mode 2: pas de entree_id -> filtrage par période (date_debut requis).
+        if entree_id:
+            try:
+                entree_id_int = int(str(entree_id).strip())
+            except (TypeError, ValueError):
+                return Response(
+                    {
+                        'error': 'Le paramètre "entree_id" doit être un entier valide',
+                        'exemple': '/api/rapports/bon-achat/?entree_id=12'
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            date_debut_obj = None
+            date_fin_obj = None
+        else:
+            if not date_debut:
+                return Response({
+                    'error': 'Le paramètre "date_debut" est obligatoire (sauf si entree_id est fourni)',
+                    'exemple': '/api/rapports/bon-achat/?date_debut=2025-11-01'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                date_debut_obj = datetime.strptime(date_debut, '%Y-%m-%d').date()
+                if date_fin:
+                    date_fin_obj = datetime.strptime(date_fin, '%Y-%m-%d').date()
+                else:
+                    date_fin_obj = timezone.now().date()
+            except ValueError:
+                return Response({
+                    'error': 'Format de date invalide. Utilisez le format YYYY-MM-DD',
+                    'exemple': '2025-11-01'
+                }, status=status.HTTP_400_BAD_REQUEST)
         
         eid, branch_id = self._get_tenant_ids_strict(request)
         base_entree_filter = {'entree__entreprise_id': eid} if eid else {}
         if user.is_agent(request) and branch_id is not None:
             base_entree_filter['entree__succursale_id'] = branch_id
-        lignes_entree = LigneEntree.objects.filter(
-            date_entree__date__gte=date_debut_obj,
-            date_entree__date__lte=date_fin_obj,
-            **base_entree_filter
-        ).select_related(
+        lignes_entree = LigneEntree.objects.filter(**base_entree_filter).select_related(
             'article',
             'article__unite',
             'entree',
             'devise'
         ).order_by('-date_entree', '-id')
+        if entree_id:
+            lignes_entree = lignes_entree.filter(entree_id=entree_id_int)
+        else:
+            lignes_entree = lignes_entree.filter(
+                date_entree__date__gte=date_debut_obj,
+                date_entree__date__lte=date_fin_obj,
+            )
         
         # Filtrage par article si spécifié
         if article_id:
@@ -950,127 +1112,215 @@ class RapportsViewSet(viewsets.ViewSet):
         nombre_entrees = lignes_entree.values('entree').distinct().count()
         
         # Calcul des totaux par devise (sur tout le queryset pour les stats)
-        totaux_par_devise = lignes_entree.values(
+        # order_by() avant values().annotate() casse le GROUP BY (une ligne par enregistrement)
+        totaux_par_devise = lignes_entree.order_by().values(
             'devise__sigle',
-            'devise__symbole'
+            'devise__symbole',
         ).annotate(
-            nombre_lignes=Sum('quantite'),
+            nombre_lignes=Count('id'),
             total_montant=Sum(
                 F('quantite') * F('prix_unitaire'),
-                output_field=DecimalField(max_digits=14, decimal_places=2)
+                output_field=DecimalField(max_digits=14, decimal_places=5),
             )
         )
-        
-        # Formatage des totaux
+
+        montant_global = Decimal('0')
         recapitulatif = []
         for total in totaux_par_devise:
+            ligne_montant = total['total_montant'] or Decimal('0')
+            montant_global += ligne_montant
             recapitulatif.append({
                 'devise_sigle': total['devise__sigle'] or 'N/A',
                 'devise_symbole': total['devise__symbole'] or '',
-                'nombre_lignes': total['nombre_lignes'],
-                'total_montant': total['total_montant'] or Decimal('0.00')
+                'nombre_lignes': total['nombre_lignes'] or 0,
+                'total_montant': str(
+                    ligne_montant.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                ),
             })
         
-        # Pagination
-        paginator = StandardResultsSetPagination()
-        page_lignes = paginator.paginate_queryset(lignes_entree, request)
-        serializer = BonAchatSerializer(page_lignes, many=True)
+        if complet:
+            lignes_list = list(lignes_entree)
+            serializer = BonAchatSerializer(lignes_list, many=True)
+            pagination_meta = None
+        else:
+            # Pagination JSON uniquement
+            paginator = StandardResultsSetPagination()
+            page_lignes = paginator.paginate_queryset(lignes_entree, request)
+            serializer = BonAchatSerializer(page_lignes, many=True)
+            pagination_meta = {
+                'count': paginator.page.paginator.count if page_lignes is not None else len(serializer.data),
+                'next': paginator.get_next_link() if page_lignes is not None else None,
+                'previous': paginator.get_previous_link() if page_lignes is not None else None,
+                'page_size': paginator.get_page_size(request) if page_lignes is not None else None,
+            }
         
-        # Générer l'en-tête complet
-        entete = self._get_entete_entreprise(entreprise, user)
+        entree_details = None
+        if entree_id:
+            entree_obj = lignes_entree.select_related('entree', 'entree__succursale', 'entree__entreprise').first()
+            if entree_obj and getattr(entree_obj, 'entree', None):
+                e = entree_obj.entree
+                entree_details = {
+                    'id': e.id,
+                    'libele': e.libele,
+                    'description': getattr(e, 'description', '') or '',
+                    'date_op': e.date_op.strftime('%Y-%m-%d %H:%M') if getattr(e, 'date_op', None) else None,
+                    'entreprise': getattr(getattr(e, 'entreprise', None), 'nom', '') or '',
+                    'succursale': getattr(getattr(e, 'succursale', None), 'nom', '') or '',
+                }
         
         resp = {
-            'entete': entete,
             'titre': _("BON D'ACHAT - APPROVISIONNEMENTS EFFECTUÉS"),
             'periode': {
                 'date_debut': date_debut,
-                'date_fin': date_fin or timezone.now().date().strftime('%Y-%m-%d')
+                'date_fin': (date_fin or timezone.now().date().strftime('%Y-%m-%d')) if not entree_id else None
+            },
+            'filtres': {
+                'entree_id': entree_id,
+                'date_debut': date_debut,
+                'date_fin': date_fin,
+                'article_id': article_id,
+                'complet': complet,
             },
             'statistiques': {
                 'total_lignes': total_lignes,
-                'nombre_entrees': nombre_entrees
+                'nombre_entrees': nombre_entrees,
+                'montant_total': str(
+                    montant_global.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                ),
             },
+            'totaux': {
+                'montant_total': str(
+                    montant_global.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                ),
+                'recapitulatif_devises': recapitulatif,
+            },
+            'entree_details': entree_details,
             'recapitulatif': recapitulatif,
-            'achats': serializer.data
+            'achats': serializer.data,
+            'details': serializer.data,
         }
-        if page_lignes is not None:
-            resp['count'] = paginator.page.paginator.count
-            resp['next'] = paginator.get_next_link()
-            resp['previous'] = paginator.get_previous_link()
-            resp['page_size'] = paginator.get_page_size(request)
-        return Response(resp)
-    
-    @action(detail=False, methods=['get'], url_path='bon-achat/pdf')
-    def bon_achat_pdf(self, request):
+        if not complet and pagination_meta is not None:
+            resp['count'] = pagination_meta['count']
+            resp['next'] = pagination_meta['next']
+            resp['previous'] = pagination_meta['previous']
+            resp['page_size'] = pagination_meta['page_size']
+        return resp
+
+    @action(detail=False, methods=['get'], url_path='bon-achat')
+    def bon_achat(self, request):
         """
-        Export PDF du bon d'achat.
-        Format A4, prêt pour l'impression avec support multi-devises.
+        Bon d'achat - Liste des approvisionnements effectués.
         
-        Paramètres: mêmes que l'action bon_achat (date_debut obligatoire)
+        Liste tous les approvisionnements (entrées) à partir d'une date donnée.
         
-        GET /api/rapports/bon-achat/pdf/?date_debut=2025-11-01
-        GET /api/rapports/bon-achat/pdf/?date_debut=2025-11-01&date_fin=2025-11-30
+        Paramètres:
+        - entree_id: Filtrer par N° d'entrée spécifique (optionnel, prioritaire)
+        - date_debut: Date de début (obligatoire si entree_id absent, format: YYYY-MM-DD)
+        - date_fin: Date de fin (optionnel, format: YYYY-MM-DD)
+        - article_id: Filtrer par article spécifique (optionnel)
+        
+        GET /api/rapports/bon-achat/?entree_id=12
+        GET /api/rapports/bon-achat/?date_debut=2025-11-01
+        GET /api/rapports/bon-achat/?date_debut=2025-11-01&date_fin=2025-11-30
+        GET /api/rapports/bon-achat/?date_debut=2025-11-01&article_id=CAPE0001
+        GET /api/rapports/bon-achat/?entree_id=12&article_id=CAPE0001
         """
-        # Récupérer les données JSON
-        json_response = self.bon_achat(request)
-        
-        if json_response.status_code != 200:
-            return json_response
-        
-        data = json_response.data
-        
-        # Générer le PDF
-        pdf_generator = PDFGenerator()
-        pdf_buffer = pdf_generator.generate_bon_achat_pdf(data)
-        
-        # Créer la réponse HTTP
-        response = HttpResponse(pdf_buffer, content_type='application/pdf')
-        
-        # Nom du fichier
-        filename = f"bon_achat_{timezone.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        response['Content-Disposition'] = f'attachment; filename="{filename}"'
-        
-        return response
+        complet = request.query_params.get('complet', '').lower() in ('true', '1', 'yes', 'oui')
+        data = self._build_bon_achat_data(request, complet=complet)
+        if isinstance(data, Response):
+            return data
+        return self._report_response(request, 'bon-achat', data)
 
     def _parse_ventes_dates(self, request):
-        """Période stricte obligatoire : date_debut et date_fin (YYYY-MM-DD)."""
-        ds = request.query_params.get('date_debut')
-        df = request.query_params.get('date_fin')
+        """
+        Période des ventes avec priorités:
+        1) date_jour (prioritaire)
+        2) mois + annee
+        3) date_debut + date_fin
+        """
+        date_jour = (request.query_params.get('date_jour') or '').strip()
+        mois = (request.query_params.get('mois') or '').strip()
+        annee = (request.query_params.get('annee') or '').strip()
+        ds = (request.query_params.get('date_debut') or '').strip()
+        df = (request.query_params.get('date_fin') or '').strip()
+
+        if date_jour:
+            try:
+                d = date.fromisoformat(date_jour[:10])
+            except ValueError:
+                raise ValidationError({'detail': _('Format date_jour invalide (YYYY-MM-DD).')})
+            return d, d
+
+        if mois or annee:
+            if not (mois and annee):
+                raise ValidationError({'detail': _('Les paramètres mois et annee doivent être fournis ensemble.')})
+            try:
+                m = int(mois)
+                y = int(annee)
+            except ValueError:
+                raise ValidationError({'detail': _('mois et annee doivent être numériques.')})
+            if m < 1 or m > 12:
+                raise ValidationError({'detail': _('mois doit être compris entre 1 et 12.')})
+            if y < 1900 or y > 2100:
+                raise ValidationError({'detail': _('annee invalide.')})
+            from calendar import monthrange
+            d0 = date(y, m, 1)
+            d1 = date(y, m, monthrange(y, m)[1])
+            return d0, d1
+
         if not ds or not df:
             raise ValidationError(
                 {
                     'detail': _(
-                        'Les paramètres date_debut et date_fin (format YYYY-MM-DD) sont obligatoires '
-                        'pour le rapport des ventes.'
+                        'Fournissez soit date_jour, soit mois+annee, soit date_debut et date_fin '
+                        '(format YYYY-MM-DD) pour le rapport des ventes.'
                     )
                 }
             )
         try:
-            d0 = date.fromisoformat(str(ds).strip()[:10])
-            d1 = date.fromisoformat(str(df).strip()[:10])
+            d0 = date.fromisoformat(ds[:10])
+            d1 = date.fromisoformat(df[:10])
         except ValueError:
-            raise ValidationError(
-                {'detail': _('Formats date_debut / date_fin invalides (YYYY-MM-DD).')}
-            )
+            raise ValidationError({'detail': _('Formats date_debut / date_fin invalides (YYYY-MM-DD).')})
         if d0 > d1:
-            raise ValidationError(
-                {'detail': _('date_debut doit être antérieure ou égale à date_fin.')}
-            )
+            raise ValidationError({'detail': _('date_debut doit être antérieure ou égale à date_fin.')})
         return d0, d1
 
-    def _build_ventes_report(self, request, *, for_pdf=False):
+    def _build_ventes_report(self, request, *, complet: bool = False):
         """
         Construit le JSON du rapport des ventes (lignes de sortie : article, qté, PU, référence).
 
-        JSON (for_pdf=False) : pagination SQL via page / page_size ; totaux sur toute la période en agrégat BDD.
-        PDF (for_pdf=True) : toutes les lignes, sans clé pagination.
+        Pagination SQL via page / page_size ; totaux sur toute la période en agrégat BDD.
+        complet=True : toutes les lignes, sans clé pagination.
         """
         user = request.user
-        entreprise = user.get_entreprise(request)
         d0, d1 = self._parse_ventes_dates(request)
+        client_id = (request.query_params.get('client_id') or '').strip()
+        client_nom = (request.query_params.get('client_nom') or '').strip()
+        reference = (request.query_params.get('reference') or '').strip()
+        statut_paiement = (request.query_params.get('statut_paiement') or '').strip().upper()
+        montant_min_raw = (request.query_params.get('montant_min') or '').strip()
+        montant_max_raw = (request.query_params.get('montant_max') or '').strip()
         eid, branch_id = self._get_tenant_ids_strict(request)
         if not eid:
             raise ValidationError({'detail': _('Contexte entreprise manquant.')})
+
+        montant_min = None
+        montant_max = None
+        if montant_min_raw:
+            try:
+                montant_min = Decimal(montant_min_raw.replace(',', '.'))
+            except Exception:
+                raise ValidationError({'detail': _('montant_min invalide.')})
+        if montant_max_raw:
+            try:
+                montant_max = Decimal(montant_max_raw.replace(',', '.'))
+            except Exception:
+                raise ValidationError({'detail': _('montant_max invalide.')})
+        if montant_min is not None and montant_max is not None and montant_min > montant_max:
+            raise ValidationError({'detail': _('montant_min doit être inférieur ou égal à montant_max.')})
+        if statut_paiement and statut_paiement not in ('COMPTANT', 'CREDIT'):
+            raise ValidationError({'detail': _('statut_paiement doit être COMPTANT ou CREDIT.')})
 
         base_sortie = {'sortie__entreprise_id': eid}
         if user.is_agent(request) and branch_id is not None:
@@ -1087,21 +1337,98 @@ class RapportsViewSet(viewsets.ViewSet):
             .order_by('sortie__date_creation', 'sortie_id', 'id')
         )
 
+        if client_id:
+            lignes_qs = lignes_qs.filter(sortie__client_id=client_id)
+        if client_nom:
+            lignes_qs = lignes_qs.filter(sortie__client__nom__icontains=client_nom)
+        if reference:
+            ref_q = Q(sortie__motif__icontains=reference)
+            if reference.isdigit():
+                ref_q = ref_q | Q(sortie_id=int(reference))
+            ref_up = reference.upper()
+            if ref_up.startswith('FACT-'):
+                fact_part = ref_up.replace('FACT-', '').strip()
+                if fact_part.isdigit():
+                    ref_q = ref_q | Q(sortie_id=int(fact_part))
+            lignes_qs = lignes_qs.filter(ref_q)
+        if montant_min is not None or montant_max is not None:
+            line_total = ExpressionWrapper(
+                F('quantite') * F('prix_unitaire'),
+                output_field=DecimalField(max_digits=20, decimal_places=5),
+            )
+            if montant_min is not None:
+                lignes_qs = lignes_qs.annotate(_line_total=line_total).filter(_line_total__gte=montant_min)
+            if montant_max is not None:
+                lignes_qs = lignes_qs.annotate(_line_total=line_total).filter(_line_total__lte=montant_max)
+
+        if statut_paiement:
+            dettes_non_soldees = DetteClient.objects.filter(
+                sortie_id=OuterRef('sortie_id'),
+                statut__in=['EN_COURS', 'RETARD'],
+            )
+            lignes_qs = lignes_qs.annotate(_has_credit=Exists(dettes_non_soldees))
+            if statut_paiement == 'CREDIT':
+                lignes_qs = lignes_qs.filter(Q(sortie__statut='EN_CREDIT') | Q(_has_credit=True))
+            else:  # COMPTANT
+                lignes_qs = lignes_qs.filter(sortie__statut='PAYEE', _has_credit=False)
+
+        sortie_scope = Sortie.objects.filter(
+            entreprise_id=eid,
+            date_creation__date__gte=d0,
+            date_creation__date__lte=d1,
+        )
+        if user.is_agent(request) and branch_id is not None:
+            sortie_scope = sortie_scope.filter(succursale_id=branch_id)
+        if client_id:
+            sortie_scope = sortie_scope.filter(client_id=client_id)
+        if client_nom:
+            sortie_scope = sortie_scope.filter(client__nom__icontains=client_nom)
+        if reference:
+            ref_q_scope = Q(motif__icontains=reference)
+            if reference.isdigit():
+                ref_q_scope = ref_q_scope | Q(id=int(reference))
+            sortie_scope = sortie_scope.filter(ref_q_scope)
+        if statut_paiement == 'CREDIT':
+            sortie_scope = sortie_scope.filter(statut='EN_CREDIT')
+        elif statut_paiement == 'COMPTANT':
+            sortie_scope = sortie_scope.filter(statut='PAYEE')
+
         # Totaux sur la période complète (requêtes agrégées, sans charger toutes les lignes)
         agg = lignes_qs.aggregate(
             total_qte=Sum('quantite'),
             total_montant=Sum(
                 ExpressionWrapper(
                     F('quantite') * F('prix_unitaire'),
-                    output_field=DecimalField(max_digits=20, decimal_places=2),
+                    output_field=DecimalField(max_digits=20, decimal_places=5),
                 )
             ),
         )
-        tot_qte = int(agg['total_qte'] or 0)
-        tot_m_vente = (agg['total_montant'] or Decimal('0')).quantize(Decimal('0.01'))
+        tot_qte = Decimal(str(agg['total_qte'] or 0))
+        tot_m_vente = (agg['total_montant'] or Decimal('0')).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        total_benefice = Decimal('0.00')
+        for ls in lignes_qs:
+            if ls.lots_utilises.exists():
+                benef_ligne = sum(
+                    (Decimal(str(lu.quantite)) * (Decimal(str(lu.prix_vente)) - Decimal(str(lu.prix_achat))))
+                    for lu in ls.lots_utilises.all()
+                )
+            else:
+                pu_achat_ls = ls.get_cout_achat_unitaire()
+                if not isinstance(pu_achat_ls, Decimal):
+                    pu_achat_ls = Decimal(str(pu_achat_ls))
+                pu_vente_ls = ls.prix_unitaire
+                if not isinstance(pu_vente_ls, Decimal):
+                    pu_vente_ls = Decimal(str(pu_vente_ls))
+                benef_ligne = Decimal(str(ls.quantite)) * (pu_vente_ls - pu_achat_ls)
+            total_benefice += benef_ligne
+        total_benefice = total_benefice.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        total_sorties = sortie_scope.count()
+        total_clients = sortie_scope.exclude(client_id__isnull=True).values('client_id').distinct().count()
+        sorties_credit = sortie_scope.filter(statut='EN_CREDIT').count()
+        sorties_comptant = sortie_scope.filter(statut='PAYEE').count()
 
         pagination_meta = None
-        if for_pdf:
+        if complet:
             page_slice_qs = lignes_qs
         else:
             try:
@@ -1139,21 +1466,6 @@ class RapportsViewSet(viewsets.ViewSet):
 
         # Une fois le queryset slicé (pagination), Django interdit .distinct() dessus : on matérialise la page.
         page_lines = list(page_slice_qs)
-        sortie_ids = list(dict.fromkeys(l.sortie_id for l in page_lines))
-        ref_ventes = {}
-        mc_cols = mouvementcaisse_column_names()
-        mc_qs = build_mouvementcaisse_queryset(mc_cols)
-        ct_dette_ref = ContentType.objects.get_for_model(DetteClient)
-        if sortie_ids:
-            q_ref = mc_qs.filter(
-                sortie_id__in=sortie_ids,
-                type='ENTREE',
-            ).exclude(reference_piece='')
-            if mouvementcaisse_has_content_type_id(mc_cols):
-                q_ref = q_ref.exclude(content_type=ct_dette_ref)
-            for mv in q_ref:
-                if mv.sortie_id not in ref_ventes:
-                    ref_ventes[mv.sortie_id] = mv.reference_piece
 
         lignes_ventes = []
         for ligne in page_lines:
@@ -1165,29 +1477,75 @@ class RapportsViewSet(viewsets.ViewSet):
             if not isinstance(pu_vente, Decimal):
                 pu_vente = Decimal(str(pu_vente))
             q = ligne.quantite
-
-            ref = f'Sortie #{s.id}'
-            if s.id in ref_ventes:
-                ref += f' ({ref_ventes[s.id]})'
+            qd = Decimal(str(q or 0))
+            if ligne.lots_utilises.exists():
+                benefice_ligne = sum(
+                    (Decimal(str(lu.quantite)) * (Decimal(str(lu.prix_vente)) - Decimal(str(lu.prix_achat))))
+                    for lu in ligne.lots_utilises.all()
+                ).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            else:
+                benefice_ligne = (qd * (pu_vente - pu_achat)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            ref = f"FACT-{int(s.id):06d}"
 
             lignes_ventes.append(
                 {
+                    'sortie_id': s.id,
+                    'date': s.date_creation.strftime('%Y-%m-%d %H:%M') if s.date_creation else '',
+                    'client': s.client.nom if s.client else _('Client anonyme'),
+                    'statut_paiement': 'CREDIT' if (s.statut == 'EN_CREDIT') else 'COMPTANT',
                     'article': ligne.article.nom_scientifique,
-                    'pu_achat': str(pu_achat.quantize(Decimal('0.01'))),
+                    'pu_achat': str(pu_achat.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
                     'pu_vente': str(pu_vente),
                     'quantite': q,
+                    'benefice': str(benefice_ligne),
                     'reference': ref,
                 }
             )
 
         out = {
-            'entete': self._get_entete_entreprise(entreprise, user),
             'titre': _("RAPPORT DES VENTES"),
             'periode': {'date_debut': str(d0), 'date_fin': str(d1)},
             'lignes_ventes': lignes_ventes,
-            'total_quantite': tot_qte,
+            'details': lignes_ventes,
+            'total_quantite': str(tot_qte),
             'total_montant_vente': str(tot_m_vente),
+            'filtres': {
+                'client_id': client_id or None,
+                'client_nom': client_nom or None,
+                'reference': reference or None,
+                'statut_paiement': statut_paiement or None,
+                'montant_min': str(montant_min) if montant_min is not None else None,
+                'montant_max': str(montant_max) if montant_max is not None else None,
+                'date_jour': (request.query_params.get('date_jour') or None),
+                'mois': (request.query_params.get('mois') or None),
+                'annee': (request.query_params.get('annee') or None),
+            },
+            'resume_global': {
+                'total_sorties': total_sorties,
+                'total_clients': total_clients,
+                'sorties_comptant': sorties_comptant,
+                'sorties_credit': sorties_credit,
+                'total_quantite': str(tot_qte),
+                'total_montant_vente': str(tot_m_vente),
+                'total_benefice': str(total_benefice),
+            },
         }
+        # Titre dynamique selon filtres actifs
+        titre_suffix = []
+        if request.query_params.get('date_jour'):
+            titre_suffix.append(_("Journalier"))
+        elif request.query_params.get('mois') and request.query_params.get('annee'):
+            titre_suffix.append(_("Mensuel"))
+        else:
+            titre_suffix.append(_("Période"))
+        if client_id or client_nom:
+            titre_suffix.append(_("Client"))
+        if statut_paiement:
+            titre_suffix.append(statut_paiement)
+        if montant_min is not None or montant_max is not None:
+            titre_suffix.append(_("Montant"))
+        if titre_suffix:
+            out['titre'] = f"{out['titre']} ({' | '.join(titre_suffix)})"
         if pagination_meta is not None:
             out['pagination'] = pagination_meta
         return out
@@ -1198,7 +1556,12 @@ class RapportsViewSet(viewsets.ViewSet):
         Rapport des ventes sur une période stricte.
 
         Paramètres obligatoires:
-        - date_debut, date_fin : YYYY-MM-DD (bornes inclusives).
+        - date_jour (YYYY-MM-DD), ou mois+annee, ou date_debut+date_fin.
+
+        Filtres optionnels:
+        - client_id, client_nom, reference
+        - montant_min, montant_max
+        - statut_paiement = COMPTANT | CREDIT
 
         Pagination (requêtes BDD directes : LIMIT/OFFSET + agrégats SQL pour les totaux période) :
         - page (défaut 1), page_size (défaut 25, max 200).
@@ -1208,51 +1571,23 @@ class RapportsViewSet(viewsets.ViewSet):
         Contenu:
         - Lignes : article, quantité, PU achat (FIFO), PU vente, référence (sortie + pièce caisse si présente).
 
+        GET /api/rapports/ventes/?date_jour=2026-01-31
+        GET /api/rapports/ventes/?mois=1&annee=2026
         GET /api/rapports/ventes/?date_debut=2026-01-01&date_fin=2026-01-31&page=1&page_size=25
+        GET /api/rapports/ventes/?date_debut=2026-01-01&date_fin=2026-01-31&client_id=CLI0001&statut_paiement=CREDIT
         """
         try:
-            return Response(self._build_ventes_report(request))
+            complet = request.query_params.get('complet', '').lower() in ('true', '1', 'yes', 'oui')
+            data = self._build_ventes_report(request, complet=complet)
+            return self._report_response(request, 'ventes', data)
         except ValidationError as exc:
             return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=False, methods=['get'], url_path='ventes/pdf')
-    def ventes_pdf(self, request):
-        """
-        Export PDF du rapport des ventes (mêmes paramètres que /ventes/).
-
-        GET /api/rapports/ventes/pdf/?date_debut=2026-01-01&date_fin=2026-01-31
-        """
-        try:
-            data = self._build_ventes_report(request, for_pdf=True)
-        except ValidationError as exc:
-            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
-
-        pdf_generator = PDFGenerator()
-        pdf_buffer = pdf_generator.generate_ventes_pdf(data)
-        response = HttpResponse(pdf_buffer, content_type='application/pdf')
-        filename = f"rapport_ventes_{timezone.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        response['Content-Disposition'] = f'attachment; filename="{filename}"'
-        return response
-
-    @action(detail=True, methods=['get'], url_path='fiche-stock')
-    def fiche_stock_article_pdf(self, request, pk=None):
-        """
-        Fiche de stock pour un article spécifique.
-        
-        Affiche tous les mouvements (entrées et sorties) d'un article avec calcul FIFO.
-        La devise est affichée une seule fois dans l'en-tête.
-        
-        Paramètres optionnels:
-        - date_min: Date de début (format: YYYY-MM-DD)
-        - date_max: Date de fin (format: YYYY-MM-DD)
-        
-        GET /api/rapports/{article_id}/fiche-stock/
-        GET /api/rapports/{article_id}/fiche-stock/?date_min=2025-01-01&date_max=2025-12-31
-        """
+    def _build_fiche_stock_data(self, request, pk=None):
+        """Construit les données JSON de la fiche de stock avec calcul FIFO."""
         user = request.user
         if not user.is_authenticated:
-            return Response({'detail': "Utilisateur non authentifié."}, status=status.HTTP_403_FORBIDDEN)
-        entreprise = user.get_entreprise(request)
+            raise PermissionDenied(_("Utilisateur non authentifié."))
         eid, branch_id = self._get_tenant_ids_strict(request)
         article_qs = Article.objects.filter(pk=pk)
         if eid:
@@ -1261,50 +1596,13 @@ class RapportsViewSet(viewsets.ViewSet):
             article_qs = article_qs.filter(succursale_id=branch_id)
         article = article_qs.first()
         if not article:
-            return Response({'detail': "Article non trouvé ou accès refusé."}, status=status.HTTP_404_NOT_FOUND)
-        
-        # Filtres optionnels
+            raise NotFound(_("Article non trouvé ou accès refusé."))
+
         date_min = request.query_params.get('date_min')
         date_max = request.query_params.get('date_max')
 
-        buffer = io.BytesIO()
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=A4,
-            leftMargin=10*mm,
-            rightMargin=10*mm,
-            topMargin=20*mm,
-            bottomMargin=20*mm,
-        )
-
-        styles = getSampleStyleSheet()
-        normal = styles['Normal']
-        normal.wordWrap = 'CJK'
-        title_style = ParagraphStyle(
-            'Title',
-            parent=styles['Heading2'],
-            alignment=1,
-            fontSize=14,
-            spaceAfter=4*mm
-        )
-
-        elements = []
-
-        # En-tête simplifié (nom, logo, slogan, téléphone uniquement)
-        entete = get_entete_entreprise(entreprise)
-        pdf_gen = PDFGenerator()
-        elements.extend(pdf_gen._create_entete(entete))
-
-        # Titre : FICHE DE STOCK + nom de l'article (code en petite police)
-        nom_article = article.nom_scientifique
-        if article.nom_commercial:
-            nom_article += f" ({article.nom_commercial})"
-        title_with_article = (
-            f"<b>{_('FICHE DE STOCK')}</b> — "
-            f"{nom_article} <font size='8'>({article.article_id})</font>"
-        )
-        elements.append(Paragraph(title_with_article, title_style))
-        elements.append(Spacer(1, 4*mm))
+        stock_row = Stock.objects.filter(article=article).first()
+        type_article = getattr(getattr(article, 'sous_type_article', None), 'type_article', None)
 
         # Récupération des mouvements
         entrees_qs = LigneEntree.objects.filter(article=article)
@@ -1330,7 +1628,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 'datetime': e['date_entree'],
                 'designation': e['entree__libele'] or _("Entrée"),
                 'q_in': e['quantite'],
-                'pu_in': float(e['prix_unitaire']),
+                'pu_in': e['prix_unitaire'] or Decimal('0'),
                 'q_out': 0
             })
         for s in sorties:
@@ -1338,46 +1636,25 @@ class RapportsViewSet(viewsets.ViewSet):
                 'datetime': s['date_sortie'],
                 'designation': s.get('sortie__motif') or _("Sortie"),
                 'q_in': 0,
-                'pu_in': 0.0,
+                'pu_in': Decimal('0'),
                 'q_out': s['quantite']
             })
         
         # Tri chronologique (entrées avant sorties pour même datetime)
         mouvements.sort(key=lambda m: (m['datetime'], 0 if m['q_in']>0 else 1))
 
-        # En-têtes du tableau : Date, Désignation, Entrées (Qté, PU, PT), Sorties (Qté, PU, PT), Stock (Qté, PU, PT)
-        header1 = [
-            _("Date"), _("Désignation"),
-            _("Entrées"), "", "",
-            _("Sorties"), "", "",
-            _("Stock"), "", ""
-        ]
-
-        header2 = [
-            "", "",
-            _("Qté"), _("PU"), _("PT"),
-            _("Qté"), _("PU"), _("PT"),
-            _("Qté"), _("PU"), _("PT")
-        ]
-        
-        table_data = [
-            [Paragraph(h, normal) for h in header1],
-            [Paragraph(h, normal) for h in header2]
-        ]
-
         # Calcul FIFO
         fifo_layers = []
-        stock_qty = 0
-        stock_val = 0.0
+        stock_qty = Decimal('0')
+        stock_val = Decimal('0')
+        rows = []
 
         for mv in mouvements:
-            date_str = mv['datetime'].strftime('%d/%m/%Y %H:%M') if mv['datetime'] else ""
-            desig = Paragraph(mv['designation'], normal)
-            q_in = mv['q_in']
+            q_in = Decimal(str(mv['q_in'] or 0))
             pu_in = mv['pu_in']
             pt_in = q_in * pu_in
-            q_out = mv['q_out']
-            pt_out = 0.0
+            q_out = Decimal(str(mv['q_out'] or 0))
+            pt_out = Decimal('0')
 
             if q_in:
                 # Entrée
@@ -1399,66 +1676,72 @@ class RapportsViewSet(viewsets.ViewSet):
                 stock_val -= pt_out
 
             # PU sortie = coût moyen sorti (PT / Qté)
-            pu_out = (pt_out / q_out) if q_out else 0.0
+            pu_out = (pt_out / q_out) if q_out else Decimal('0')
+            stock_pu = (stock_val / stock_qty) if stock_qty else Decimal('0')
+            rows.append(
+                {
+                    'datetime': mv['datetime'].strftime('%Y-%m-%d %H:%M') if mv['datetime'] else '',
+                    'designation': mv['designation'],
+                    'entree': {
+                        'quantite': str(q_in),
+                        'pu': str(pu_in.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                        'pt': str(pt_in.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                    } if q_in else None,
+                    'sortie': {
+                        'quantite': str(q_out),
+                        'pu': str(pu_out.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                        'pt': str(pt_out.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                    } if q_out else None,
+                    'stock': {
+                        'quantite': str(stock_qty),
+                        'pu': str(stock_pu.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)) if stock_qty else '',
+                        'pt': str(stock_val.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                    },
+                }
+            )
 
-            # Construction de la ligne (sans devise dans le corps)
-            row = [
-                Paragraph(date_str, normal),
-                desig,
-                Paragraph(str(q_in) if q_in else "", normal),
-                Paragraph(f"{pu_in:.2f}" if q_in else "", normal),
-                Paragraph(f"{pt_in:.2f}" if q_in else "", normal),
-                Paragraph(str(q_out) if q_out else "", normal),
-                Paragraph(f"{pu_out:.2f}" if q_out else "", normal),
-                Paragraph(f"{pt_out:.2f}" if q_out else "", normal),
-                Paragraph(str(stock_qty), normal),
-                Paragraph(f"{(stock_val/stock_qty):.2f}" if stock_qty else "", normal),
-                Paragraph(f"{stock_val:.2f}", normal)
-            ]
-            table_data.append(row)
+        return {
+            'titre': _("FICHE DE STOCK"),
+            'article_details': {
+                'article_id': article.article_id,
+                'nom_scientifique': article.nom_scientifique,
+                'nom_commercial': article.nom_commercial,
+                'type_article': getattr(type_article, 'libelle', None),
+                'sous_type_article': getattr(getattr(article, 'sous_type_article', None), 'libelle', None),
+                'unite': getattr(getattr(article, 'unite', None), 'libelle', None),
+                'stock_actuel': str(getattr(stock_row, 'Qte', 0) or 0),
+                'seuil_alerte': str(getattr(stock_row, 'seuilAlert', 0) or 0),
+                'prix_vente_reference': str(
+                    Decimal(str(getattr(stock_row, 'prix_vente', 0) or 0)).quantize(
+                        Decimal('0.00001'), rounding=ROUND_DOWN
+                    )
+                ),
+            },
+            'periode': {
+                'date_debut': date_min,
+                'date_fin': date_max,
+            },
+            'filtres': {'date_min': date_min, 'date_max': date_max},
+            'mouvements': rows,
+            'details': rows,
+            'solde_final': {
+                'quantite': str(stock_qty),
+                'valeur': str(stock_val.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+            },
+        }
 
-        # Ligne finale
-        final_row = [
-            "", Paragraph(f"<b>{_('SOLDE FINAL')}</b>", normal),
-            "", "", "",
-            "", "", "",
-            Paragraph(f"<b>{stock_qty}</b>", normal),
-            Paragraph("", normal),
-            Paragraph(f"<b>{stock_val:.2f}</b>", normal)
-        ]
-        table_data.append(final_row)
+    @action(detail=True, methods=['get'], url_path='fiche-stock/json')
+    def fiche_stock_article_json(self, request, pk=None):
+        """Alias JSON de fiche-stock (rétrocompatibilité)."""
+        return self.fiche_stock_article(request, pk=pk)
 
-        # Création du tableau (11 colonnes)
-        table = Table(
-            table_data,
-            repeatRows=2,
-            hAlign='CENTER'
-        )
-        table.setStyle(TableStyle([
-            ('SPAN', (2,0), (4,0)),  # Fusionner "Entrées"
-            ('SPAN', (5,0), (7,0)),  # Fusionner "Sorties" (Qté, PU, PT)
-            ('SPAN', (8,0), (10,0)),  # Fusionner "Stock"
-            ('BACKGROUND', (0,0), (-1,1), colors.lightgrey),
-            ('FONTNAME', (0,0), (-1,1), 'Helvetica-Bold'),
-            ('ALIGN', (0,0), (-1,1), 'CENTER'),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-            ('ALIGN', (2,2), (-1,-1), 'RIGHT'),
-            ('ROWBACKGROUNDS', (0,2), (-1,-1), [colors.whitesmoke, None]),
-            ('TOPPADDING', (0,0), (-1,1), 6),
-            ('BOTTOMPADDING', (0,0), (-1,1), 6),
-        ]))
-
-        elements.append(table)
-        elements.append(Spacer(1, 4*mm))
-        elements.append(Paragraph(f"© {entreprise.nom.upper()}", normal))
-
-        doc.build(elements)
-        buffer.seek(0)
-        return HttpResponse(
-            buffer,
-            content_type='application/pdf',
-            headers={'Content-Disposition': f'inline; filename="FICHE_DE_STOCK_{article.pk}.pdf"'}
-        )
+    @action(detail=True, methods=['get'], url_path='fiche-stock')
+    def fiche_stock_article(self, request, pk=None):
+        """Fiche de stock JSON pour un article (mouvements FIFO)."""
+        try:
+            data = self._build_fiche_stock_data(request, pk=pk)
+            return self._report_response(request, 'fiche-stock', data)
+        except (PermissionDenied, NotFound) as exc:
+            return Response({'detail': str(exc)}, status=getattr(exc, 'status_code', status.HTTP_400_BAD_REQUEST))
 
 

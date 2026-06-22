@@ -33,7 +33,7 @@ def entree_is_from_lot_closure(entree) -> bool:
 class _ClosureLine:
     lot_item: LotItem
     prix_vente: Decimal
-    seuil_alerte: int
+    seuil_alerte: Decimal
     date_expiration: Any  # date | None
 
 
@@ -96,18 +96,18 @@ def _build_closure_lines(items: list[LotItem], approvisionnement: list[dict]) ->
                 }
             )
         try:
-            sa_i = int(sa)
-        except (TypeError, ValueError):
+            sa_d = sa if isinstance(sa, Decimal) else Decimal(str(sa).replace(",", "."))
+        except (TypeError, ValueError, InvalidOperation):
             raise ValidationError(
                 {
                     "approvisionnement": _("Seuil d'alerte invalide pour l'article %s.") % aid,
                 }
             )
-        if sa_i < 0:
+        if sa_d < 0:
             raise ValidationError(
                 {"approvisionnement": _("Le seuil d'alerte doit être positif ou nul pour l'article %s.") % aid}
             )
-        out.append(_ClosureLine(lot_item=li, prix_vente=pv_d, seuil_alerte=sa_i, date_expiration=de))
+        out.append(_ClosureLine(lot_item=li, prix_vente=pv_d, seuil_alerte=sa_d, date_expiration=de))
 
     if seen != set(by_article.keys()):
         missing = set(by_article.keys()) - seen

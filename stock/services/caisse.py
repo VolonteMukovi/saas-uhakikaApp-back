@@ -6,7 +6,7 @@ Les anciennes lignes ``DetailMouvementCaisse`` en base restent lisibles pour l'h
 """
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import Any, List, Optional
 
 from django.contrib.contenttypes.models import ContentType
@@ -23,7 +23,7 @@ def _merge_details_into_motif(details: List[dict], entreprise_id: int, motif_bas
         tc = None
         if tid:
             tc = TypeCaisse.objects.filter(pk=tid, entreprise_id=entreprise_id).first()
-        lm = Decimal(str(row.get("montant", 0))).quantize(Decimal("0.01"))
+        lm = Decimal(str(row.get("montant", 0))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         if tc:
             parts.append(f"{tc.libelle}: {lm}")
         else:
@@ -65,7 +65,7 @@ def creer_mouvement_caisse(
 
     if details:
         if montant is not None:
-            if lines_total.quantize(Decimal("0.01")) != Decimal(str(montant)).quantize(Decimal("0.01")):
+            if lines_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN) != Decimal(str(montant)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN):
                 raise ValueError(
                     f"La somme des lignes ({lines_total}) ne correspond pas au montant ({montant})."
                 )
@@ -74,12 +74,12 @@ def creer_mouvement_caisse(
     else:
         if montant is None:
             raise ValueError("Montant requis si aucune ligne détaillée.")
-        montant = Decimal(str(montant)).quantize(Decimal("0.01"))
+        montant = Decimal(str(montant)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         if montant < 0:
             raise ValueError("Le montant ne peut pas être négatif.")
 
     if details:
-        montant = Decimal(str(montant)).quantize(Decimal("0.01"))
+        montant = Decimal(str(montant)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     ct = None
     oid = None

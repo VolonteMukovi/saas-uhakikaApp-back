@@ -42,6 +42,7 @@ from stock.permissions import EntreprisePermission, IsAdminOrUser as StockIsAdmi
 from users.authentication import JWTAuthenticationWithContext
 from order.authentication import ClientJWTAuthentication
 from order.permissions import IsClientAuthenticated
+from django.conf import settings
 
 
 class BusinessPermissionMixin:
@@ -59,10 +60,11 @@ import io
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+from reportlab.graphics.barcode import code128
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import qrcode
 from datetime import datetime
 from rest_framework.decorators import action, api_view, permission_classes
@@ -71,6 +73,18 @@ from drf_yasg.utils import swagger_auto_schema
 
 # Configuration du logger pour tracer les suppressions automatiques d'articles
 logger = logging.getLogger(__name__)
+
+
+def _parse_decimal_quantity(raw_value):
+    """Parse une quantité en acceptant virgule ou point."""
+    if isinstance(raw_value, Decimal):
+        value = raw_value
+    else:
+        text = str(raw_value).strip().replace(",", ".")
+        value = Decimal(text)
+    if value <= 0:
+        raise serializers.ValidationError({'quantite': 'La quantité doit être supérieure à 0.'})
+    return value
 
 
 class EnterpriseFilterMixin:
@@ -128,7 +142,7 @@ class TenantFilterMixin:
 
 
 def _format_amount(amount: Decimal, devise_obj, entreprise=None):
-    """Return amount formatted with 2 decimals and the currency symbol.
+    """Return amount formatted with 5 decimals and the currency symbol.
     devise_obj may be None; fallback to principal devise.
     """
     try:
@@ -140,7 +154,8 @@ def _format_amount(amount: Decimal, devise_obj, entreprise=None):
     except Exception:
         sym = ''
     try:
-        return f"{Decimal(amount):.2f} {sym}" if sym else f"{Decimal(amount):.2f}"
+        amt = Decimal(str(amount)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        return f"{amt:.5f} {sym}" if sym else f"{amt:.5f}"
     except Exception:
         return str(amount)
 
@@ -187,7 +202,7 @@ def _convert_amount(amount: Decimal, source_dev: Devise, target_dev: Devise, ent
     if rate is None:
         return None
     try:
-        return (Decimal(amount) * rate).quantize(Decimal('0.01'))
+        return (Decimal(amount) * rate).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
     except Exception:
         return None
 
@@ -206,226 +221,88 @@ class RapportViewSet(viewsets.ViewSet):
     # SortieViewSet et EntreeViewSet pour éviter toute ambiguïté de routes.
 
     @action(detail=False, methods=['get'], url_path='journal')
-    def journal_pdf(self, request):
+    def journal(self, request):
         """
-        Génère le journal complet de toutes les opérations (PDF).
-        Inclut : approvisionnements (entrées), ventes (sorties), mouvements de caisse, paiements de dettes.
+        Journal complet des opérations (JSON pour le frontend).
+
+        Inclut : approvisionnements, ventes, mouvements de caisse, paiements de dettes.
         Filtres : month (1-12), year (ex: 2026). Par défaut = mois et année en cours.
         Ou date_min / date_max (YYYY-MM-DD) pour une plage personnalisée.
+        Pagination : page, page_size (défaut). complet=true pour toute la liste.
+
+        GET /api/rapports/journal/
+        GET /api/rapports/journal/?month=6&year=2026
+        GET /api/rapports/journal/?date_min=2026-01-01&date_max=2026-01-31
         """
+        from rapports.utils.journal_data import build_journal_report_data
+        from rapports.utils.report_envelope import wrap_report_response
+
         user = request.user
         principal = _get_principal_devise()
-        now = timezone.now()
-
         tenant_id, branch_id = _get_tenant_ids(request)
         if not tenant_id:
             return Response({'error': 'Contexte entreprise manquant.'}, status=400)
 
-        # Filtrage : month/year (défaut = mois et année en cours), ou date_min/date_max pour plage personnalisée
-        month_param = request.query_params.get('month')
-        year_param = request.query_params.get('year')
-        date_min = request.query_params.get('date_min')
-        date_max = request.query_params.get('date_max')
+        body = build_journal_report_data(
+            request=request,
+            user=user,
+            tenant_id=tenant_id,
+            branch_id=branch_id,
+            principal_devise=principal,
+        )
 
-        use_month_year = (month_param is not None or year_param is not None) or not (date_min or date_max)
-        if use_month_year:
+        events = body.get('details') or body.get('operations') or []
+        complet = request.query_params.get('complet', '').lower() in ('true', '1', 'yes', 'oui')
+        if not complet and events:
             try:
-                year = int(year_param) if year_param else now.year
-                month = int(month_param) if month_param else now.month
+                page = int(request.query_params.get('page', 1))
             except (TypeError, ValueError):
-                year, month = now.year, now.month
-            if not (1 <= month <= 12):
-                month = now.month
-            if year < 1900 or year > 2100:
-                year = now.year
-            from calendar import monthrange
-            last_day = monthrange(year, month)[1]
-            date_min = f"{year}-{month:02d}-01"
-            date_max = f"{year}-{month:02d}-{last_day}"
-            periode_txt = f"{month:02d}/{year}"
+                page = 1
+            page = max(1, page)
+            try:
+                from config.pagination import StandardResultsSetPagination
+                page_size = int(
+                    request.query_params.get(
+                        'page_size', StandardResultsSetPagination.page_size
+                    )
+                )
+                max_ps = StandardResultsSetPagination.max_page_size
+            except (TypeError, ValueError):
+                from config.pagination import StandardResultsSetPagination
+                page_size = StandardResultsSetPagination.page_size
+                max_ps = StandardResultsSetPagination.max_page_size
+            page_size = max(1, min(page_size, max_ps))
+            count = len(events)
+            import math
+            total_pages = max(1, math.ceil(count / page_size)) if count else 1
+            if page > total_pages and count:
+                page = total_pages
+            start = (page - 1) * page_size
+            page_events = events[start : start + page_size]
+            body['details'] = page_events
+            body['operations'] = page_events
+            body['pagination'] = {
+                'page': page,
+                'page_size': page_size,
+                'count': count,
+                'total_pages': total_pages,
+                'has_next': start + page_size < count,
+                'has_previous': page > 1,
+            }
+            body.setdefault('filtres', {})['complet'] = False
         else:
-            periode_txt = _("Du %(debut)s au %(fin)s") % {'debut': date_min or '...', 'fin': date_max or '...'}
+            body.setdefault('filtres', {})['complet'] = True
 
-        # 1) Entrées (approvisionnements)
-        qs_entrees = Entree.objects.filter(entreprise_id=tenant_id)
-        if branch_id is not None:
-            qs_entrees = qs_entrees.filter(succursale_id=branch_id)
-        qs_entrees = qs_entrees.prefetch_related('lignes', 'lignes__article', 'lignes__devise')
-        if date_min:
-            qs_entrees = qs_entrees.filter(date_op__date__gte=date_min)
-        if date_max:
-            qs_entrees = qs_entrees.filter(date_op__date__lte=date_max)
-
-        # 2) Sorties (ventes)
-        qs_sorties = Sortie.objects.filter(entreprise_id=tenant_id)
-        if branch_id is not None:
-            qs_sorties = qs_sorties.filter(succursale_id=branch_id)
-        qs_sorties = qs_sorties.prefetch_related('lignes', 'lignes__article', 'lignes__devise', 'client')
-        if date_min:
-            qs_sorties = qs_sorties.filter(date_creation__date__gte=date_min)
-        if date_max:
-            qs_sorties = qs_sorties.filter(date_creation__date__lte=date_max)
-
-        # 3) Mouvements de caisse
-        qs_caisse = MouvementCaisse.objects.filter(entreprise_id=tenant_id).select_related('devise', 'sortie', 'entree')
-        if branch_id is not None:
-            qs_caisse = qs_caisse.filter(succursale_id=branch_id)
-        if date_min:
-            qs_caisse = qs_caisse.filter(date__date__gte=date_min)
-        if date_max:
-            qs_caisse = qs_caisse.filter(date__date__lte=date_max)
-
-        # 4) Paiements de dettes (liés à DetteClient)
-        ct_dette = ContentType.objects.get_for_model(DetteClient)
-        qs_paiements = MouvementCaisse.objects.filter(
-            entreprise_id=tenant_id,
-            content_type=ct_dette,
-            type='ENTREE',
-        ).select_related('devise', 'content_type')
-        if branch_id is not None:
-            qs_paiements = qs_paiements.filter(succursale_id=branch_id)
-        if date_min:
-            qs_paiements = qs_paiements.filter(date__date__gte=date_min)
-        if date_max:
-            qs_paiements = qs_paiements.filter(date__date__lte=date_max)
-
-        # Construire la liste unifiée d'événements (date, type, désignation, montant_texte, ref)
-        events = []
-
-        for e in qs_entrees:
-            total_par_devise = {}
-            for lig in e.lignes.all():
-                dev = lig.devise or principal
-                sigle = dev.sigle if dev else 'N/A'
-                total_par_devise[sigle] = total_par_devise.get(sigle, Decimal('0')) + lig.quantite * lig.prix_unitaire
-            montant_str = ', '.join(f"{v:.2f} {s}" for s, v in total_par_devise.items()) if total_par_devise else '-'
-            events.append({
-                'date': e.date_op,
-                'type': 'APPROVISIONNEMENT',
-                'type_display': _('Approvisionnement'),
-                'designation': (e.libele or _('Entrée'))[:80],
-                'montant_texte': montant_str,
-                'ref': f'Entrée#{e.id}',
-            })
-
-        for s in qs_sorties:
-            total_par_devise = {}
-            for lig in s.lignes.all():
-                dev = lig.devise or principal
-                sigle = dev.sigle if dev else 'N/A'
-                total_par_devise[sigle] = total_par_devise.get(sigle, Decimal('0')) + lig.quantite * lig.prix_unitaire
-            montant_str = ', '.join(f"{v:.2f} {s}" for s, v in total_par_devise.items()) if total_par_devise else '-'
-            client_nom = (s.client.nom if s.client else 'Anonyme')[:40]
-            events.append({
-                'date': s.date_creation,
-                'type': 'VENTE',
-                'type_display': _('Vente'),
-                'designation': f"{(s.motif or _('Vente'))[:50]} - {_('Client')}: {client_nom}",
-                'montant_texte': montant_str,
-                'ref': f'Sortie#{s.id}',
-            })
-
-        for mv in qs_caisse:
-            caisse_type_label = _('Caisse Entrée') if mv.type == 'ENTREE' else _('Caisse Sortie')
-            events.append({
-                'date': mv.date,
-                'type': f'CAISSE_{mv.type}',
-                'type_display': caisse_type_label,
-                'designation': (mv.motif_affiche() or '')[:80].replace('\n', ' '),
-                'montant_texte': _format_amount(mv.montant, mv.devise),
-                'ref': mv.reference_piece or f"MC#{mv.id}",
-            })
-
-        from django.contrib.contenttypes.models import ContentType as CT
-        ct_dette = CT.objects.get_for_model(DetteClient)
-        for p in qs_paiements:
-            dette = None
-            if p.content_type_id == ct_dette.id and p.object_id:
-                dette = DetteClient.objects.filter(pk=p.object_id).select_related('client').first()
-            client_nom = (dette.client.nom if dette and dette.client else '')[:40]
-            events.append({
-                'date': p.date,
-                'type': 'PAIEMENT_DETTE',
-                'type_display': _('Paiement dette'),
-                'designation': f"{_('Paiement dette')} - {client_nom}".strip()[:80],
-                'montant_texte': _format_amount(p.montant, p.devise),
-                'ref': p.reference_piece or f"Paiement#{p.id}",
-            })
-
-        # Tri chronologique
-        events.sort(key=lambda x: x['date'])
-
-        # Entreprise pour l'en-tête
-        entreprise = user.get_entreprise(request) or Entreprise.objects.first()
-
-        # PDF
-        buffer = io.BytesIO()
-        from reportlab.lib.pagesizes import A4
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib import colors
-        from rapports.utils.entete import get_entete_entreprise
-        from rapports.utils.pdf_generator import PDFGenerator
-
-        styles = getSampleStyleSheet()
-        normal = styles['Normal']
-        normal.fontSize = 9
-        small = ParagraphStyle('Small', parent=normal, fontSize=8)
-        title_style = ParagraphStyle('Title', parent=styles['Heading2'], alignment=1, fontSize=12, spaceAfter=2)
-        header_small = ParagraphStyle('HeaderSmall', parent=normal, fontSize=8, alignment=1)
-
-        doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=14, rightMargin=14, topMargin=22, bottomMargin=18)
-        elements = []
-
-        # En-tête simplifié (nom, logo, slogan, téléphone uniquement)
-        entete = get_entete_entreprise(entreprise)
-        pdf_gen = PDFGenerator()
-        elements.extend(pdf_gen._create_entete(entete))
-
-        periode_label = _("Période")
-        elements.append(Paragraph(f"<b>{_('JOURNAL COMPLET DES OPÉRATIONS')}</b> - {periode_label}: {periode_txt}", normal))
-        gen_par = _("Généré le %(date)s par %(user)s") % {
-            'date': timezone.now().strftime('%d/%m/%Y à %H:%M'),
-            'user': getattr(user, 'username', _('Système'))
-        }
-        elements.append(Paragraph(gen_par, header_small))
-        elements.append(Spacer(1, 6))
-
-        data = [[
-            Paragraph(f'<b>{_("Date/Heure")}</b>', small),
-            Paragraph(f'<b>{_("Type")}</b>', small),
-            Paragraph(f'<b>{_("Désignation / Motif")}</b>', small),
-            Paragraph(f'<b>{_("Montant")}</b>', small),
-            Paragraph(f'<b>{_("Réf.")}</b>', small),
-        ]]
-        for ev in events:
-            data.append([
-                Paragraph(ev['date'].strftime('%d/%m/%Y %H:%M'), small),
-                Paragraph(ev.get('type_display', ev['type'].replace('_', ' ')), small),
-                Paragraph(ev['designation'].replace('<', ' '), small),
-                Paragraph(ev['montant_texte'], small),
-                Paragraph(str(ev['ref'])[:30], small),
-            ])
-
-        if len(data) == 1:
-            elements.append(Paragraph(_('Aucune opération pour la période.'), normal))
-        else:
-            table = Table(data, repeatRows=1, colWidths=[72, 58, 200, 88, 72])
-            table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('ALIGN', (3, 1), (3, -1), 'RIGHT'),
-                ('FONTSIZE', (0, 0), (-1, -1), 8),
-            ]))
-            elements.append(table)
-
-        elements.append(Spacer(1, 8))
-        total_ops = _("Total : %(count)s opération(s)") % {'count': len(events)}
-        elements.append(Paragraph(f"<i>{total_ops}</i>", small))
-        doc.build(elements)
-        buffer.seek(0)
-        return HttpResponse(buffer, content_type='application/pdf', headers={'Content-Disposition': 'inline; filename="journal_complet.pdf"'})
+        wrapped = wrap_report_response(
+            rapport='journal',
+            titre=body.get('titre', 'journal'),
+            request=request,
+            user=user,
+            data=body,
+            eid=tenant_id,
+            branch_id=branch_id,
+        )
+        return Response(wrapped)
 
     # Les actions de bons POS supprimées ici.
 
@@ -654,10 +531,10 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 
                 # Conversion sécurisée des données
                 try:
-                    qte = int(ligne.get('quantite', 0))
-                except (ValueError, TypeError):
+                    qte = _parse_decimal_quantity(ligne.get('quantite', 0))
+                except (InvalidOperation, TypeError, ValueError):
                     raise serializers.ValidationError({
-                        'quantite': 'La quantité doit être un nombre entier valide.'
+                        'quantite': 'La quantité doit être un nombre décimal valide.'
                     })
                 
                 # Prix réellement encaissé (peut être fourni manuellement pour promotions, réductions, etc.)
@@ -742,7 +619,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 
                 # Utiliser le prix réellement encaissé si fourni, sinon utiliser le prix moyen des lots
                 prix_unitaire_final = prix_unitaire_encaisse if prix_unitaire_encaisse is not None else prix_vente_moyen_lots
-                prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.01'))
+                prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 
                 # Créer la ligne de sortie avec le prix réellement encaissé
                 ligne_sortie = LigneSortie.objects.create(
@@ -780,8 +657,8 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         quantite_vendue=qte_lot,
                         prix_achat=prix_achat,
                         prix_vente=prix_unitaire_final,  # Prix réellement encaissé (pour calcul bénéfice)
-                        benefice_unitaire=benefice_unitaire.quantize(Decimal('0.01')),
-                        benefice_total=benefice_total.quantize(Decimal('0.01'))
+                        benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                        benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                     )
                 
                 # Calcul du montant pour cette ligne (prix réellement encaissé)
@@ -815,7 +692,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 
                 if total_devise > 0:
                     creer_mouvement_caisse(
-                        montant=montant_caisse.quantize(Decimal('0.01')),
+                        montant=montant_caisse.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                         devise=devise_obj or default_dev,
                         type_mouvement='ENTREE',
                         entreprise_id=sortie.entreprise_id,
@@ -978,7 +855,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 'unite': produit['article__unite__libelle'] or 'N/A',
                 'quantite_vendue': produit['quantite_totale'],
                 'nombre_ventes': produit['nombre_ventes'],
-                'chiffre_affaires': str(Decimal(str(produit['chiffre_affaires'] or 0)).quantize(Decimal('0.01')))
+                'chiffre_affaires': str(Decimal(str(produit['chiffre_affaires'] or 0)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
             })
             rang += 1
         
@@ -992,7 +869,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             'statistiques': {
                 'nombre_produits': len(resultats),
                 'total_quantite_vendue': total_quantite,
-                'total_chiffre_affaires': str(total_ca.quantize(Decimal('0.01'))),
+                'total_chiffre_affaires': str(total_ca.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
                 'date_calcul': timezone.now().isoformat()
             },
             'produits': resultats
@@ -1069,7 +946,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     
                     # Créer le mouvement de caisse inverse (SORTIE)
                     creer_mouvement_caisse(
-                        montant=total_devise.quantize(Decimal('0.01')),
+                        montant=total_devise.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                         devise=devise_obj or default_dev,
                         type_mouvement='SORTIE',
                         entreprise_id=sortie.entreprise_id,
@@ -1088,7 +965,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         for l in sortie.lignes.all():
             pu = l.prix_unitaire or Decimal('0')
             total += pu * Decimal(str(l.quantite))
-        return total.quantize(Decimal('0.01'))
+        return total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     def _solde_caisse_par_devise(self, entreprise, devise, succursale_id=None):
         """Calcule le solde de caisse (tenant + devise) pour une devise spécifique."""
@@ -1099,7 +976,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             qs = qs.filter(succursale_id=succursale_id)
         entrees = qs.filter(type='ENTREE').aggregate(total=Sum('montant'))['total'] or Decimal('0')
         sorties = qs.filter(type='SORTIE').aggregate(total=Sum('montant'))['total'] or Decimal('0')
-        return (entrees - sorties).quantize(Decimal('0.01'))
+        return (entrees - sorties).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     def update(self, request, *args, **kwargs):
         return self._update_common(request, *args, **kwargs, partial=False)
@@ -1176,15 +1053,10 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     })
                 
                 try:
-                    qte = int(ligne.get('quantite', 0))
-                except (ValueError, TypeError):
+                    qte = _parse_decimal_quantity(ligne.get('quantite', 0))
+                except (InvalidOperation, TypeError, ValueError):
                     raise serializers.ValidationError({
-                        'quantite': 'La quantité doit être un nombre entier valide.'
-                    })
-                
-                if qte <= 0:
-                    raise serializers.ValidationError({
-                        'quantite': 'La quantité doit être supérieure à 0.'
+                        'quantite': 'La quantité doit être un nombre décimal valide.'
                     })
                 
                 # Prix réellement encaissé (peut être fourni manuellement)
@@ -1268,7 +1140,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 
                 # Utiliser le prix réellement encaissé si fourni, sinon utiliser le prix moyen des lots
                 prix_unitaire_final = prix_unitaire_encaisse if prix_unitaire_encaisse is not None else prix_vente_moyen_lots
-                prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.01'))
+                prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 
                 # Créer la ligne de sortie avec le prix réellement encaissé
                 ligne_sortie = LigneSortie.objects.create(
@@ -1305,8 +1177,8 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         quantite_vendue=qte_lot,
                         prix_achat=prix_achat,
                         prix_vente=prix_unitaire_final,  # Prix réellement encaissé (pour calcul bénéfice)
-                        benefice_unitaire=benefice_unitaire.quantize(Decimal('0.01')),
-                        benefice_total=benefice_total.quantize(Decimal('0.01'))
+                        benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                        benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                     )
                 
                 # Calcul du montant pour cette ligne (prix réellement encaissé)
@@ -1331,7 +1203,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             
             # Ajustement caisse si nécessaire
             new_total = self._total_sortie(instance)
-            diff = (new_total - old_total).quantize(Decimal('0.01'))
+            diff = (new_total - old_total).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             if diff != 0:
                 mouvement_type = 'ENTREE' if diff > 0 else 'SORTIE'
                 montant_abs = abs(diff)
@@ -1379,134 +1251,36 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         user = request.user
         sortie = self.get_object()
         entreprise = user.get_entreprise(request)
-        POS_WIDTH = 80 * mm
+        POS_WIDTH = 58 * mm
+        lm, rm, tm, bm = 1.2 * mm, 1.2 * mm, 2 * mm, 2 * mm
+        content_width = POS_WIDTH - lm - rm
         buffer = io.BytesIO()
         styles = getSampleStyleSheet()
-
-        # Polices réduites pour facture compacte (impression POS). wordWrap pour colonne Article. Alignement à gauche.
-        normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=7, leading=8, wordWrap='CJK')
-        article_cell_style = ParagraphStyle('ArticleCell', parent=normal, wordWrap='CJK', allowWidows=0, allowOrphans=0)
-        title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=10, leading=11, alignment=TA_LEFT, spaceAfter=1*mm)
-        info_style = ParagraphStyle('Info', fontName='Helvetica', fontSize=6, leading=7, alignment=TA_LEFT)
-        footer_style = ParagraphStyle('Footer', fontName='Helvetica', fontSize=6, leading=7, alignment=TA_LEFT, textColor=colors.black)
-
+        mono = ParagraphStyle(
+            'MonoTicket',
+            parent=styles['Normal'],
+            fontName='Courier',
+            fontSize=6.4,
+            leading=7.1,
+            alignment=TA_LEFT,
+            wordWrap='CJK',
+        )
         elements = []
 
-        # En-tête simplifié (nom, logo, téléphone) — pas de slogan sur facture pour éviter doublon avec "Imprimé par" en bas
-        from rapports.utils.entete import get_entete_entreprise
-        from rapports.utils.pdf_generator import PDFGenerator
-        entete = get_entete_entreprise(entreprise)
-        entete = {'entreprise': {**entete['entreprise'], 'slogan': ''}}  # ne pas afficher le slogan en haut
-        pdf_gen = PDFGenerator()
-        elements.extend(pdf_gen._create_entete(entete, compact=True))
-        # Pas de spacer supplémentaire : en-tête compact place déjà le titre juste en dessous
-
-        # Titre facture (traduit)
-        elements.append(Paragraph(f"<b>{_('FACTURE DE VENTE')}</b>", title_style))
-
-        # Infos facture (traduites) — pas de devise dans l'en-tête
-        devise_sortie = getattr(sortie, 'devise', None)
-        if not devise_sortie:
-            devise_sortie = Devise.objects.filter(est_principal=True).first()
-        elements.append(Paragraph(f"{_('N° Facture')}: FACT-{sortie.pk:06d}", info_style))
-        elements.append(Paragraph(f"{_('Date')}: {timezone.now().strftime('%d/%m/%Y %H:%M')}", info_style))
-        elements.append(Spacer(1, 1*mm))
-
-        # Client (labels traduits, données brutes)
-        if sortie.client:
-            elements.append(Paragraph(f"<b>{_('Client')}:</b> {sortie.client.nom}", normal))
-            if sortie.client.adresse:
-                elements.append(Paragraph(f"<b>{_('Adresse')}:</b> {sortie.client.adresse}", normal))
-            if sortie.client.telephone:
-                elements.append(Paragraph(f"<b>{_('Tél')}:</b> {sortie.client.telephone}", normal))
-            if sortie.client.email:
-                elements.append(Paragraph(f"<b>{_('Email')}:</b> {sortie.client.email}", normal))
-            elements.append(Spacer(1, 1*mm))
-
-        # Tableau articles — fond blanc, pas de couleur bleue
-        lignes = sortie.lignes.all()
-        # P.U. en abrégé : même taille que Qté (facture) — contexte "facture" pour EN "UP"
-        pu_label = pgettext('facture', 'P.U.')
-        table_data = [
-            [
-                Paragraph(f"<b>{_('Article')}</b>", article_cell_style),
-                Paragraph(f"<b>{_('Qté')}</b>", normal),
-                Paragraph(f"<b>{pu_label}</b>", normal),
-                Paragraph(f"<b>{_('Total')}</b>", normal)
-            ]
-        ]
-        total_general = Decimal('0.00')
-        for ligne in lignes:
-            article = ligne.article
-            qte = ligne.quantite or 0
-            pu_raw = getattr(ligne, 'prix_unitaire', None)
-            if pu_raw is None:
-                pu = Decimal('0.00')
-            elif isinstance(pu_raw, Decimal):
-                pu = pu_raw
+        from pos.printer_service import MP2258Printer
+        ticket_lines = MP2258Printer().build_facture_ticket_lines(sortie, entreprise, user)
+        for raw in ticket_lines:
+            txt = (raw or '').rstrip('\n')
+            if txt.strip() == '':
+                elements.append(Spacer(1, 0.6 * mm))
             else:
-                pu = Decimal(str(pu_raw))
-            qte_dec = Decimal(str(qte))
-            total = (qte_dec * pu).quantize(Decimal('0.01'))
-            total_general = (total_general + total).quantize(Decimal('0.01'))
-            pu_formatted = f"{pu.quantize(Decimal('0.01')):.2f}"
-            total_formatted = f"{total:.2f}"
-            table_data.append([
-                Paragraph(_article_display_name(article), article_cell_style),
-                Paragraph(str(qte), normal),
-                Paragraph(pu_formatted, normal),
-                Paragraph(total_formatted, normal)
-            ])
+                # preformatted look: Courier + spaces preserved
+                safe = txt.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace(' ', '&nbsp;')
+                elements.append(Paragraph(safe, mono))
 
-        total_formatted = f"{total_general:.2f}"
-        total_display = f"{total_formatted} {devise_sortie.symbole}" if (devise_sortie and getattr(devise_sortie, 'symbole', None)) else total_formatted
-        table_data.append([
-            Paragraph(f"<b>{_('TOTAL')}</b>", article_cell_style),
-            Paragraph("", normal),
-            Paragraph("", normal),
-            Paragraph(f"<b>{total_display}</b>", normal)
-        ])
-
-        # Article 25 %, Qté 10 %, P.U. 10 % (même largeur que Qté), Total le reste — titres centrés
-        article_table = Table(table_data, colWidths=[POS_WIDTH*0.25, POS_WIDTH*0.10, POS_WIDTH*0.10, POS_WIDTH*0.55])
-        article_table.setStyle(TableStyle([
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 0), (-1, -1), 7),
-            ('BACKGROUND', (0, 0), (-1, -1), colors.white),
-            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),   # titres centrés
-            ('ALIGN', (0, 1), (0, -1), 'LEFT'),    # colonne Article à gauche
-            ('ALIGN', (1, 1), (-1, -1), 'RIGHT'),  # Qté, P.U., Total à droite
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
-            ('LEFTPADDING', (0, 0), (-1, -1), 2),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 2),
-            ('TOPPADDING', (0, 0), (-1, -1), 2),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-        ]))
-        elements.append(article_table)
-        elements.append(Spacer(1, 2*mm))
-
-        # Pied de facture (remerciement, imprimeur, date, décorateur) — poussé en bas par le spacer
-        lm = rm = tm = bm = 4*mm
-        avail_width = POS_WIDTH - lm - rm
-        footer_parts = [
-            Paragraph(_("Merci pour votre achat !"), normal),
-            Spacer(1, 0.5*mm),
-            Paragraph(_("Imprimé par: %(user)s") % {'user': user.get_full_name() or user.username}, footer_style),
-            Paragraph(_("Le %(date)s") % {'date': timezone.now().strftime('%d/%m/%Y à %H:%M')}, footer_style),
-            Spacer(1, 1*mm),
-            Paragraph("—" * 30, footer_style),
-        ]
+        avail_width = content_width
         main_height = sum(flow.wrap(avail_width, 100000)[1] for flow in elements)
-        footer_height = sum(flow.wrap(avail_width, 100000)[1] for flow in footer_parts)
-        min_height = POS_WIDTH + 20*mm
-        POS_HEIGHT = max(main_height + footer_height + tm + bm + 3*mm, min_height)
-        # Spacer pour coller le pied en bas de la page (évite qu'il remonte en haut)
-        spacer_bottom = POS_HEIGHT - tm - bm - main_height - footer_height
-        if spacer_bottom > 0:
-            elements.append(Spacer(1, spacer_bottom))
-        elements.extend(footer_parts)
+        POS_HEIGHT = main_height + tm + bm + 4.0 * mm
 
         doc = SimpleDocTemplate(
             buffer,
@@ -1515,15 +1289,108 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             rightMargin=rm,
             topMargin=tm,
             bottomMargin=bm,
-            allowSplitting=0
+            allowSplitting=0,
         )
         doc.build(elements)
         buffer.seek(0)
         return HttpResponse(
             buffer,
             content_type='application/pdf',
-            headers={'Content-Disposition': f'inline; filename="FACTURE_{sortie.pk}.pdf"'}
+            headers={'Content-Disposition': f'inline; filename="FACTURE_{sortie.pk}.pdf"'},
         )
+
+    @action(detail=True, methods=['post'], url_path='facture-pos-print', permission_classes=[IsAuthenticated])
+    def facture_pos_print(self, request, pk=None):
+        """
+        Impression ticket POS (ESC/POS) pour MP-2258 via port série.
+        Nécessite POS_PRINTER_PORT configuré (ex: COM3).
+        """
+        user = request.user
+        sortie = self.get_object()
+        entreprise = user.get_entreprise(request)
+
+        backend = str(getattr(settings, 'POS_PRINTER_BACKEND', 'serial') or 'serial').lower()
+        if backend == 'windows':
+            printer_name = (getattr(settings, 'POS_PRINTER_NAME', '') or '').strip()
+            if not printer_name:
+                return Response({'error': "Imprimante Windows non configurée (POS_PRINTER_NAME)."}, status=501)
+        else:
+            port = getattr(settings, 'POS_PRINTER_PORT', None)
+            if not port:
+                return Response({'error': "Port imprimante non configuré (POS_PRINTER_PORT)."}, status=501)
+
+        try:
+            from pos.printer_service import MP2258Printer
+        except Exception as e:
+            return Response(
+                {'error': f"Service ESC/POS indisponible: {e}"},
+                status=501,
+            )
+
+        printer = None
+        try:
+            printer = MP2258Printer()
+            printer.print_facture(sortie, entreprise, user)
+            return Response({'status': 'impression lancée'})
+        except ImportError as e:
+            return Response(
+                {'error': f"Dépendance manquante pour ESC/POS: {e}. Installez python-escpos."},
+                status=501,
+            )
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+        finally:
+            try:
+                if printer:
+                    printer.close()
+            except Exception:
+                pass
+
+    @action(detail=True, methods=['post'], url_path='bon-pos-print', permission_classes=[IsAuthenticated])
+    def bon_sortie_pos_print(self, request, pk=None):
+        """
+        Impression ticket reçu (bon de sortie) en ESC/POS.
+        """
+        user = request.user
+        sortie = self.get_object()
+        entreprise = user.get_entreprise(request)
+
+        backend = str(getattr(settings, 'POS_PRINTER_BACKEND', 'serial') or 'serial').lower()
+        if backend == 'windows':
+            printer_name = (getattr(settings, 'POS_PRINTER_NAME', '') or '').strip()
+            if not printer_name:
+                return Response({'error': "Imprimante Windows non configurée (POS_PRINTER_NAME)."}, status=501)
+        else:
+            port = getattr(settings, 'POS_PRINTER_PORT', None)
+            if not port:
+                return Response({'error': "Port imprimante non configuré (POS_PRINTER_PORT)."}, status=501)
+
+        try:
+            from pos.printer_service import MP2258Printer
+        except Exception as e:
+            return Response(
+                {'error': f"Service ESC/POS indisponible: {e}"},
+                status=501,
+            )
+
+        printer = None
+        try:
+            printer = MP2258Printer()
+            printer.print_recu(sortie, entreprise, user)
+            return Response({'status': 'impression lancée'})
+        except ImportError as e:
+            return Response(
+                {'error': f"Dépendance manquante pour ESC/POS: {e}. Installez python-escpos."},
+                status=501,
+            )
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+        finally:
+            try:
+                if printer:
+                    printer.close()
+            except Exception:
+                pass
 
     @action(detail=True, methods=['get'], url_path='bon-pos', permission_classes=[IsAuthenticated])
     def bon_sortie_pos(self, request, pk=None):
@@ -1554,7 +1421,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         for l in lignes:
             pu = l.prix_unitaire or Decimal('0')
             q = l.quantite or 0
-            tot = (pu * Decimal(str(q))).quantize(Decimal('0.01'))
+            tot = (pu * Decimal(str(q))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             total_general += tot
             # prefer line-level devise, then sortie.devise
             line_dev = getattr(l, 'devise', None) or getattr(sortie, 'devise', None)
@@ -1630,15 +1497,10 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
             })
         
         try:
-            nouvelle_quantite = int(nouvelle_quantite)
-        except (ValueError, TypeError):
+            nouvelle_quantite = _parse_decimal_quantity(nouvelle_quantite)
+        except (InvalidOperation, ValueError, TypeError):
             raise serializers.ValidationError({
-                'quantite': 'La quantité doit être un nombre entier valide.'
-            })
-        
-        if nouvelle_quantite <= 0:
-            raise serializers.ValidationError({
-                'quantite': 'La quantité doit être supérieure à 0.'
+                'quantite': 'La quantité doit être un nombre décimal valide.'
             })
         
         old_quantite = instance.quantite
@@ -1706,8 +1568,8 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
                     quantite_vendue=quantite_a_prelever,
                     prix_achat=lot.prix_unitaire,
                     prix_vente=lot.prix_vente,
-                    benefice_unitaire=benefice_unitaire.quantize(Decimal('0.01')),
-                    benefice_total=benefice_total.quantize(Decimal('0.01'))
+                    benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                    benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 )
                 
                 lot.quantite_restante -= quantite_a_prelever
@@ -1724,7 +1586,7 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
             
             # Mettre à jour la ligne
             instance.quantite = nouvelle_quantite
-            instance.prix_unitaire = prix_vente_moyen.quantize(Decimal('0.01'))
+            instance.prix_unitaire = prix_vente_moyen.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             if 'devise_id' in request.data:
                 devise_id = request.data.get('devise_id')
                 if devise_id:
@@ -2211,7 +2073,10 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             else:
                 article_lookup = None
 
-            qte = Decimal(str(ligne.get('quantite', 0)))
+            try:
+                qte = _parse_decimal_quantity(ligne.get('quantite', 0))
+            except (InvalidOperation, TypeError, ValueError):
+                raise serializers.ValidationError({'quantite': 'La quantité doit être un nombre décimal valide.'})
             prix_unitaire_raw = ligne.get('prix_unitaire', 0)
             try:
                 prix_unitaire = Decimal(str(prix_unitaire_raw))
@@ -2232,7 +2097,10 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     'prix_vente': 'Le prix de vente doit être supérieur à 0.'
                 })
             
-            seuil_alerte = int(ligne.get('seuil_alerte', 0))
+            try:
+                seuil_alerte = Decimal(str(ligne.get('seuil_alerte', 0)).replace(",", "."))
+            except (InvalidOperation, TypeError, ValueError):
+                seuil_alerte = Decimal('0')
             devise_id = ligne.get('devise_id') or ligne.get('devise')
             date_expiration = ligne.get('date_expiration')
 
@@ -2260,7 +2128,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=tenant_id) if devise_id else default_dev
             devise_sigle = devise_obj.sigle if devise_obj else 'N/A'
             
-            montant_ligne = (q * pu).quantize(Decimal('0.01'))
+            montant_ligne = (q * pu).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             
             if devise_sigle not in totaux_par_devise:
                 totaux_par_devise[devise_sigle] = {
@@ -2294,11 +2162,16 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             })
 
         with transaction.atomic():
-            entree = Entree.objects.create(
-                libele=serializer.validated_data.get('libele', ''),
-                entreprise_id=tenant_id,
-                succursale_id=branch_id
-            )
+            entree_kwargs = {
+                'libele': serializer.validated_data.get('libele', ''),
+                'description': serializer.validated_data.get('description', ''),
+                'entreprise_id': tenant_id,
+                'succursale_id': branch_id,
+            }
+            date_op = serializer.validated_data.get('date_op')
+            if date_op is not None:
+                entree_kwargs['date_op'] = date_op
+            entree = Entree.objects.create(**entree_kwargs)
             
             # Traiter chaque article groupé
             for article_id, ligne_data in articles_groupes.items():
@@ -2568,7 +2441,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 'nombre_lots_gagnants': nombre_lots_gagnants,
                 'nombre_lots_perdants': nombre_lots_perdants,
                 'nombre_lots_total': nombre_lots_total,
-                'taux_reussite': f"{(nombre_lots_gagnants / nombre_lots_total * 100):.2f}%" if nombre_lots_total > 0 else "0%"
+                'taux_reussite': f"{(nombre_lots_gagnants / nombre_lots_total * 100):.5f}%" if nombre_lots_total > 0 else "0%"
             },
             'performance': {
                 'statut': performance,
@@ -2616,9 +2489,10 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             except Article.DoesNotExist:
                 raise serializers.ValidationError(f"Article {article_id} introuvable.")
             
-            qte = int(ligne.get('quantite', 0))
-            if qte <= 0:
-                raise serializers.ValidationError("La quantité doit être supérieure à 0.")
+            try:
+                qte = _parse_decimal_quantity(ligne.get('quantite', 0))
+            except (InvalidOperation, TypeError, ValueError):
+                raise serializers.ValidationError("La quantité doit être un nombre décimal valide.")
             
             prix_unitaire_raw = ligne.get('prix_unitaire', 0)
             try:
@@ -2640,7 +2514,10 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     'prix_vente': 'Le prix de vente doit être supérieur à 0.'
                 })
             
-            seuil_alerte = int(ligne.get('seuil_alerte', 0))
+            try:
+                seuil_alerte = Decimal(str(ligne.get('seuil_alerte', 0)).replace(",", "."))
+            except (InvalidOperation, TypeError, ValueError):
+                seuil_alerte = Decimal('0')
             devise_id = ligne.get('devise_id') or ligne.get('devise')
             devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=entree.entreprise_id) if devise_id else default_dev
             date_expiration = ligne.get('date_expiration')
@@ -2661,10 +2538,10 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     'date_expiration': date_expiration
                 }
         
-        new_total = new_total.quantize(Decimal('0.01'))
+        new_total = new_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         
         # Si augmentation de dépense: vérifier solde
-        diff = (new_total - old_total).quantize(Decimal('0.01'))
+        diff = (new_total - old_total).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         if diff > 0:
             solde = self._solde_caisse(entree.entreprise_id, entree.succursale_id)
             if diff >= solde:
@@ -2789,7 +2666,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         for l in entree.lignes.all():
             pu = l.prix_unitaire or Decimal('0')
             total += pu * Decimal(str(l.quantite))
-        return total.quantize(Decimal('0.01'))
+        return total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     def _solde_caisse(self, tenant_id=None, succursale_id=None):
         """Calcule le solde global de caisse (tenant + éventuellement succursale)."""
@@ -2823,7 +2700,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
 
         entrees = qs.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
         sorties = qs.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        return (entrees - sorties).quantize(Decimal('0.01'))
+        return (entrees - sorties).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     @action(detail=True, methods=['get'], url_path='bon-pos')
     def bon_entree_pos(self, request, pk=None):
@@ -2995,24 +2872,24 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         # Calcul des pourcentages et formatage final
         for sigle, devise_stats in stats_by_devise.items():
             # Formatage des montants
-            devise_stats['total_entrees'] = devise_stats['total_entrees'].quantize(Decimal('0.01'))
-            devise_stats['total_sorties'] = devise_stats['total_sorties'].quantize(Decimal('0.01'))
-            devise_stats['solde'] = devise_stats['solde'].quantize(Decimal('0.01'))
+            devise_stats['total_entrees'] = devise_stats['total_entrees'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            devise_stats['total_sorties'] = devise_stats['total_sorties'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            devise_stats['solde'] = devise_stats['solde'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             
             # Calcul des pourcentages
             if total_global_entrees > 0:
                 devise_stats['pourcentage_entrees'] = (
                     (devise_stats['total_entrees'] / total_global_entrees) * 100
-                ).quantize(Decimal('0.01'))
+                ).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             
             if total_global_sorties > 0:
                 devise_stats['pourcentage_sorties'] = (
                     (devise_stats['total_sorties'] / total_global_sorties) * 100
-                ).quantize(Decimal('0.01'))
+                ).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             
             # Ratios et indicateurs
             devise_stats['ratio_entree_sortie'] = (
-                (devise_stats['total_entrees'] / devise_stats['total_sorties']).quantize(Decimal('0.01'))
+                (devise_stats['total_entrees'] / devise_stats['total_sorties']).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 if devise_stats['total_sorties'] > 0 else Decimal('0.00')
             )
             
@@ -3038,9 +2915,9 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             'total_mouvements': qs.count(),
             'devise_principale': principal_devise.sigle if principal_devise else None,
             'repartition_par_type': {
-                'total_entrees': total_global_entrees.quantize(Decimal('0.01')),
-                'total_sorties': total_global_sorties.quantize(Decimal('0.01')),
-                'solde_global_theorique': (total_global_entrees - total_global_sorties).quantize(Decimal('0.01'))
+                'total_entrees': total_global_entrees.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                'total_sorties': total_global_sorties.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                'solde_global_theorique': (total_global_entrees - total_global_sorties).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             }
         }
         
@@ -3095,19 +2972,43 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         
         # Formatage final
         for devise_info in soldes_par_devise.values():
-            devise_info['solde'] = devise_info['solde'].quantize(Decimal('0.01'))
-            devise_info['total_entrees'] = devise_info['total_entrees'].quantize(Decimal('0.01'))
-            devise_info['total_sorties'] = devise_info['total_sorties'].quantize(Decimal('0.01'))
+            devise_info['solde'] = devise_info['solde'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            devise_info['total_entrees'] = devise_info['total_entrees'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            devise_info['total_sorties'] = devise_info['total_sorties'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         
         # Conversion de dict vers liste triée (devise principale en premier)
         soldes_list = list(soldes_par_devise.values())
         soldes_list.sort(key=lambda x: (not x['est_principale'], x['devise_sigle']))
-        
+
+        from rapports.utils.report_envelope import (
+            build_metadata,
+            get_devise_principale,
+            serialize_agence,
+            serialize_entreprise,
+        )
+
+        entreprise = user.get_entreprise(request)
+        branch_id = getattr(request, 'branch_id', None)
+
         return Response({
+            'rapport': 'etat-caisse',
+            'titre': str(_('ÉTAT DE LA CAISSE')),
+            'entreprise': serialize_entreprise(entreprise, request) if entreprise else None,
+            'agence': serialize_agence(branch_id, entreprise),
+            'devise': get_devise_principale(entreprise),
+            'filtres': {
+                'type': request.query_params.get('type'),
+                'date_min': request.query_params.get('date_min'),
+                'date_max': request.query_params.get('date_max'),
+            },
+            'resume': {
+                'nb_devises_actives': len(soldes_par_devise),
+                'total_mouvements_global': qs.count(),
+                'devise_principale': principal_devise.sigle if principal_devise else None,
+            },
             'soldes_par_devise': soldes_list,
-            'devise_principale': principal_devise.sigle if principal_devise else None,
-            'nb_devises_actives': len(soldes_par_devise),
-            'total_mouvements_global': qs.count()
+            'details': soldes_list,
+            'metadata': build_metadata(user, request),
         })
 
     @action(detail=False, methods=['get'], url_path='tableau-bord')
@@ -3175,9 +3076,9 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         # Post-traitement pour chaque devise
         for sigle, data in devises_data.items():
             # Formatage des montants
-            data['solde_actuel'] = data['solde_actuel'].quantize(Decimal('0.01'))
-            data['total_entrees'] = data['total_entrees'].quantize(Decimal('0.01'))
-            data['total_sorties'] = data['total_sorties'].quantize(Decimal('0.01'))
+            data['solde_actuel'] = data['solde_actuel'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            data['total_entrees'] = data['total_entrees'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            data['total_sorties'] = data['total_sorties'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             
             # Tri des mouvements récents par date (plus récents en premier)
             data['mouvements_recents'].sort(key=lambda x: x['date'], reverse=True)
@@ -3266,7 +3167,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         # Formatage et tri
         soldes_list = []
         for devise_data in soldes_finaux.values():
-            devise_data['solde'] = devise_data['solde'].quantize(Decimal('0.01'))
+            devise_data['solde'] = devise_data['solde'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             devise_data['statut'] = 'positif' if devise_data['solde'] >= 0 else 'negatif'
             soldes_list.append(devise_data)
         
@@ -3309,7 +3210,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                 'id': mv.id,
                 'date': mv.date,
                 'type': mv.type,
-                'montant': mv.montant.quantize(Decimal('0.01')),
+                'montant': mv.montant.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                 'motif': mv.motif_affiche(),
                 'moyen': '',
                 'reference_piece': mv.reference_piece,
@@ -3375,10 +3276,10 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                     'est_principale': stat['devise__est_principal'] or False
                 },
                 'totaux': {
-                    'entrees': total_entrees.quantize(Decimal('0.01')),
-                    'sorties': total_sorties.quantize(Decimal('0.01')),
-                    'solde': (total_entrees - total_sorties).quantize(Decimal('0.01')),
-                    'volume_total': volume_total.quantize(Decimal('0.01'))
+                    'entrees': total_entrees.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                    'sorties': total_sorties.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                    'solde': (total_entrees - total_sorties).quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                    'volume_total': volume_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 },
                 'compteurs': {
                     'nb_entrees': stat['nb_entrees'] or 0,
@@ -3386,8 +3287,8 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                     'nb_total': (stat['nb_entrees'] or 0) + (stat['nb_sorties'] or 0)
                 },
                 'moyennes': {
-                    'montant_moyen_entree': (stat['montant_moyen_entree'] or Decimal('0.00')).quantize(Decimal('0.01')),
-                    'montant_moyen_sortie': (stat['montant_moyen_sortie'] or Decimal('0.00')).quantize(Decimal('0.01'))
+                    'montant_moyen_entree': (stat['montant_moyen_entree'] or Decimal('0.00')).quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                    'montant_moyen_sortie': (stat['montant_moyen_sortie'] or Decimal('0.00')).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 }
             }
             
@@ -3399,7 +3300,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             if total_volume_global > 0:
                 devise_info['pourcentage_volume'] = (
                     (volume / total_volume_global) * 100
-                ).quantize(Decimal('0.01'))
+                ).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             else:
                 devise_info['pourcentage_volume'] = Decimal('0.00')
         
@@ -3412,7 +3313,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             'devises': devises_comparaison,
             'resume_global': {
                 'nb_devises': len(devises_comparaison),
-                'volume_global': total_volume_global.quantize(Decimal('0.01')),
+                'volume_global': total_volume_global.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                 'devise_dominante': devises_comparaison[0]['devise']['sigle'] if devises_comparaison else None
             },
             'timestamp': timezone.now()
@@ -3490,17 +3391,17 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             for l in lignes:
                 pu = l.prix_unitaire or Decimal('0')
                 q = l.quantite or 0
-                tot = (pu * Decimal(str(q))).quantize(Decimal('0.01'))
+                tot = (pu * Decimal(str(q))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 total_general += tot
                 data.append([
                     Paragraph(_article_display_name(l.article)[:28], normal),
                     Paragraph(str(q), normal),
-                    Paragraph(f"{pu:.2f}", normal),
-                    Paragraph(f"{tot:.2f}", normal)
+                    Paragraph(f"{pu:.5f}", normal),
+                    Paragraph(f"{tot:.5f}", normal)
                 ])
             data.append([
                 Paragraph("<b>TOTAL</b>", header_style), '', '',
-                Paragraph(f"<b>{total_general:.2f} {devise_obj.symbole if devise_obj else ''}</b>", header_style)
+                Paragraph(f"<b>{total_general:.5f} {devise_obj.symbole if devise_obj else ''}</b>", header_style)
             ])
             table = Table(data, colWidths=col_w)
             table.setStyle(TableStyle([
@@ -3538,17 +3439,17 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             for l in lignes:
                 pu = l.prix_unitaire or Decimal('0')
                 q = l.quantite or 0
-                tot = (pu * Decimal(str(q))).quantize(Decimal('0.01'))
+                tot = (pu * Decimal(str(q))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 total_general += tot
                 data.append([
                     Paragraph(_article_display_name(l.article)[:28], normal),
                     Paragraph(str(q), normal),
-                    Paragraph(f"{pu:.2f}", normal),
-                    Paragraph(f"{tot:.2f}", normal)
+                    Paragraph(f"{pu:.5f}", normal),
+                    Paragraph(f"{tot:.5f}", normal)
                 ])
             data.append([
                 Paragraph("<b>TOTAL</b>", header_style), '', '',
-                Paragraph(f"<b>{total_general:.2f} {devise_obj.symbole if devise_obj else ''}</b>", header_style)
+                Paragraph(f"<b>{total_general:.5f} {devise_obj.symbole if devise_obj else ''}</b>", header_style)
             ])
             table = Table(data, colWidths=col_w)
             table.setStyle(TableStyle([
@@ -4092,12 +3993,79 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
             status=status.HTTP_201_CREATED,
         )
 
+    @action(detail=True, methods=['get'], url_path='recu-json', permission_classes=[IsAuthenticated])
+    def recu_json(self, request, pk=None):
+        """
+        Reçu de paiement dette en JSON (impression / PDF côté frontend).
+        GET /api/paiements-dettes/{id}/recu-json/
+        """
+        from django.contrib.contenttypes.models import ContentType as CTModel
+        from rapports.utils.report_envelope import (
+            build_metadata,
+            get_devise_principale,
+            serialize_agence,
+            serialize_entreprise,
+        )
+
+        user = request.user
+        paiement = self.get_object()
+        ct_dette = CTModel.objects.get_for_model(DetteClient)
+        if paiement.content_type_id != ct_dette.id or not paiement.object_id:
+            return Response(
+                {'error': _('Mouvement invalide pour un reçu de paiement de dette.')},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        dette = DetteClient.objects.filter(pk=paiement.object_id).select_related(
+            'client', 'devise', 'sortie',
+        ).first()
+        if not dette:
+            return Response({'error': _('Dette introuvable.')}, status=status.HTTP_404_NOT_FOUND)
+
+        entreprise = user.get_entreprise(request)
+        tenant_id, branch_id = _get_tenant_ids(request)
+        lien = None
+        if dette.client and entreprise:
+            lien = dette.client.liens_entreprise.filter(entreprise_id=entreprise.pk).first()
+
+        paiement_data = PaiementDetteReadSerializer(
+            paiement,
+            context={'request': request, 'include_dette_details': True},
+        ).data
+
+        return Response({
+            'document': 'recu_paiement_dette',
+            'titre': _('REÇU DE PAIEMENT'),
+            'format': 'json',
+            'entreprise': serialize_entreprise(entreprise, request),
+            'agence': serialize_agence(branch_id, entreprise),
+            'devise': get_devise_principale(entreprise),
+            'metadata': build_metadata(user, request),
+            'client': {
+                'id': dette.client_id,
+                'nom': dette.client.nom if dette.client else '',
+                'telephone': getattr(dette.client, 'telephone', '') or '',
+                'is_special': bool(lien.is_special) if lien else False,
+            },
+            'dette': {
+                'id': dette.id,
+                'montant_total': str(dette.montant_total),
+                'montant_paye': str(dette.montant_paye),
+                'solde_restant': str(dette.solde_restant),
+                'statut': dette.statut,
+                'sortie_id': dette.sortie_id,
+            },
+            'paiement': paiement_data,
+            'pdf_url': request.build_absolute_uri(
+                f'/api/paiements-dettes/{paiement.pk}/recu-paiement/'
+            ),
+        })
+
     @action(detail=True, methods=['get'], url_path='recu-paiement', permission_classes=[IsAuthenticated])
     def recu_paiement_pdf(self, request, pk=None):
         """
-        Génère le reçu de paiement (PDF) pour un paiement de dette.
-        S'inspire du design de la facture de vente. Peut être utilisé à chaque paiement (partiel ou total).
+        Reçu de paiement dette en PDF (ticket POS / impression directe).
         GET /api/paiements-dettes/{id}/recu-paiement/
+        Pour JSON structuré : GET .../recu-json/
         """
         from django.contrib.contenttypes.models import ContentType as CTModel
 
@@ -4113,15 +4081,17 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         entreprise = user.get_entreprise(request)
 
         POS_WIDTH = 80 * mm
+        lm = rm = tm = bm = 4 * mm
+        content_width = POS_WIDTH - lm - rm
         buffer = io.BytesIO()
         styles = getSampleStyleSheet()
 
         # Polices réduites, design compact (impression POS) — même comportement que facture
         normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=7, leading=8, wordWrap='CJK')
         article_cell_style = ParagraphStyle('ArticleCell', parent=normal, wordWrap='CJK', allowWidows=0, allowOrphans=0)
-        title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=10, leading=11, alignment=TA_LEFT, spaceAfter=1*mm)
+        title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=10, leading=11, alignment=TA_CENTER, spaceAfter=1*mm)
         header_style = ParagraphStyle('Header', fontName='Helvetica-Bold', fontSize=8, leading=9, alignment=TA_LEFT)
-        info_style = ParagraphStyle('Info', fontName='Helvetica', fontSize=6, leading=7, alignment=TA_LEFT)
+        info_style = ParagraphStyle('Info', fontName='Helvetica', fontSize=6, leading=7, alignment=TA_CENTER)
         footer_style = ParagraphStyle('Footer', fontName='Helvetica', fontSize=6, leading=7, alignment=TA_LEFT, textColor=colors.black)
         right_style = ParagraphStyle('Right', fontName='Helvetica', fontSize=7, leading=8, alignment=TA_RIGHT)
 
@@ -4133,7 +4103,7 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         entete = get_entete_entreprise(entreprise)
         entete = {'entreprise': {**entete['entreprise'], 'slogan': ''}}
         pdf_gen = PDFGenerator()
-        elements.extend(pdf_gen._create_entete(entete, compact=True))
+        elements.extend(pdf_gen._create_entete(entete, compact=False, centered=True, logo_size_mm=12))
 
         # Titre au début : REÇU DE PAIEMENT
         elements.append(Paragraph(f"<b>{_('REÇU DE PAIEMENT')}</b>", title_style))
@@ -4158,7 +4128,7 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         # Montant dette (une ligne, sans détail)
         montant_total_dette = dette.montant_total
         solde_apres = dette.solde_restant
-        elements.append(Paragraph(f"<b>{_('Montant dette')}</b>: {montant_total_dette:.2f} {symbole}", normal))
+        elements.append(Paragraph(f"<b>{_('Montant dette')}</b>: {montant_total_dette:.5f} {symbole}", normal))
         elements.append(Spacer(1, 1*mm))
 
         # Produits concernés par la dette — même répartition que facture (Article 25 %, Qté 10 %, P.U. 10 %, Total 55 %)
@@ -4175,14 +4145,15 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
                     nom_article = _article_display_name(article)
                     qte = ligne.quantite or 0
                     pu = Decimal(str(ligne.prix_unitaire or 0))
-                    total_ligne = (Decimal(str(qte)) * pu).quantize(Decimal('0.01'))
+                    total_ligne = (Decimal(str(qte)) * pu).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                     prod_data.append([
                         Paragraph(nom_article, article_cell_style),
                         Paragraph(str(qte), normal),
-                        Paragraph(f"{pu:.2f} {symbole}", normal),
-                        Paragraph(f"{total_ligne:.2f} {symbole}", normal),
+                        Paragraph(f"{pu:.5f} {symbole}", normal),
+                        Paragraph(f"{total_ligne:.5f} {symbole}", normal),
                     ])
-                prod_table = Table(prod_data, colWidths=[POS_WIDTH*0.25, POS_WIDTH*0.10, POS_WIDTH*0.15, POS_WIDTH*0.50])
+                prod_table = Table(prod_data, colWidths=[content_width*0.25, content_width*0.10, content_width*0.15, content_width*0.50])
+                prod_table.hAlign = 'CENTER'
                 prod_table.setStyle(TableStyle([
                     ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
                     ('FONTSIZE', (0, 0), (-1, -1), 7),
@@ -4205,9 +4176,10 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         elements.append(Paragraph(f"<b>{_('Détail du paiement')}</b>", header_style))
         table_paiement_data = [
             [Paragraph(f"<b>{_('Libellé')}</b>", normal), Paragraph(f"<b>{_('Valeur')}</b>", normal), Paragraph(f"<b>{_('Reste')}</b>", normal)],
-            [Paragraph(_("Montant payé (ce reçu)"), normal), Paragraph(f"<b>{paiement.montant:.2f} {symbole}</b>", normal), Paragraph(f"<b>{solde_apres:.2f} {symbole}</b>", normal)],
+            [Paragraph(_("Montant payé (ce reçu)"), normal), Paragraph(f"<b>{paiement.montant:.5f} {symbole}</b>", normal), Paragraph(f"<b>{solde_apres:.5f} {symbole}</b>", normal)],
         ]
-        table_paiement = Table(table_paiement_data, colWidths=[POS_WIDTH*0.25, POS_WIDTH*0.25, POS_WIDTH*0.50])
+        table_paiement = Table(table_paiement_data, colWidths=[content_width*0.25, content_width*0.25, content_width*0.50])
+        table_paiement.hAlign = 'CENTER'
         table_paiement.setStyle(TableStyle([
             ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
             ('FONTSIZE', (0, 0), (-1, -1), 7),
@@ -4242,10 +4214,11 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
                 moyen_h = mouvement_moyen_affiche(p) or '-'
                 hist_data.append([
                     Paragraph(p.date.strftime('%d/%m/%Y %H:%M'), normal),
-                    Paragraph(f"{p.montant:.2f} {symbole}", normal),
+                    Paragraph(f"{p.montant:.5f} {symbole}", normal),
                     Paragraph(moyen_h or '-', normal),
                 ])
-            hist_table = Table(hist_data, colWidths=[POS_WIDTH*0.35, POS_WIDTH*0.30, POS_WIDTH*0.35])
+            hist_table = Table(hist_data, colWidths=[content_width*0.35, content_width*0.30, content_width*0.35])
+            hist_table.hAlign = 'CENTER'
             hist_table.setStyle(TableStyle([
                 ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
                 ('FONTSIZE', (0, 0), (-1, -1), 7),
@@ -4260,25 +4233,20 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
             elements.append(hist_table)
             elements.append(Spacer(1, 1*mm))
 
-        # Pied de page (comme facture POS) — poussé en bas par un spacer, avec décorateur
-        lm = rm = tm = bm = 4*mm
-        avail_width = POS_WIDTH - lm - rm
+        # Pied de page compact (sans "push bottom") pour éviter les pages en trop.
+        avail_width = content_width
         imprim_par = (paiement.utilisateur.get_full_name() or paiement.utilisateur.username) if paiement.utilisateur else (user.get_full_name() or user.username)
         footer_parts = [
             Paragraph(_("Merci pour votre confiance. Conservez ce reçu comme justificatif de paiement."), normal),
             Spacer(1, 0.5*mm),
             Paragraph(_("Imprimé par: %(user)s") % {'user': imprim_par}, footer_style),
             Paragraph(_("Le %(date)s") % {'date': timezone.now().strftime('%d/%m/%Y à %H:%M')}, footer_style),
-            Spacer(1, 1*mm),
+            Spacer(1, 0.5*mm),
             Paragraph("—" * 30, footer_style),
         ]
         main_height = sum(flow.wrap(avail_width, 100000)[1] for flow in elements)
         footer_height = sum(flow.wrap(avail_width, 100000)[1] for flow in footer_parts)
-        min_height = POS_WIDTH + 20*mm
-        POS_HEIGHT = max(main_height + footer_height + tm + bm + 3*mm, min_height)
-        spacer_bottom = POS_HEIGHT - tm - bm - main_height - footer_height
-        if spacer_bottom > 0:
-            elements.append(Spacer(1, spacer_bottom))
+        POS_HEIGHT = main_height + footer_height + tm + bm + 1.5*mm
         elements.extend(footer_parts)
 
         doc = SimpleDocTemplate(

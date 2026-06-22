@@ -15,4 +15,6 @@ admin.site.register(Stock)
 admin.site.register(Sortie)
 admin.site.register(LigneSortie)
 admin.site.register(SousTypeArticle)
+admin.site.register(InventaireSession)
+admin.site.register(InventaireLigne)
 

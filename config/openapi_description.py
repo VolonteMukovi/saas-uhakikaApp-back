@@ -31,7 +31,7 @@ Le payload entreprise est le même partout : **`EntrepriseSerializer`** (champ `
 ### Caisse — mouvements (montant + motif + moyen)
 - **`GET` / `POST` / `PATCH` `/api/mouvements-caisse/`** : montant global, devise, type (`ENTREE` / `SORTIE`), champs libres **`motif`** et **`moyen`**. En lecture, **`details`** peut encore exposer d’anciennes lignes de ventilation (données historiques) ; **`resume`** agrège motif / anciens détails pour l’affichage.
 - **`GET` / `POST` / `PATCH` `/api/types-caisse/`** : référentiel des canaux (libellé, description, image) par entreprise / succursale.
-- **`/api/paiements-dettes/`** : mêmes URLs qu’avant ; chaque paiement est un **`MouvementCaisse`** lié à la dette (`content_type` = `DetteClient`, `object_id`), en **`ENTREE`**, avec **`motif`** et **`moyen`** (comme les autres mouvements de caisse).
+- **`/api/paiements-dettes/`** : mêmes URLs qu’avant ; chaque paiement est un **`MouvementCaisse`** lié à la dette (`content_type` = `DetteClient`, `object_id`), en **`ENTREE`**, avec **`motif`** et **`moyen`** (comme les autres mouvements de caisse). Reçu : **`GET .../{id}/recu-paiement/`** (PDF POS) ou **`GET .../{id}/recu-json/`** (JSON structuré pour impression côté frontend).
 
 ### Rôles
 - **Superadmin** : `is_superuser` (createsuperuser).

@@ -22,12 +22,23 @@ from .models import (
     DetailMouvementCaisse,
 )
 from django.db import transaction, models
+from django.utils import timezone
 from django.utils.translation import gettext as _
+from decimal import Decimal, InvalidOperation
 
 from order.services.lot_closure import entree_is_from_lot_closure
 
 from stock.services.article_names import article_duplicate_exists, normalize_nom_scientifique
 from stock.services.tenant_context import get_tenant_ids
+
+
+class LocalizedDecimalField(serializers.DecimalField):
+    """Accepte les nombres décimaux avec point ou virgule."""
+
+    def to_internal_value(self, data):
+        if isinstance(data, str):
+            data = data.strip().replace(",", ".")
+        return super().to_internal_value(data)
 
 
 class DeviseSerializer(serializers.ModelSerializer):
@@ -204,6 +215,7 @@ class LigneSortieSerializer(serializers.ModelSerializer):
 
     lots_utilises = serializers.SerializerMethodField(read_only=True)
     benefices_lots = serializers.SerializerMethodField(read_only=True)
+    quantite = LocalizedDecimalField(max_digits=12, decimal_places=5)
     
     class Meta:
         model = LigneSortie
@@ -418,6 +430,7 @@ class ClientSerializer(serializers.ModelSerializer):
         if liens_in is not None:
             self._assert_liens_tenant(liens_in, tenant_id)
             for row in liens_in:
+                row.setdefault("is_special", False)
                 ClientEntreprise.objects.create(client=instance, **row)
         elif tenant_id:
             ClientEntreprise.objects.create(
@@ -444,6 +457,7 @@ class ClientSerializer(serializers.ModelSerializer):
             self._assert_liens_tenant(liens_in, tenant_id)
             instance.liens_entreprise.all().delete()
             for row in liens_in:
+                row.setdefault("is_special", False)
                 ClientEntreprise.objects.create(client=instance, **row)
 
         if password is not None:
@@ -691,6 +705,8 @@ class LigneEntreeSerializer(serializers.ModelSerializer):
         required=True
     )
     devise = DeviseSerializer(read_only=True)
+    quantite = LocalizedDecimalField(max_digits=12, decimal_places=5)
+    seuil_alerte = LocalizedDecimalField(max_digits=12, decimal_places=5)
     devise_id = serializers.PrimaryKeyRelatedField(
         queryset=Devise.objects.all(), 
         source='devise', 
@@ -745,7 +761,12 @@ class EntreeSerializer(serializers.ModelSerializer):
     class Meta:
         model = Entree
         fields = ['id', 'libele', 'description', 'date_op', 'lignes', 'lot_id']
-        read_only_fields = ['date_op', 'lot_id']
+        read_only_fields = ['lot_id']
+
+    def validate_date_op(self, value):
+        if value is not None and timezone.is_naive(value):
+            return timezone.make_aware(value, timezone.get_current_timezone())
+        return value
 
     def get_lot_id(self, obj):
         from order.models import Lot
@@ -780,14 +801,18 @@ class EntreeSerializer(serializers.ModelSerializer):
         succursale_id = validated_data.pop('succursale_id', None)
         libele = validated_data.pop('libele', '')
         description = validated_data.pop('description', '')
+        date_op = validated_data.pop('date_op', None)
 
         # Création de l'Entree (entreprise / succursale : perform_create ou import Excel)
-        entree = Entree.objects.create(
-            libele=libele,
-            description=description,
-            entreprise_id=entreprise_id,
-            succursale_id=succursale_id,
-        )
+        entree_kwargs = {
+            'libele': libele,
+            'description': description,
+            'entreprise_id': entreprise_id,
+            'succursale_id': succursale_id,
+        }
+        if date_op is not None:
+            entree_kwargs['date_op'] = date_op
+        entree = Entree.objects.create(**entree_kwargs)
 
         # Création des lignes et mise à jour du stock
         # Fallback devise principale si devise_id absent ou None (par entreprise si connue)
@@ -1091,7 +1116,7 @@ class PaiementDetteReadSerializer(serializers.Serializer):
 
 class PaiementDetteWriteSerializer(serializers.Serializer):
     dette_id = serializers.PrimaryKeyRelatedField(queryset=DetteClient.objects.all(), source='dette')
-    montant_paye = serializers.DecimalField(max_digits=12, decimal_places=2)
+    montant_paye = serializers.DecimalField(max_digits=12, decimal_places=5)
     devise_id = serializers.PrimaryKeyRelatedField(
         queryset=Devise.objects.all(), source='devise', required=False, allow_null=True
     )

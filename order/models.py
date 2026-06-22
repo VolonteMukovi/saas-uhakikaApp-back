@@ -166,7 +166,7 @@ class FraisLot(models.Model):
 
     lot = models.ForeignKey(Lot, on_delete=models.CASCADE, related_name="frais")
     type_frais = models.CharField(max_length=20, choices=TypeFrais.choices)
-    montant = models.DecimalField(max_digits=14, decimal_places=2)
+    montant = models.DecimalField(max_digits=14, decimal_places=5)
     devise = models.ForeignKey("stock.Devise", on_delete=models.PROTECT, related_name="frais_lots")
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -201,8 +201,8 @@ class LotItem(models.Model):
     lot = models.ForeignKey(Lot, on_delete=models.CASCADE, related_name="items")
     article = models.ForeignKey("stock.Article", on_delete=models.PROTECT, related_name="lot_items")
 
-    quantite = models.PositiveIntegerField()
-    prix_achat_unitaire = models.DecimalField(max_digits=14, decimal_places=2)
+    quantite = models.DecimalField(max_digits=12, decimal_places=5)
+    prix_achat_unitaire = models.DecimalField(max_digits=14, decimal_places=5)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -316,7 +316,7 @@ class CommandeItem(models.Model):
         default="",
         help_text="Produit non référencé au catalogue (si pas d’article_id).",
     )
-    quantite = models.PositiveIntegerField()
+    quantite = models.DecimalField(max_digits=12, decimal_places=5)
 
     class Meta:
         ordering = ["id"]

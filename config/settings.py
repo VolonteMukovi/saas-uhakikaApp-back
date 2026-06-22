@@ -135,11 +135,11 @@ REST_FRAMEWORK = {
     # ),
 }
 
-# Configuration JWT : session sécurisée (inactivité 1 h → expiration ; durée max 24 h)
+# Configuration JWT : session sécurisée (expiration à 48 h)
 SIMPLE_JWT = {
-    # Expiration après inactivité : 1 heure (access + refresh)
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(hours=1),
+    # Validité des tokens : 48 heures (access + refresh)
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=48),
+    'REFRESH_TOKEN_LIFETIME': timedelta(hours=48),
 
     # Rotation : nouveau refresh à chaque refresh (sliding) ; ancien blacklisté
     'ROTATE_REFRESH_TOKENS': True,
@@ -220,6 +220,20 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# === POS / ESC-POS (imprimante ticket 58mm) ===
+# Exemple Windows: POS_PRINTER_PORT=COM3
+# Exemple Linux:   POS_PRINTER_PORT=/dev/ttyUSB0
+POS_PRINTER_BACKEND = config("POS_PRINTER_BACKEND", default="serial").strip().lower()
+POS_PRINTER_PORT = config("POS_PRINTER_PORT", default="").strip() or None
+POS_PRINTER_NAME = config("POS_PRINTER_NAME", default="").strip()
+POS_PRINTER_BAUDRATE = config("POS_PRINTER_BAUDRATE", default=9600, cast=int)
+POS_PRINTER_BYTESIZE = config("POS_PRINTER_BYTESIZE", default=8, cast=int)
+POS_PRINTER_PARITY = config("POS_PRINTER_PARITY", default="N")
+POS_PRINTER_STOPBITS = config("POS_PRINTER_STOPBITS", default=1, cast=int)
+POS_PRINTER_TIMEOUT = config("POS_PRINTER_TIMEOUT", default=1, cast=int)
+# Largeur texte (caractères/ligne). 58mm = souvent 32 (font A) ou 42 (font B).
+POS_PRINTER_CHARS_PER_LINE = config("POS_PRINTER_CHARS_PER_LINE", default=32, cast=int)
 
 # Configuration du logging pour tracer les suppressions automatiques d'articles
 # Créer le répertoire logs s'il n'existe pas
