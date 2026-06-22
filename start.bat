@@ -6,9 +6,9 @@ title CANTINE SYSTEM - STARTUP
 REM ================================
 REM CONFIGURATION
 REM ================================
-set ROOT_DIR=C:\CANTINESYSTEM
-set BACKEND_DIR=%ROOT_DIR%\api_cantine
-set FRONTEND_DIR=%ROOT_DIR%\cantine_front
+set ROOT_DIR=C:\app\uhaki_saas
+set BACKEND_DIR=%ROOT_DIR%\saas-uhakikaApp-back
+set FRONTEND_DIR=%ROOT_DIR%\saas-uhakikaApp-front
 
 set PYTHON=%BACKEND_DIR%\.venv\Scripts\python.exe
 set BACKEND_HOST=127.0.0.1
