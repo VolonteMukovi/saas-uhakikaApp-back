@@ -10,7 +10,8 @@ from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
 from django.utils.translation import gettext as _
 
-from stock.models import DetteClient, Entree, MouvementCaisse, Sortie
+from caisse.models import MouvementCaisse
+from stock.models import DetteClient, Entree, Sortie
 
 
 def _format_amount(amount, devise):

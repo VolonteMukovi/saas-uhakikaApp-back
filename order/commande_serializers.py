@@ -314,9 +314,11 @@ class CommandeUpdateAdminSerializer(serializers.ModelSerializer):
     vers **rejetée** ou **livrée** (équivalent API : REJETEE, LIVREE).
     """
 
+    type_caisse_id = serializers.IntegerField(required=False, write_only=True)
+
     class Meta:
         model = Commande
-        fields = ("statut",)
+        fields = ("statut", "type_caisse_id")
 
     def validate_statut(self, value):
         allowed = (Commande.StatutCommande.REJETEE, Commande.StatutCommande.LIVREE)
@@ -331,6 +333,7 @@ class CommandeUpdateAdminSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def update(self, instance, validated_data):
+        type_caisse_id = validated_data.pop('type_caisse_id', None)
         old_statut = instance.statut
         new_statut = validated_data.get("statut", old_statut)
         instance = super().update(instance, validated_data)
@@ -338,7 +341,7 @@ class CommandeUpdateAdminSerializer(serializers.ModelSerializer):
             new_statut == Commande.StatutCommande.LIVREE
             and old_statut != Commande.StatutCommande.LIVREE
         ):
-            apply_sortie_on_commande_livree(instance)
+            apply_sortie_on_commande_livree(instance, type_caisse_id=type_caisse_id)
             instance.refresh_from_db()
         return instance
 

@@ -661,7 +661,12 @@ def import_approvisionnement(request):
     serializer = EntreeSerializer(data=data, context={'request': request})
     if serializer.is_valid():
         entree = serializer.save(entreprise_id=final_ent, succursale_id=final_succ)
-        from stock.services.caisse import creer_mouvement_caisse
+        from caisse.services.caisse import creer_mouvement_caisse
+        from caisse.services.caisse_defaut import MSG_CAISSE_REQUISE
+        from caisse.services.operation_helpers import extract_type_caisse_id
+        type_caisse_id = extract_type_caisse_id(request.POST)
+        if any(t > 0 for t in totaux_par_devise.values()) and not type_caisse_id:
+            return JsonResponse({'type_caisse_id': str(MSG_CAISSE_REQUISE)}, status=400)
         for devise_id, total in totaux_par_devise.items():
             if total <= 0:
                 continue
@@ -680,6 +685,7 @@ def import_approvisionnement(request):
                 reference_piece='',
                 details=None,
                 motif='',
+                type_caisse_id=type_caisse_id,
             )
         return JsonResponse(serializer.data, status=201)
     else:

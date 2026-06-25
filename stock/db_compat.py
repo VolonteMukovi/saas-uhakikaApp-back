@@ -8,7 +8,7 @@ from typing import FrozenSet
 
 from django.db import connection
 
-from stock.models import MouvementCaisse
+from caisse.models import MouvementCaisse
 
 
 def mouvementcaisse_column_names() -> FrozenSet[str]:

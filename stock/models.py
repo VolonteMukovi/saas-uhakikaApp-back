@@ -316,6 +316,8 @@ class DetteClientQuerySet(models.QuerySet):
     """Annotations pour filtres / rapports (montants depuis MouvementCaisse)."""
 
     def with_paiements_aggregate(self):
+        from caisse.models import MouvementCaisse
+
         ct = ContentType.objects.get_for_model(DetteClient)
         paye_sq = (
             MouvementCaisse.objects.filter(
@@ -377,6 +379,8 @@ class DetteClient(models.Model):
         super().save(*args, **kwargs)
 
     def _paiements_mouvements_qs(self):
+        from caisse.models import MouvementCaisse
+
         ct = ContentType.objects.get_for_model(DetteClient)
         return MouvementCaisse.objects.filter(
             content_type=ct,
@@ -392,97 +396,6 @@ class DetteClient(models.Model):
     @property
     def solde_restant(self) -> Decimal:
         return (self.montant_total or Decimal('0.00')) - self.montant_paye
-
-
-class TypeCaisse(models.Model):
-    """Référentiel des canaux (Airtel Money, espèces, banque, …)."""
-
-    libelle = models.CharField(max_length=120)
-    description = models.TextField(blank=True, default='')
-    image = models.ImageField(upload_to='types_caisse/', blank=True, null=True)
-    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='types_caisse')
-    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, null=True, blank=True, related_name='types_caisse')
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ['entreprise_id', 'libelle']
-        indexes = [
-            models.Index(fields=['entreprise_id']),
-            models.Index(fields=['entreprise_id', 'succursale_id']),
-        ]
-        verbose_name = 'Type de caisse'
-        verbose_name_plural = 'Types de caisse'
-
-    def __str__(self):
-        return self.libelle
-
-
-class MouvementCaisse(models.Model):
-    TYPE_CHOICES = [('ENTREE', 'Entrée'), ('SORTIE', 'Sortie')]
-    date = models.DateTimeField(auto_now_add=True)
-    montant = models.DecimalField(max_digits=12, decimal_places=5)
-    devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
-    type = models.CharField(max_length=10, choices=TYPE_CHOICES)
-    motif = models.TextField(blank=True, default='', help_text='Libellé / motif du mouvement.')
-    moyen = models.CharField(
-        max_length=30,
-        blank=True,
-        null=True,
-        help_text='Ex. : Cash, Mobile Money, Chèque (optionnel).',
-    )
-    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE, null=True, blank=True)
-    object_id = models.PositiveIntegerField(null=True, blank=True)
-    content_object = GenericForeignKey('content_type', 'object_id')
-    utilisateur = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='mouvements_caisse_effectues',
-    )
-    reference_piece = models.CharField(max_length=100, blank=True, default='')
-    sortie = models.ForeignKey('Sortie', null=True, blank=True, on_delete=models.SET_NULL, related_name='mouvement_caisse')
-    entree = models.ForeignKey('Entree', null=True, blank=True, on_delete=models.SET_NULL, related_name='mouvement_caisse')
-    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
-    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True)
-
-    class Meta:
-        ordering = ['-date']
-        indexes = [
-            models.Index(fields=['entreprise_id']),
-            models.Index(fields=['succursale_id']),
-            models.Index(fields=['entreprise_id', 'succursale_id']),
-            models.Index(fields=['content_type', 'object_id']),
-        ]
-
-    def __str__(self):
-        sens = '+' if self.type == 'ENTREE' else '-'
-        return f"{self.date.strftime('%Y-%m-%d %H:%M')} {sens}{self.montant}"
-
-    def motif_affiche(self) -> str:
-        from stock.services.caisse import motif_mouvement_concatene
-        return motif_mouvement_concatene(self)
-
-
-class DetailMouvementCaisse(models.Model):
-    """Ventilation d'un mouvement sur plusieurs types de caisse."""
-
-    mouvement = models.ForeignKey(MouvementCaisse, on_delete=models.CASCADE, related_name='details')
-    type_caisse = models.ForeignKey(TypeCaisse, on_delete=models.SET_NULL, null=True, blank=True, related_name='details_mouvements')
-    montant = models.DecimalField(max_digits=12, decimal_places=5)
-    motif_explicite = models.TextField(blank=True, default='', help_text="Si pas de type_caisse, motif obligatoire ou généré automatiquement.")
-    reference_piece = models.CharField(max_length=100, blank=True, default='')
-
-    class Meta:
-        ordering = ['id']
-        verbose_name = 'Détail mouvement caisse'
-        verbose_name_plural = 'Détails mouvements caisse'
-
-    def __str__(self):
-        return f"{self.montant} ({self.type_caisse or 'sans type'})"
-
-
 
 
 class LigneSortie(models.Model):
@@ -738,4 +651,14 @@ class InventaireLigne(models.Model):
         else:
             self.ecart = self.stock_physique - self.stock_theorique
         return self.ecart
+
+
+# Compatibilité imports historiques (modèles définis dans l'app ``caisse``).
+from caisse.models import (  # noqa: E402, F401
+    DetailMouvementCaisse,
+    EcartCaisse,
+    MouvementCaisse,
+    SessionCaisse,
+    TypeCaisse,
+)
 
