@@ -1,7 +1,7 @@
 from rest_framework.response import Response
 from django.db.models import Sum
 
-# Liste des bénéfices par vente
+# Liste des bÃ©nÃ©fices par vente
 
 from django.shortcuts import render
 from rest_framework import viewsets, status, serializers, permissions
@@ -47,7 +47,7 @@ from django.conf import settings
 
 
 class BusinessPermissionMixin:
-    """Accès réservé aux Admin et User (Agent). SuperAdmin n'a pas accès aux données métier."""
+    """AccÃ¨s rÃ©servÃ© aux Admin et User (Agent). SuperAdmin n'a pas accÃ¨s aux donnÃ©es mÃ©tier."""
     permission_classes = [StockIsAdminOrUser]
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -77,19 +77,19 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_decimal_quantity(raw_value):
-    """Parse une quantité en acceptant virgule ou point."""
+    """Parse une quantitÃ© en acceptant virgule ou point."""
     if isinstance(raw_value, Decimal):
         value = raw_value
     else:
         text = str(raw_value).strip().replace(",", ".")
         value = Decimal(text)
     if value <= 0:
-        raise serializers.ValidationError({'quantite': 'La quantité doit être supérieure à 0.'})
+        raise serializers.ValidationError({'quantite': 'La quantitÃ© doit Ãªtre supÃ©rieure Ã  0.'})
     return value
 
 
 class EnterpriseFilterMixin:
-    """Mixin pour filtrer automatiquement par entreprise selon le rôle de l'utilisateur"""
+    """Mixin pour filtrer automatiquement par entreprise selon le rÃ´le de l'utilisateur"""
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -99,16 +99,16 @@ class EnterpriseFilterMixin:
 class TenantFilterMixin:
     """
     Mixin multi-tenant : filtre le queryset par entreprise (et succursale si connue).
-    - Si le modèle a entreprise_id : filtre par request.tenant_id ; si branch_id est défini (JWT ou défaut membership), filtre aussi par succursale.
-    - Agent sans succursale : filtre uniquement par entreprise (succursale_id laissée libre côté données).
-    - Si tenant_lookup est défini (ex. 'entree__entreprise_id') : filtre par ce lookup.
+    - Si le modÃ¨le a entreprise_id : filtre par request.tenant_id ; si branch_id est dÃ©fini (JWT ou dÃ©faut membership), filtre aussi par succursale.
+    - Agent sans succursale : filtre uniquement par entreprise (succursale_id laissÃ©e libre cÃ´tÃ© donnÃ©es).
+    - Si tenant_lookup est dÃ©fini (ex. 'entree__entreprise_id') : filtre par ce lookup.
     """
     tenant_lookup = None  # ex. 'entree__entreprise_id' pour LigneEntree
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        # Support portail client (JWT dédié) : `request.user` est vide, mais
-        # `request.client` / `request.client_membership` sont présents.
+        # Support portail client (JWT dÃ©diÃ©) : `request.user` est vide, mais
+        # `request.client` / `request.client_membership` sont prÃ©sents.
         if not self.request.user.is_authenticated and getattr(self.request, "client", None) is None:
             return queryset.none() if (self.tenant_lookup or hasattr(queryset.model, 'entreprise_id')) else queryset
 
@@ -162,7 +162,7 @@ def _format_amount(amount: Decimal, devise_obj, entreprise=None):
 
 
 def _article_display_name(article):
-    """Retourne un nom lisible pour un article (commercial si présent, sinon scientifique)."""
+    """Retourne un nom lisible pour un article (commercial si prÃ©sent, sinon scientifique)."""
     if not article:
         return ''
     nom_comm = getattr(article, 'nom_commercial', None)
@@ -214,22 +214,22 @@ class RapportViewSet(viewsets.ViewSet):
     def get_permissions(self):
         return [StockIsAdminOrUser()]
 
-    # NOTE: La fonction fiche_stock_article_pdf a été déplacée vers rapports/views.py
+    # NOTE: La fonction fiche_stock_article_pdf a Ã©tÃ© dÃ©placÃ©e vers rapports/views.py
     # pour une meilleure organisation. Utilisez maintenant:
     # GET /api/rapports/{article_id}/fiche-stock/
    
-    # NOTE: Les actions facture_pos_pdf et bons POS ont été déplacées vers
-    # SortieViewSet et EntreeViewSet pour éviter toute ambiguïté de routes.
+    # NOTE: Les actions facture_pos_pdf et bons POS ont Ã©tÃ© dÃ©placÃ©es vers
+    # SortieViewSet et EntreeViewSet pour Ã©viter toute ambiguÃ¯tÃ© de routes.
 
     @action(detail=False, methods=['get'], url_path='journal')
     def journal(self, request):
         """
-        Journal complet des opérations (JSON pour le frontend).
+        Journal complet des opÃ©rations (JSON pour le frontend).
 
         Inclut : approvisionnements, ventes, mouvements de caisse, paiements de dettes.
-        Filtres : month (1-12), year (ex: 2026). Par défaut = mois et année en cours.
-        Ou date_min / date_max (YYYY-MM-DD) pour une plage personnalisée.
-        Pagination : page, page_size (défaut). complet=true pour toute la liste.
+        Filtres : month (1-12), year (ex: 2026). Par dÃ©faut = mois et annÃ©e en cours.
+        Ou date_min / date_max (YYYY-MM-DD) pour une plage personnalisÃ©e.
+        Pagination : page, page_size (dÃ©faut). complet=true pour toute la liste.
 
         GET /api/rapports/journal/
         GET /api/rapports/journal/?month=6&year=2026
@@ -305,7 +305,7 @@ class RapportViewSet(viewsets.ViewSet):
         )
         return Response(wrapped)
 
-    # Les actions de bons POS supprimées ici.
+    # Les actions de bons POS supprimÃ©es ici.
 
 @swagger_auto_schema(tags=['Entreprises'])
 class EntrepriseViewSet(viewsets.ModelViewSet):
@@ -330,15 +330,15 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
             if eid:
                 return Entreprise.objects.filter(id=eid).order_by('-id')
             return Entreprise.objects.none()
-        # Utilisateur sans entreprise : ne voit aucune entreprise tant qu'il n'en a pas créée
+        # Utilisateur sans entreprise : ne voit aucune entreprise tant qu'il n'en a pas crÃ©Ã©e
         return Entreprise.objects.none()
 
     def perform_create(self, serializer):
         from users.models import Membership
         user = self.request.user
         if user.is_superadmin():
-            raise PermissionDenied(_("Le super administrateur ne peut pas créer d'entreprise. Utilisez un compte Admin."))
-        # Tout utilisateur authentifié non superadmin peut créer une entreprise.
+            raise PermissionDenied(_("Le super administrateur ne peut pas crÃ©er d'entreprise. Utilisez un compte Admin."))
+        # Tout utilisateur authentifiÃ© non superadmin peut crÃ©er une entreprise.
         # Il devient automatiquement admin de cette entreprise via Membership.
         entreprise = serializer.save()
         Membership.objects.get_or_create(
@@ -379,24 +379,24 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
     @swagger_auto_schema(
         operation_summary="Mon entreprise (contexte JWT / admin ou agent)",
         operation_description="Retourne l'entreprise du contexte courant (admin ou agent) ; message si superadmin.",
-        responses={200: openapi.Response('Détail entreprise ou message'), 400: 'Aucune entreprise'},
+        responses={200: openapi.Response('DÃ©tail entreprise ou message'), 400: 'Aucune entreprise'},
     )
     @action(detail=False, methods=['get'])
     def my_entreprise(self, request):
-        """Récupérer l'entreprise de l'utilisateur connecté (admin ou agent, lecture)."""
+        """RÃ©cupÃ©rer l'entreprise de l'utilisateur connectÃ© (admin ou agent, lecture)."""
         eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id(request)
         ent = Entreprise.objects.filter(id=eid).first() if eid else request.user.get_entreprise(request)
         if (request.user.is_admin(request) or request.user.is_agent(request)) and ent:
             serializer = self.get_serializer(ent)
             return Response(serializer.data)
         if request.user.is_superadmin():
-            return Response({'message': _("Superadmin n'appartient à aucune entreprise")})
-        return Response({'error': _("Aucune entreprise associée")}, status=400)
+            return Response({'message': _("Superadmin n'appartient Ã  aucune entreprise")})
+        return Response({'error': _("Aucune entreprise associÃ©e")}, status=400)
 
     @swagger_auto_schema(
         operation_summary="Utilisateurs d'une entreprise",
-        operation_description="Liste paginée des utilisateurs ayant un membership actif sur cette entreprise (`pk` = id entreprise).",
-        responses={200: openapi.Response('Liste UserSerializer ou réponse paginée')},
+        operation_description="Liste paginÃ©e des utilisateurs ayant un membership actif sur cette entreprise (`pk` = id entreprise).",
+        responses={200: openapi.Response('Liste UserSerializer ou rÃ©ponse paginÃ©e')},
     )
     @action(detail=True, methods=['get'])
     def users(self, request, pk=None):
@@ -425,14 +425,107 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
         }
         return Response(stats)
 
+    def _assert_entreprise_config_read(self, request, entreprise):
+        user = request.user
+        if user.is_superadmin():
+            return
+        eid = getattr(request, 'tenant_id', None) or user.get_entreprise_id(request)
+        if eid != entreprise.id:
+            raise PermissionDenied(_('AccÃ¨s refusÃ© Ã  cette entreprise.'))
+        if not (user.is_admin(request) or user.is_agent(request)):
+            raise PermissionDenied(_('AccÃ¨s refusÃ© Ã  cette entreprise.'))
+
+    def _assert_entreprise_config_write(self, request, entreprise):
+        user = request.user
+        if user.is_superadmin():
+            raise PermissionDenied(_("Le super administrateur ne peut pas modifier la configuration."))
+        if not user.is_admin(request):
+            raise PermissionDenied(_('AccÃ¨s rÃ©servÃ© aux administrateurs de l\'entreprise.'))
+        eid = getattr(request, 'tenant_id', None) or user.get_entreprise_id(request)
+        if eid != entreprise.id:
+            raise PermissionDenied(_('AccÃ¨s refusÃ© Ã  cette entreprise.'))
+
+    @swagger_auto_schema(
+        operation_summary='Configuration JSON entreprise',
+        methods=['get'],
+        responses={200: 'Objet EntrepriseConfig'},
+    )
+    @swagger_auto_schema(
+        operation_summary='Merge partiel configuration entreprise',
+        methods=['patch'],
+        responses={200: 'Objet EntrepriseConfig'},
+    )
+    @action(detail=True, methods=['get', 'patch'], url_path='config')
+    def entreprise_config(self, request, pk=None):
+        """
+        GET /api/entreprises/{id}/config/ â€” config parsÃ©e (dÃ©faut si vide).
+        PATCH â€” merge par section (admin entreprise).
+        """
+        entreprise = self.get_object()
+        if request.method == 'GET':
+            self._assert_entreprise_config_read(request, entreprise)
+            return Response(entreprise.get_config_dict())
+        self._assert_entreprise_config_write(request, entreprise)
+        if not isinstance(request.data, dict):
+            raise serializers.ValidationError({'detail': _('Le corps de la requÃªte doit Ãªtre un objet JSON.')})
+        merged = entreprise.merge_config(request.data, user_id=request.user.pk)
+        entreprise.save(update_fields=['config'])
+        return Response(merged)
+
+    @action(
+        detail=True,
+        methods=['put', 'delete'],
+        url_path=r'config/document-appearance/(?P<report_type>[^/.]+)',
+    )
+    def document_appearance_config(self, request, pk=None, report_type=None):
+        """
+        PUT â€” remplace la config d'un type de rapport.
+        DELETE â€” supprime la clÃ© (retour aux dÃ©fauts frontend).
+        """
+        from stock.services.entreprise_config import (
+            VALID_REPORT_TYPES,
+            remove_document_appearance,
+            replace_document_appearance,
+        )
+
+        entreprise = self.get_object()
+        if report_type not in VALID_REPORT_TYPES:
+            raise serializers.ValidationError({
+                'detail': _('Type de rapport inconnu : %(type)s') % {'type': report_type},
+            })
+
+        if request.method == 'DELETE':
+            self._assert_entreprise_config_write(request, entreprise)
+            merged = remove_document_appearance(
+                entreprise.get_config_dict(),
+                report_type,
+                user_id=request.user.pk,
+            )
+            entreprise.set_config_dict(merged)
+            entreprise.save(update_fields=['config'])
+            return Response(merged)
+
+        self._assert_entreprise_config_write(request, entreprise)
+        if not isinstance(request.data, dict):
+            raise serializers.ValidationError({'detail': _('Le corps de la requÃªte doit Ãªtre un objet JSON.')})
+        merged = replace_document_appearance(
+            entreprise.get_config_dict(),
+            report_type,
+            request.data,
+            user_id=request.user.pk,
+        )
+        entreprise.set_config_dict(merged)
+        entreprise.save(update_fields=['config'])
+        return Response(merged)
+
 
 @swagger_auto_schema(tags=['Succursales'])
 class SuccursaleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     """
     Succursales (branches) de l'entreprise courante.
-    - Liste : filtrée par entreprise (tenant_id ou premier membership).
-    - Create/Update/Delete : réservé à l'Admin de l'entreprise.
-    Utilisé pour le flow login (choix de la succursale si has_branches).
+    - Liste : filtrÃ©e par entreprise (tenant_id ou premier membership).
+    - Create/Update/Delete : rÃ©servÃ© Ã  l'Admin de l'entreprise.
+    UtilisÃ© pour le flow login (choix de la succursale si has_branches).
     """
     queryset = Succursale.objects.all()
     serializer_class = SuccursaleSerializer
@@ -444,7 +537,7 @@ class SuccursaleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id(self.request)
         if not eid:
             return Succursale.objects.none()
-        # Agent : même visibilité que l'admin sur la liste (entreprise) ; succursale JWT sert au filtrage métier ailleurs.
+        # Agent : mÃªme visibilitÃ© que l'admin sur la liste (entreprise) ; succursale JWT sert au filtrage mÃ©tier ailleurs.
         if user.is_agent(self.request):
             return Succursale.objects.filter(entreprise_id=eid, is_active=True).order_by('nom', 'id')
         # Admin : peut voir toutes les succursales de son entreprise.
@@ -453,10 +546,10 @@ class SuccursaleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         user = self.request.user
         if not user.is_admin(self.request):
-            raise PermissionDenied(_("Seul l'administrateur de l'entreprise peut créer une succursale."))
+            raise PermissionDenied(_("Seul l'administrateur de l'entreprise peut crÃ©er une succursale."))
         eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id(self.request)
         if not eid:
-            raise PermissionDenied(_("Aucune entreprise sélectionnée."))
+            raise PermissionDenied(_("Aucune entreprise sÃ©lectionnÃ©e."))
         entreprise = Entreprise.objects.get(id=eid)
         serializer.save(entreprise=entreprise)
 
@@ -473,7 +566,7 @@ class SuccursaleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
 
 
 class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
-    """ViewSet pour gérer les sorties de stock (filtré par entreprise/succursale)."""
+    """ViewSet pour gÃ©rer les sorties de stock (filtrÃ© par entreprise/succursale)."""
     queryset = Sortie.objects.all()
     serializer_class = SortieSerializer
 
@@ -501,7 +594,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
         default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
         with transaction.atomic():
-            # Récupérer le client si fourni
+            # RÃ©cupÃ©rer le client si fourni
             client = serializer.validated_data.get('client')
             
             lib = serializer.validated_data.get('motif', '')
@@ -521,24 +614,24 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 # Support pour les deux formats : article_id ou article
                 article_id = ligne.get('article_id') or ligne.get('article')
                 
-                # Vérification que l'article existe
+                # VÃ©rification que l'article existe
                 try:
                     article_obj = Article.objects.get(article_id=article_id)
                 except Article.DoesNotExist:
                     raise serializers.ValidationError({
-                        'article': f"Article avec ID {article_id} non trouvé dans votre entreprise. "
-                                  f"Vérifiez que l'article existe et vous appartient."
+                        'article': f"Article avec ID {article_id} non trouvÃ© dans votre entreprise. "
+                                  f"VÃ©rifiez que l'article existe et vous appartient."
                     })
                 
-                # Conversion sécurisée des données
+                # Conversion sÃ©curisÃ©e des donnÃ©es
                 try:
                     qte = _parse_decimal_quantity(ligne.get('quantite', 0))
                 except (InvalidOperation, TypeError, ValueError):
                     raise serializers.ValidationError({
-                        'quantite': 'La quantité doit être un nombre décimal valide.'
+                        'quantite': 'La quantitÃ© doit Ãªtre un nombre dÃ©cimal valide.'
                     })
                 
-                # Prix réellement encaissé (peut être fourni manuellement pour promotions, réductions, etc.)
+                # Prix rÃ©ellement encaissÃ© (peut Ãªtre fourni manuellement pour promotions, rÃ©ductions, etc.)
                 pu_raw = ligne.get('prix_unitaire')
                 prix_unitaire_encaisse = None
                 if pu_raw is not None:
@@ -549,14 +642,14 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                             prix_unitaire_encaisse = Decimal(str(pu_raw))
                         if prix_unitaire_encaisse < 0:
                             raise serializers.ValidationError({
-                                'prix_unitaire': 'Le prix unitaire ne peut pas être négatif.'
+                                'prix_unitaire': 'Le prix unitaire ne peut pas Ãªtre nÃ©gatif.'
                             })
                     except (ValueError, TypeError):
                         raise serializers.ValidationError({
-                            'prix_unitaire': 'Le prix unitaire doit être un nombre valide.'
+                            'prix_unitaire': 'Le prix unitaire doit Ãªtre un nombre valide.'
                         })
                 
-                # Vérifier le stock disponible (somme des quantite_restante)
+                # VÃ©rifier le stock disponible (somme des quantite_restante)
                 stock_disponible = LigneEntree.objects.filter(
                     article=article_obj,
                     quantite_restante__gt=0
@@ -565,7 +658,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 if stock_disponible < qte:
                     raise serializers.ValidationError(
                         f"Stock insuffisant pour l'article {article_obj.nom_scientifique} "
-                        f"(Disponible: {stock_disponible}, Demandé: {qte})"
+                        f"(Disponible: {stock_disponible}, DemandÃ©: {qte})"
                     )
                 
                 # Gestion de la devise pour chaque ligne
@@ -574,12 +667,12 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     try:
                         devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=tenant_id)
                     except Devise.DoesNotExist:
-                        raise serializers.ValidationError(f"Devise avec ID {devise_id} non trouvée dans votre entreprise.")
+                        raise serializers.ValidationError(f"Devise avec ID {devise_id} non trouvÃ©e dans votre entreprise.")
                 else:
                     devise_obj = default_dev
                 
                 # ========== LOGIQUE FIFO ==========
-                # Récupérer les lots disponibles triés par date (FIFO : plus ancien en premier)
+                # RÃ©cupÃ©rer les lots disponibles triÃ©s par date (FIFO : plus ancien en premier)
                 lots_disponibles = LigneEntree.objects.filter(
                     article=article_obj,
                     quantite_restante__gt=0
@@ -597,58 +690,58 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     
                     quantite_a_prelever = min(lot.quantite_restante, quantite_restante_a_sortir)
                     
-                    # Stocker les données du lot utilisé
+                    # Stocker les donnÃ©es du lot utilisÃ©
                     lots_utilises_data.append({
                         'lot': lot,
                         'quantite': quantite_a_prelever,
                         'prix_achat': lot.prix_unitaire,
-                        'prix_vente': lot.prix_vente,  # Prix du lot (pour traçabilité)
+                        'prix_vente': lot.prix_vente,  # Prix du lot (pour traÃ§abilitÃ©)
                     })
                     
-                    # Mettre à jour le lot
+                    # Mettre Ã  jour le lot
                     lot.quantite_restante -= quantite_a_prelever
                     lot.save()
                     
                     quantite_restante_a_sortir -= quantite_a_prelever
                     total_prix_vente += lot.prix_vente * Decimal(str(quantite_a_prelever))
                 
-                # Calculer le prix de vente moyen des lots (pour référence, si prix_unitaire non fourni)
+                # Calculer le prix de vente moyen des lots (pour rÃ©fÃ©rence, si prix_unitaire non fourni)
                 if qte > 0:
                     prix_vente_moyen_lots = total_prix_vente / Decimal(str(qte))
                 else:
                     prix_vente_moyen_lots = Decimal('0.00')
                 
-                # Utiliser le prix réellement encaissé si fourni, sinon utiliser le prix moyen des lots
+                # Utiliser le prix rÃ©ellement encaissÃ© si fourni, sinon utiliser le prix moyen des lots
                 prix_unitaire_final = prix_unitaire_encaisse if prix_unitaire_encaisse is not None else prix_vente_moyen_lots
                 prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 
-                # Créer la ligne de sortie avec le prix réellement encaissé
+                # CrÃ©er la ligne de sortie avec le prix rÃ©ellement encaissÃ©
                 ligne_sortie = LigneSortie.objects.create(
                     sortie=sortie,
                     article=article_obj,
                     quantite=qte,
-                    prix_unitaire=prix_unitaire_final,  # Prix réellement encaissé (peut différer du prix du lot)
+                    prix_unitaire=prix_unitaire_final,  # Prix rÃ©ellement encaissÃ© (peut diffÃ©rer du prix du lot)
                     devise=devise_obj
                 )
                 
-                # Créer les traçabilités et bénéfices
-                # IMPORTANT : Le bénéfice est calculé avec le prix réellement encaissé, pas le prix_vente du lot
+                # CrÃ©er les traÃ§abilitÃ©s et bÃ©nÃ©fices
+                # IMPORTANT : Le bÃ©nÃ©fice est calculÃ© avec le prix rÃ©ellement encaissÃ©, pas le prix_vente du lot
                 for lot_data in lots_utilises_data:
                     lot = lot_data['lot']
                     qte_lot = lot_data['quantite']
                     prix_achat = lot_data['prix_achat']
-                    prix_vente_lot = lot_data['prix_vente']  # Prix du lot (pour traçabilité)
+                    prix_vente_lot = lot_data['prix_vente']  # Prix du lot (pour traÃ§abilitÃ©)
                     
-                    # Traçabilité : quel lot a été utilisé (on garde le prix_vente du lot pour référence)
+                    # TraÃ§abilitÃ© : quel lot a Ã©tÃ© utilisÃ© (on garde le prix_vente du lot pour rÃ©fÃ©rence)
                     LigneSortieLot.objects.create(
                         ligne_sortie=ligne_sortie,
                         lot_entree=lot,
                         quantite=qte_lot,
                         prix_achat=prix_achat,
-                        prix_vente=prix_vente_lot  # Prix du lot (pour traçabilité)
+                        prix_vente=prix_vente_lot  # Prix du lot (pour traÃ§abilitÃ©)
                     )
                     
-                    # Calculer le bénéfice avec le prix réellement encaissé (pas le prix_vente du lot)
+                    # Calculer le bÃ©nÃ©fice avec le prix rÃ©ellement encaissÃ© (pas le prix_vente du lot)
                     benefice_unitaire = prix_unitaire_final - prix_achat
                     benefice_total = benefice_unitaire * Decimal(str(qte_lot))
                     
@@ -657,12 +750,12 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         ligne_sortie=ligne_sortie,
                         quantite_vendue=qte_lot,
                         prix_achat=prix_achat,
-                        prix_vente=prix_unitaire_final,  # Prix réellement encaissé (pour calcul bénéfice)
+                        prix_vente=prix_unitaire_final,  # Prix rÃ©ellement encaissÃ© (pour calcul bÃ©nÃ©fice)
                         benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                         benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                     )
                 
-                # Calcul du montant pour cette ligne (prix réellement encaissé)
+                # Calcul du montant pour cette ligne (prix rÃ©ellement encaissÃ©)
                 montant_ligne = prix_unitaire_final * Decimal(str(qte))
                 
                 # Accumulation par devise
@@ -674,7 +767,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     }
                 totaux_par_devise[devise_key]['total'] += montant_ligne
                 
-                # Mettre à jour le stock total (pour compatibilité)
+                # Mettre Ã  jour le stock total (pour compatibilitÃ©)
                 stock_obj, created = Stock.objects.get_or_create(
                     article=article_obj,
                     defaults={'Qte': 0, 'seuilAlert': 0}
@@ -682,7 +775,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 stock_obj.Qte -= qte
                 stock_obj.save()
             
-            # Créer les mouvements de caisse par devise (ENTREE pour vente)
+            # CrÃ©er les mouvements de caisse par devise (ENTREE pour vente)
             # Si statut EN_CREDIT, montant = 0 (pas d'impact sur la caisse)
             type_caisse_id = extract_type_caisse_id(request.data)
             encaissement_requis = any(
@@ -697,7 +790,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 devise_obj = devise_data['devise_obj']
                 total_devise = devise_data['total']
                 
-                # Si vente en crédit, enregistrer avec montant 0
+                # Si vente en crÃ©dit, enregistrer avec montant 0
                 montant_caisse = Decimal('0.00') if sortie.statut == 'EN_CREDIT' else total_devise
                 
                 if total_devise > 0:
@@ -718,17 +811,17 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
     @action(detail=False, methods=['get'], url_path='produits-plus-vendus')
     def produits_plus_vendus(self, request):
         """
-        Retourne les produits les plus vendus, classés par NOMBRE DE VENTES (nombre de fois
-        où le produit a été vendu), pas par quantité. Ex. : un biscuit vendu 10 fois (qté 12)
-        est classé avant une mayonnaise vendue 2 fois (qté 25).
+        Retourne les produits les plus vendus, classÃ©s par NOMBRE DE VENTES (nombre de fois
+        oÃ¹ le produit a Ã©tÃ© vendu), pas par quantitÃ©. Ex. : un biscuit vendu 10 fois (qtÃ© 12)
+        est classÃ© avant une mayonnaise vendue 2 fois (qtÃ© 25).
         
-        Paramètres de requête (optionnels) :
-        - date_debut : Date de début (format: YYYY-MM-DD)
+        ParamÃ¨tres de requÃªte (optionnels) :
+        - date_debut : Date de dÃ©but (format: YYYY-MM-DD)
         - date_fin : Date de fin (format: YYYY-MM-DD)
         - mois : Mois (1-12)
-        - annee : Année (ex: 2025)
-        - limit : Nombre de résultats à retourner (défaut: 10)
-        - general : true/false - Si true, ignore les filtres de date (défaut: false)
+        - annee : AnnÃ©e (ex: 2025)
+        - limit : Nombre de rÃ©sultats Ã  retourner (dÃ©faut: 10)
+        - general : true/false - Si true, ignore les filtres de date (dÃ©faut: false)
         
         Exemples :
         - GET /api/sorties/produits-plus-vendus/ (tous les temps)
@@ -740,7 +833,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         from datetime import datetime, timedelta
         from django.utils import timezone
         
-        # Récupérer les paramètres
+        # RÃ©cupÃ©rer les paramÃ¨tres
         date_debut = request.query_params.get('date_debut')
         date_fin = request.query_params.get('date_fin')
         mois = request.query_params.get('mois')
@@ -764,14 +857,14 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         if branch_id is not None:
             lignes_sortie = lignes_sortie.filter(sortie__succursale_id=branch_id)
         
-        # Filtrage par période
+        # Filtrage par pÃ©riode
         periode_info = {}
         
         if general:
-            # Mode général : toutes les ventes
+            # Mode gÃ©nÃ©ral : toutes les ventes
             periode_info = {
                 'type': 'general',
-                'description': 'Toutes les ventes (général)'
+                'description': 'Toutes les ventes (gÃ©nÃ©ral)'
             }
         elif mois and annee:
             # Filtrage par mois
@@ -780,7 +873,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 annee_int = int(annee)
                 if not (1 <= mois_int <= 12):
                     return Response(
-                        {'error': 'Le mois doit être entre 1 et 12'},
+                        {'error': 'Le mois doit Ãªtre entre 1 et 12'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 
@@ -796,8 +889,8 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     date_sortie__lte=date_fin_mois
                 )
                 
-                noms_mois = ['', 'Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin',
-                            'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre']
+                noms_mois = ['', 'Janvier', 'FÃ©vrier', 'Mars', 'Avril', 'Mai', 'Juin',
+                            'Juillet', 'AoÃ»t', 'Septembre', 'Octobre', 'Novembre', 'DÃ©cembre']
                 periode_info = {
                     'type': 'mois',
                     'mois': mois_int,
@@ -806,11 +899,11 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 }
             except ValueError:
                 return Response(
-                    {'error': 'Format invalide pour mois ou année'},
+                    {'error': 'Format invalide pour mois ou annÃ©e'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         elif date_debut or date_fin:
-            # Filtrage par période personnalisée
+            # Filtrage par pÃ©riode personnalisÃ©e
             try:
                 if date_debut:
                     date_debut_obj = datetime.strptime(date_debut, '%Y-%m-%d').date()
@@ -834,15 +927,15 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     status=status.HTTP_400_BAD_REQUEST
                 )
         else:
-            # Par défaut : toutes les ventes
+            # Par dÃ©faut : toutes les ventes
             periode_info = {
                 'type': 'general',
                 'description': 'Toutes les ventes'
             }
         
         # Grouper par article et calculer les totaux
-        # Classement par NOMBRE DE VENTES (nombre de fois où le produit a été vendu), pas par quantité
-        # Ex. : biscuit vendu 10 fois (qté 12) > mayonnaise vendue 2 fois (qté 25) → biscuit est "plus vendu"
+        # Classement par NOMBRE DE VENTES (nombre de fois oÃ¹ le produit a Ã©tÃ© vendu), pas par quantitÃ©
+        # Ex. : biscuit vendu 10 fois (qtÃ© 12) > mayonnaise vendue 2 fois (qtÃ© 25) â†’ biscuit est "plus vendu"
         produits_vendus = lignes_sortie.values(
             'article__article_id',
             'article__nom_scientifique',
@@ -854,7 +947,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             chiffre_affaires=Sum(models.F('quantite') * models.F('prix_unitaire'))
         ).order_by('-nombre_ventes')[:limit]
         
-        # Formater les résultats
+        # Formater les rÃ©sultats
         resultats = []
         rang = 1
         for produit in produits_vendus:
@@ -872,11 +965,15 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         
         # Statistiques globales
         total_quantite = sum(p['quantite_vendue'] for p in resultats)
-        # Utiliser Decimal(0) comme valeur initiale pour garantir que le résultat est un Decimal
+        # Utiliser Decimal(0) comme valeur initiale pour garantir que le rÃ©sultat est un Decimal
         total_ca = sum((Decimal(str(p['chiffre_affaires'])) for p in resultats), Decimal('0.00'))
         
         return Response({
             'periode': periode_info,
+            'classement': {
+                'critere': 'nombre_ventes',
+                'description': 'Classement par nombre de ventes (nombre de lignes de vente par article), pas par quantite ni par chiffre d''affaires.',
+            },
             'statistiques': {
                 'nombre_produits': len(resultats),
                 'total_quantite_vendue': total_quantite,
@@ -892,19 +989,19 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         with transaction.atomic():
             # 1. Restaurer les lots et le stock pour chaque ligne (FIFO inverse)
             for ligne in sortie.lignes.all():
-                # Restaurer les lots utilisés
+                # Restaurer les lots utilisÃ©s
                 for lot_utilise in ligne.lots_utilises.all():
                     lot = lot_utilise.lot_entree
                     lot.quantite_restante += lot_utilise.quantite
                     lot.save()
                 
-                # Supprimer les bénéfices associés
+                # Supprimer les bÃ©nÃ©fices associÃ©s
                 BeneficeLot.objects.filter(ligne_sortie=ligne).delete()
                 
-                # Supprimer les traçabilités
+                # Supprimer les traÃ§abilitÃ©s
                 ligne.lots_utilises.all().delete()
                 
-                # Restaurer le stock total (pour compatibilité)
+                # Restaurer le stock total (pour compatibilitÃ©)
                 stock, created = Stock.objects.get_or_create(
                     article=ligne.article, 
                     defaults={'Qte': 0, 'seuilAlert': 0}
@@ -920,7 +1017,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 # Calculer le montant de cette ligne
                 montant_ligne = (ligne.prix_unitaire or Decimal('0')) * Decimal(str(ligne.quantite))
                 
-                # Déterminer la devise de cette ligne
+                # DÃ©terminer la devise de cette ligne
                 devise_ligne = ligne.devise or default_dev
                 devise_key = devise_ligne.sigle if devise_ligne else 'DEFAULT'
                 
@@ -932,8 +1029,8 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     }
                 totaux_par_devise[devise_key]['total'] += montant_ligne
             
-            # 3. Vérifier les soldes et créer les mouvements de caisse inverses par devise
-            # Mais seulement si la vente était PAYEE (pas EN_CREDIT)
+            # 3. VÃ©rifier les soldes et crÃ©er les mouvements de caisse inverses par devise
+            # Mais seulement si la vente Ã©tait PAYEE (pas EN_CREDIT)
             type_caisse_id = extract_type_caisse_id(request.data)
             annulation_caisse_requise = (
                 sortie.statut != 'EN_CREDIT'
@@ -946,11 +1043,11 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 total_devise = devise_data['total']
                 
                 if total_devise > 0:
-                    # Si la vente était en crédit, pas besoin d'annuler de mouvement caisse
+                    # Si la vente Ã©tait en crÃ©dit, pas besoin d'annuler de mouvement caisse
                     if sortie.statut == 'EN_CREDIT':
                         continue
                     
-                    # Vérifier le solde disponible pour cette devise
+                    # VÃ©rifier le solde disponible pour cette devise
                     solde_devise = self._solde_caisse_par_devise(
                         user.get_entreprise(self.request),
                         devise_obj,
@@ -962,7 +1059,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                             f"Solde disponible: {solde_devise}, Montant requis: {total_devise}"
                         )
                     
-                    # Créer le mouvement de caisse inverse (SORTIE)
+                    # CrÃ©er le mouvement de caisse inverse (SORTIE)
                     creer_mouvement_caisse(
                         montant=total_devise.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                         devise=devise_obj or default_dev,
@@ -987,7 +1084,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         return total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     def _solde_caisse_par_devise(self, entreprise, devise, succursale_id=None):
-        """Calcule le solde de caisse (tenant + devise) pour une devise spécifique."""
+        """Calcule le solde de caisse (tenant + devise) pour une devise spÃ©cifique."""
         if not entreprise or not devise:
             return Decimal('0.00')
         qs = MouvementCaisse.objects.filter(devise=devise, entreprise_id=entreprise.pk)
@@ -1004,7 +1101,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         return self._update_common(request, *args, **kwargs, partial=True)
 
     def _update_common(self, request, *args, **kwargs):
-        """Mise à jour d'une sortie avec gestion FIFO complète."""
+        """Mise Ã  jour d'une sortie avec gestion FIFO complÃ¨te."""
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         user = request.user
@@ -1017,21 +1114,21 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         default_dev = Devise.objects.filter(est_principal=True).first()
         
         with transaction.atomic():
-            # ========== ROLLBACK : Restaurer les lots et supprimer les traçabilités ==========
+            # ========== ROLLBACK : Restaurer les lots et supprimer les traÃ§abilitÃ©s ==========
             for ancienne_ligne in instance.lignes.all():
-                # Restaurer quantite_restante pour chaque lot utilisé
+                # Restaurer quantite_restante pour chaque lot utilisÃ©
                 for lot_utilise in ancienne_ligne.lots_utilises.all():
                     lot = lot_utilise.lot_entree
                     lot.quantite_restante += lot_utilise.quantite
                     lot.save()
                 
-                # Supprimer les bénéfices associés
+                # Supprimer les bÃ©nÃ©fices associÃ©s
                 BeneficeLot.objects.filter(ligne_sortie=ancienne_ligne).delete()
                 
-                # Supprimer les traçabilités
+                # Supprimer les traÃ§abilitÃ©s
                 ancienne_ligne.lots_utilises.all().delete()
                 
-                # Restaurer le stock total (pour compatibilité)
+                # Restaurer le stock total (pour compatibilitÃ©)
                 stock_obj, created = Stock.objects.get_or_create(
                     article=ancienne_ligne.article, 
                     defaults={'Qte': 0, 'seuilAlert': 0}
@@ -1042,7 +1139,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             # Supprimer toutes les anciennes lignes
             instance.lignes.all().delete()
             
-            # Mettre à jour les champs de la sortie
+            # Mettre Ã  jour les champs de la sortie
             if 'motif' in request.data:
                 instance.motif = request.data['motif']
             if 'client_id' in request.data:
@@ -1051,14 +1148,14 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     try:
                         instance.client = Client.objects.get(pk=client_id)
                     except Client.DoesNotExist:
-                        raise serializers.ValidationError(f"Client avec ID {client_id} non trouvé.")
+                        raise serializers.ValidationError(f"Client avec ID {client_id} non trouvÃ©.")
                 else:
                     instance.client = None
             if 'statut' in request.data:
                 instance.statut = request.data.get('statut')
             instance.save()
             
-            # ========== RECRÉATION : Créer les nouvelles lignes avec FIFO ==========
+            # ========== RECRÃ‰ATION : CrÃ©er les nouvelles lignes avec FIFO ==========
             totaux_par_devise = {}
             
             for ligne in lignes_data:
@@ -1068,17 +1165,17 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     article_obj = Article.objects.get(article_id=article_id)
                 except Article.DoesNotExist:
                     raise serializers.ValidationError({
-                        'article': f"Article avec ID {article_id} non trouvé."
+                        'article': f"Article avec ID {article_id} non trouvÃ©."
                     })
                 
                 try:
                     qte = _parse_decimal_quantity(ligne.get('quantite', 0))
                 except (InvalidOperation, TypeError, ValueError):
                     raise serializers.ValidationError({
-                        'quantite': 'La quantité doit être un nombre décimal valide.'
+                        'quantite': 'La quantitÃ© doit Ãªtre un nombre dÃ©cimal valide.'
                     })
                 
-                # Prix réellement encaissé (peut être fourni manuellement)
+                # Prix rÃ©ellement encaissÃ© (peut Ãªtre fourni manuellement)
                 pu_raw = ligne.get('prix_unitaire')
                 prix_unitaire_encaisse = None
                 if pu_raw is not None:
@@ -1089,14 +1186,14 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                             prix_unitaire_encaisse = Decimal(str(pu_raw))
                         if prix_unitaire_encaisse < 0:
                             raise serializers.ValidationError({
-                                'prix_unitaire': 'Le prix unitaire ne peut pas être négatif.'
+                                'prix_unitaire': 'Le prix unitaire ne peut pas Ãªtre nÃ©gatif.'
                             })
                     except (ValueError, TypeError):
                         raise serializers.ValidationError({
-                            'prix_unitaire': 'Le prix unitaire doit être un nombre valide.'
+                            'prix_unitaire': 'Le prix unitaire doit Ãªtre un nombre valide.'
                         })
                 
-                # Vérifier le stock disponible (somme des quantite_restante)
+                # VÃ©rifier le stock disponible (somme des quantite_restante)
                 stock_disponible = LigneEntree.objects.filter(
                     article=article_obj,
                     quantite_restante__gt=0
@@ -1105,7 +1202,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 if stock_disponible < qte:
                     raise serializers.ValidationError(
                         f"Stock insuffisant pour l'article {article_obj.nom_scientifique} "
-                        f"(Disponible: {stock_disponible}, Demandé: {qte})"
+                        f"(Disponible: {stock_disponible}, DemandÃ©: {qte})"
                     )
                 
                 # Gestion de la devise
@@ -1142,7 +1239,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         'lot': lot,
                         'quantite': quantite_a_prelever,
                         'prix_achat': lot.prix_unitaire,
-                        'prix_vente': lot.prix_vente,  # Prix du lot (pour traçabilité)
+                        'prix_vente': lot.prix_vente,  # Prix du lot (pour traÃ§abilitÃ©)
                     })
                     
                     lot.quantite_restante -= quantite_a_prelever
@@ -1151,42 +1248,42 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     quantite_restante_a_sortir -= quantite_a_prelever
                     total_prix_vente += lot.prix_vente * Decimal(str(quantite_a_prelever))
                 
-                # Calculer le prix de vente moyen des lots (pour référence, si prix_unitaire non fourni)
+                # Calculer le prix de vente moyen des lots (pour rÃ©fÃ©rence, si prix_unitaire non fourni)
                 if qte > 0:
                     prix_vente_moyen_lots = total_prix_vente / Decimal(str(qte))
                 else:
                     prix_vente_moyen_lots = Decimal('0.00')
                 
-                # Utiliser le prix réellement encaissé si fourni, sinon utiliser le prix moyen des lots
+                # Utiliser le prix rÃ©ellement encaissÃ© si fourni, sinon utiliser le prix moyen des lots
                 prix_unitaire_final = prix_unitaire_encaisse if prix_unitaire_encaisse is not None else prix_vente_moyen_lots
                 prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 
-                # Créer la ligne de sortie avec le prix réellement encaissé
+                # CrÃ©er la ligne de sortie avec le prix rÃ©ellement encaissÃ©
                 ligne_sortie = LigneSortie.objects.create(
                     sortie=instance,
                     article=article_obj,
                     quantite=qte,
-                    prix_unitaire=prix_unitaire_final,  # Prix réellement encaissé
+                    prix_unitaire=prix_unitaire_final,  # Prix rÃ©ellement encaissÃ©
                     devise=devise_obj
                 )
                 
-                # Créer les traçabilités et bénéfices
-                # IMPORTANT : Le bénéfice est calculé avec le prix réellement encaissé
+                # CrÃ©er les traÃ§abilitÃ©s et bÃ©nÃ©fices
+                # IMPORTANT : Le bÃ©nÃ©fice est calculÃ© avec le prix rÃ©ellement encaissÃ©
                 for lot_data in lots_utilises_data:
                     lot = lot_data['lot']
                     qte_lot = lot_data['quantite']
                     prix_achat = lot_data['prix_achat']
-                    prix_vente_lot = lot_data['prix_vente']  # Prix du lot (pour traçabilité)
+                    prix_vente_lot = lot_data['prix_vente']  # Prix du lot (pour traÃ§abilitÃ©)
                     
                     LigneSortieLot.objects.create(
                         ligne_sortie=ligne_sortie,
                         lot_entree=lot,
                         quantite=qte_lot,
                         prix_achat=prix_achat,
-                        prix_vente=prix_vente_lot  # Prix du lot (pour traçabilité)
+                        prix_vente=prix_vente_lot  # Prix du lot (pour traÃ§abilitÃ©)
                     )
                     
-                    # Calculer le bénéfice avec le prix réellement encaissé
+                    # Calculer le bÃ©nÃ©fice avec le prix rÃ©ellement encaissÃ©
                     benefice_unitaire = prix_unitaire_final - prix_achat
                     benefice_total = benefice_unitaire * Decimal(str(qte_lot))
                     
@@ -1195,12 +1292,12 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         ligne_sortie=ligne_sortie,
                         quantite_vendue=qte_lot,
                         prix_achat=prix_achat,
-                        prix_vente=prix_unitaire_final,  # Prix réellement encaissé (pour calcul bénéfice)
+                        prix_vente=prix_unitaire_final,  # Prix rÃ©ellement encaissÃ© (pour calcul bÃ©nÃ©fice)
                         benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                         benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                     )
                 
-                # Calcul du montant pour cette ligne (prix réellement encaissé)
+                # Calcul du montant pour cette ligne (prix rÃ©ellement encaissÃ©)
                 montant_ligne = prix_unitaire_final * Decimal(str(qte))
                 
                 # Accumulation par devise
@@ -1212,7 +1309,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     }
                 totaux_par_devise[devise_key]['total'] += montant_ligne
                 
-                # Mettre à jour le stock total
+                # Mettre Ã  jour le stock total
                 stock_obj, created = Stock.objects.get_or_create(
                     article=article_obj,
                     defaults={'Qte': 0, 'seuilAlert': 0}
@@ -1220,7 +1317,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 stock_obj.Qte -= qte
                 stock_obj.save()
             
-            # Ajustement caisse si nécessaire
+            # Ajustement caisse si nÃ©cessaire
             new_total = self._total_sortie(instance)
             diff = (new_total - old_total).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             if diff != 0:
@@ -1268,7 +1365,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         sortie = qs.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
         return entree - sortie
 
-    # === Actions POS (facture & bons de sortie) déplacées depuis RapportViewSet ===
+    # === Actions POS (facture & bons de sortie) dÃ©placÃ©es depuis RapportViewSet ===
     @action(detail=True, methods=['get'], url_path='facture-pos', permission_classes=[IsAuthenticated])
     def facture_pos_pdf(self, request, pk=None):
         user = request.user
@@ -1325,8 +1422,8 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
     @action(detail=True, methods=['post'], url_path='facture-pos-print', permission_classes=[IsAuthenticated])
     def facture_pos_print(self, request, pk=None):
         """
-        Impression ticket POS (ESC/POS) pour MP-2258 via port série.
-        Nécessite POS_PRINTER_PORT configuré (ex: COM3).
+        Impression ticket POS (ESC/POS) pour MP-2258 via port sÃ©rie.
+        NÃ©cessite POS_PRINTER_PORT configurÃ© (ex: COM3).
         """
         user = request.user
         sortie = self.get_object()
@@ -1336,11 +1433,11 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         if backend == 'windows':
             printer_name = (getattr(settings, 'POS_PRINTER_NAME', '') or '').strip()
             if not printer_name:
-                return Response({'error': "Imprimante Windows non configurée (POS_PRINTER_NAME)."}, status=501)
+                return Response({'error': "Imprimante Windows non configurÃ©e (POS_PRINTER_NAME)."}, status=501)
         else:
             port = getattr(settings, 'POS_PRINTER_PORT', None)
             if not port:
-                return Response({'error': "Port imprimante non configuré (POS_PRINTER_PORT)."}, status=501)
+                return Response({'error': "Port imprimante non configurÃ© (POS_PRINTER_PORT)."}, status=501)
 
         try:
             from pos.printer_service import MP2258Printer
@@ -1354,10 +1451,10 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         try:
             printer = MP2258Printer()
             printer.print_facture(sortie, entreprise, user)
-            return Response({'status': 'impression lancée'})
+            return Response({'status': 'impression lancÃ©e'})
         except ImportError as e:
             return Response(
-                {'error': f"Dépendance manquante pour ESC/POS: {e}. Installez python-escpos."},
+                {'error': f"DÃ©pendance manquante pour ESC/POS: {e}. Installez python-escpos."},
                 status=501,
             )
         except Exception as e:
@@ -1372,7 +1469,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
     @action(detail=True, methods=['post'], url_path='bon-pos-print', permission_classes=[IsAuthenticated])
     def bon_sortie_pos_print(self, request, pk=None):
         """
-        Impression ticket reçu (bon de sortie) en ESC/POS.
+        Impression ticket reÃ§u (bon de sortie) en ESC/POS.
         """
         user = request.user
         sortie = self.get_object()
@@ -1382,11 +1479,11 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         if backend == 'windows':
             printer_name = (getattr(settings, 'POS_PRINTER_NAME', '') or '').strip()
             if not printer_name:
-                return Response({'error': "Imprimante Windows non configurée (POS_PRINTER_NAME)."}, status=501)
+                return Response({'error': "Imprimante Windows non configurÃ©e (POS_PRINTER_NAME)."}, status=501)
         else:
             port = getattr(settings, 'POS_PRINTER_PORT', None)
             if not port:
-                return Response({'error': "Port imprimante non configuré (POS_PRINTER_PORT)."}, status=501)
+                return Response({'error': "Port imprimante non configurÃ© (POS_PRINTER_PORT)."}, status=501)
 
         try:
             from pos.printer_service import MP2258Printer
@@ -1400,10 +1497,10 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         try:
             printer = MP2258Printer()
             printer.print_recu(sortie, entreprise, user)
-            return Response({'status': 'impression lancée'})
+            return Response({'status': 'impression lancÃ©e'})
         except ImportError as e:
             return Response(
-                {'error': f"Dépendance manquante pour ESC/POS: {e}. Installez python-escpos."},
+                {'error': f"DÃ©pendance manquante pour ESC/POS: {e}. Installez python-escpos."},
                 status=501,
             )
         except Exception as e:
@@ -1424,7 +1521,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         styles = getSampleStyleSheet()
         normal = styles['Normal']; normal.fontSize = 8; normal.wordWrap = 'CJK'
         title_style = ParagraphStyle('TitleMini', fontName='Helvetica-Bold', fontSize=9, alignment=1, spaceAfter=1)
-        # Sécurise l'accès à l'entreprise (peut être None pour superadmin)
+        # SÃ©curise l'accÃ¨s Ã  l'entreprise (peut Ãªtre None pour superadmin)
         entreprise = user.get_entreprise(request)
         from rapports.utils.entete import get_entete_entreprise
         from rapports.utils.pdf_generator import PDFGenerator
@@ -1433,12 +1530,12 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         elements = list(pdf_gen._create_entete(entete, centered=False))
         elements.append(Spacer(1, 1*mm))
         elements.append(Paragraph(_("BON DE SORTIE"), title_style))
-        elements.append(Paragraph(f"{_('N°')}: {sortie.pk}", normal))
+        elements.append(Paragraph(f"{_('NÂ°')}: {sortie.pk}", normal))
         client_label = sortie.client.nom if sortie.client else _("Client Anonyme")
         elements.append(Paragraph(f"{_('Client')}: {client_label}", normal))
         elements.append(Spacer(1, 1*mm))
         lignes = sortie.lignes.all()
-        header = [Paragraph(_("Art"), normal), Paragraph(_("Qté"), normal), Paragraph(_("PU"), normal), Paragraph(_("Tot"), normal)]
+        header = [Paragraph(_("Art"), normal), Paragraph(_("QtÃ©"), normal), Paragraph(_("PU"), normal), Paragraph(_("Tot"), normal)]
         data = [header]
         total_general = Decimal('0.00')
         for l in lignes:
@@ -1505,37 +1602,37 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
         stock.save()
     
     def update(self, request, *args, **kwargs):
-        """Mise à jour d'une ligne de sortie avec gestion FIFO."""
+        """Mise Ã  jour d'une ligne de sortie avec gestion FIFO."""
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         
         # Pour les lignes de sortie, la modification est complexe car elle affecte les lots FIFO
-        # On recommande de modifier la sortie entière plutôt qu'une ligne individuelle
-        # Mais on permet quand même la modification pour compatibilité
+        # On recommande de modifier la sortie entiÃ¨re plutÃ´t qu'une ligne individuelle
+        # Mais on permet quand mÃªme la modification pour compatibilitÃ©
         
         nouvelle_quantite = request.data.get('quantite')
         if nouvelle_quantite is None:
             raise serializers.ValidationError({
-                'quantite': 'La quantité est requise pour la mise à jour.'
+                'quantite': 'La quantitÃ© est requise pour la mise Ã  jour.'
             })
         
         try:
             nouvelle_quantite = _parse_decimal_quantity(nouvelle_quantite)
         except (InvalidOperation, ValueError, TypeError):
             raise serializers.ValidationError({
-                'quantite': 'La quantité doit être un nombre décimal valide.'
+                'quantite': 'La quantitÃ© doit Ãªtre un nombre dÃ©cimal valide.'
             })
         
         old_quantite = instance.quantite
         
         with transaction.atomic():
-            # Restaurer les lots de l'ancienne quantité
+            # Restaurer les lots de l'ancienne quantitÃ©
             for lot_utilise in instance.lots_utilises.all():
                 lot = lot_utilise.lot_entree
                 lot.quantite_restante += lot_utilise.quantite
                 lot.save()
             
-            # Supprimer les bénéfices et traçabilités
+            # Supprimer les bÃ©nÃ©fices et traÃ§abilitÃ©s
             BeneficeLot.objects.filter(ligne_sortie=instance).delete()
             instance.lots_utilises.all().delete()
             
@@ -1547,7 +1644,7 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
             stock_obj.Qte += old_quantite
             stock_obj.save()
             
-            # Vérifier le stock disponible pour la nouvelle quantité
+            # VÃ©rifier le stock disponible pour la nouvelle quantitÃ©
             stock_disponible = LigneEntree.objects.filter(
                 article=instance.article,
                 quantite_restante__gt=0
@@ -1556,10 +1653,10 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
             if stock_disponible < nouvelle_quantite:
                 raise serializers.ValidationError(
                     f"Stock insuffisant pour l'article {instance.article.nom_scientifique} "
-                    f"(Disponible: {stock_disponible}, Demandé: {nouvelle_quantite})"
+                    f"(Disponible: {stock_disponible}, DemandÃ©: {nouvelle_quantite})"
                 )
             
-            # Appliquer FIFO pour la nouvelle quantité
+            # Appliquer FIFO pour la nouvelle quantitÃ©
             lots_disponibles = LigneEntree.objects.filter(
                 article=instance.article,
                 quantite_restante__gt=0
@@ -1607,7 +1704,7 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
             else:
                 prix_vente_moyen = Decimal('0.00')
             
-            # Mettre à jour la ligne
+            # Mettre Ã  jour la ligne
             instance.quantite = nouvelle_quantite
             instance.prix_unitaire = prix_vente_moyen.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             if 'devise_id' in request.data:
@@ -1616,14 +1713,14 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
                     instance.devise = Devise.objects.get(pk=devise_id)
             instance.save()
             
-            # Mettre à jour le stock
+            # Mettre Ã  jour le stock
             stock_obj.Qte -= nouvelle_quantite
             stock_obj.save()
         
         return Response(self.get_serializer(instance).data)
     
     def partial_update(self, request, *args, **kwargs):
-        """Mise à jour partielle d'une ligne de sortie."""
+        """Mise Ã  jour partielle d'une ligne de sortie."""
         return self.update(request, *args, **kwargs, partial=True)
 
     def perform_destroy(self, instance):
@@ -1644,14 +1741,14 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
         new_instance = serializer.save()
         new_article = new_instance.article
         new_quantite = new_instance.quantite
-        # Remettre l'ancienne quantité dans le stock de l'ancien article
+        # Remettre l'ancienne quantitÃ© dans le stock de l'ancien article
         stock_old, created = Stock.objects.get_or_create(
             article=old_article, 
             defaults={'Qte': 0, 'seuilAlert': 0}
         )
         stock_old.Qte += old_quantite
         stock_old.save()
-        # Retirer la nouvelle quantité du stock du nouvel article
+        # Retirer la nouvelle quantitÃ© du stock du nouvel article
         stock_new, created = Stock.objects.get_or_create(
             article=new_article, 
             defaults={'Qte': 0, 'seuilAlert': 0}
@@ -1688,7 +1785,7 @@ class ArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelV
         if getattr(self.request, "client", None) is not None:
             if self.request.method in permissions.SAFE_METHODS:
                 return [IsClientAuthenticated()]
-            return [permissions.IsAuthenticated()]  # forcera un 403 (pas d'écriture pour client)
+            return [permissions.IsAuthenticated()]  # forcera un 403 (pas d'Ã©criture pour client)
         return super().get_permissions()
 
     def get_queryset(self):
@@ -1700,26 +1797,26 @@ class ArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelV
             openapi.Parameter(
                 'q',
                 openapi.IN_QUERY,
-                description='Texte recherché (obligatoire) : nom scientifique, commercial ou code article. Ex. ?q=café',
+                description='Texte recherchÃ© (obligatoire) : nom scientifique, commercial ou code article. Ex. ?q=cafÃ©',
                 type=openapi.TYPE_STRING,
                 required=True,
             ),
             openapi.Parameter(
                 'limit',
                 openapi.IN_QUERY,
-                description='Nombre max de résultats (défaut 25, max 100).',
+                description='Nombre max de rÃ©sultats (dÃ©faut 25, max 100).',
                 type=openapi.TYPE_INTEGER,
             ),
             openapi.Parameter(
                 'offset',
                 openapi.IN_QUERY,
-                description='Pagination (décalage).',
+                description='Pagination (dÃ©calage).',
                 type=openapi.TYPE_INTEGER,
             ),
         ],
         responses={
             200: openapi.Response(
-                'Résultats + meta ; champ « message » si aucun article ne correspond.',
+                'RÃ©sultats + meta ; champ Â« message Â» si aucun article ne correspond.',
                 schema=openapi.Schema(type=openapi.TYPE_OBJECT),
             ),
         },
@@ -1740,8 +1837,8 @@ class ArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelV
             return Response(
                 {
                     'detail': _(
-                        'Indiquez ce que vous cherchez avec le paramètre « q ». '
-                        'Exemple : GET /api/articles/search/?q=café'
+                        'Indiquez ce que vous cherchez avec le paramÃ¨tre Â« q Â». '
+                        'Exemple : GET /api/articles/search/?q=cafÃ©'
                     ),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
@@ -1767,18 +1864,18 @@ class ArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelV
         ser = ArticleSearchSerializer(articles, many=True, context={'request': request})
         payload = {'results': ser.data, 'meta': meta}
         if meta.get('total', 0) == 0:
-            q_display = (q[:200] + '…') if len(q) > 200 else q
+            q_display = (q[:200] + 'â€¦') if len(q) > 200 else q
             if branch_id is not None:
                 msg = _(
-                    'Aucun article ne correspond à « %(term)s » pour cette succursale. '
-                    'Essayez un autre mot-clé (nom scientifique, nom commercial ou code article), '
-                    'vérifiez l’orthographe ou élargissez la recherche (autre succursale si votre rôle le permet).'
+                    'Aucun article ne correspond Ã  Â« %(term)s Â» pour cette succursale. '
+                    'Essayez un autre mot-clÃ© (nom scientifique, nom commercial ou code article), '
+                    'vÃ©rifiez lâ€™orthographe ou Ã©largissez la recherche (autre succursale si votre rÃ´le le permet).'
                 ) % {'term': q_display}
             else:
                 msg = _(
-                    'Aucun article ne correspond à « %(term)s » dans votre entreprise. '
-                    'Essayez un autre mot-clé (nom scientifique, nom commercial ou code article) '
-                    'ou vérifiez l’orthographe.'
+                    'Aucun article ne correspond Ã  Â« %(term)s Â» dans votre entreprise. '
+                    'Essayez un autre mot-clÃ© (nom scientifique, nom commercial ou code article) '
+                    'ou vÃ©rifiez lâ€™orthographe.'
                 ) % {'term': q_display}
             payload['message'] = msg
         return Response(payload)
@@ -1800,13 +1897,13 @@ class StockViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ReadOnly
     @swagger_auto_schema(
         operation_summary='Statistiques stocks par statut (tenant)',
         operation_description=(
-            'Statuts (1 requête agrégée sur Stock) : NORMAL (Qte > seuilAlert), '
-            'ALERTE / faible (0 < Qte ≤ seuilAlert), RUPTURE (Qte = 0). '
-            'Expiration proche : deux comptages distincts d’articles (lots LigneEntree avec '
-            'quantite_restante > 0, date_expiration entre aujourd’hui et la fin de fenêtre) : '
+            'Statuts (1 requÃªte agrÃ©gÃ©e sur Stock) : NORMAL (Qte > seuilAlert), '
+            'ALERTE / faible (0 < Qte â‰¤ seuilAlert), RUPTURE (Qte = 0). '
+            'Expiration proche : deux comptages distincts dâ€™articles (lots LigneEntree avec '
+            'quantite_restante > 0, date_expiration entre aujourdâ€™hui et la fin de fenÃªtre) : '
             '**expiration_sous_30_jours** (+30 jours glissants), **expiration_sous_3_mois** '
-            '(+3 mois calendaires). Lots déjà expirés exclus. '
-            'Hors pagination. Périmètre : entreprise JWT ; succursale si présente dans le contexte.'
+            '(+3 mois calendaires). Lots dÃ©jÃ  expirÃ©s exclus. '
+            'Hors pagination. PÃ©rimÃ¨tre : entreprise JWT ; succursale si prÃ©sente dans le contexte.'
         ),
         responses={
             200: openapi.Response(
@@ -1819,27 +1916,27 @@ class StockViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ReadOnly
                         'alerte': openapi.Schema(type=openapi.TYPE_INTEGER),
                         'faible': openapi.Schema(
                             type=openapi.TYPE_INTEGER,
-                            description='Identique à alerte (libellé métier)',
+                            description='Identique Ã  alerte (libellÃ© mÃ©tier)',
                         ),
                         'rupture': openapi.Schema(type=openapi.TYPE_INTEGER),
                         'by_code': openapi.Schema(
                             type=openapi.TYPE_OBJECT,
-                            description='Mêmes valeurs, clés NORMAL / ALERTE / RUPTURE',
+                            description='MÃªmes valeurs, clÃ©s NORMAL / ALERTE / RUPTURE',
                         ),
                         'sum_statuts': openapi.Schema(
                             type=openapi.TYPE_INTEGER,
-                            description='normal + alerte + rupture (identique à total si cohérent)',
+                            description='normal + alerte + rupture (identique Ã  total si cohÃ©rent)',
                         ),
                         'expiration_sous_30_jours': openapi.Schema(
                             type=openapi.TYPE_INTEGER,
                             description=(
-                                'Articles distincts avec au moins un lot non épuisé '
-                                'dont la date d’expiration est dans les 30 prochains jours'
+                                'Articles distincts avec au moins un lot non Ã©puisÃ© '
+                                'dont la date dâ€™expiration est dans les 30 prochains jours'
                             ),
                         ),
                         'expiration_periode_30_jours': openapi.Schema(
                             type=openapi.TYPE_OBJECT,
-                            description='Fenêtre [date_debut, date_fin] pour expiration_sous_30_jours',
+                            description='FenÃªtre [date_debut, date_fin] pour expiration_sous_30_jours',
                             properties={
                                 'date_debut': openapi.Schema(type=openapi.TYPE_STRING, format='date'),
                                 'date_fin': openapi.Schema(type=openapi.TYPE_STRING, format='date'),
@@ -1848,13 +1945,13 @@ class StockViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ReadOnly
                         'expiration_sous_3_mois': openapi.Schema(
                             type=openapi.TYPE_INTEGER,
                             description=(
-                                'Articles distincts avec au moins un lot non épuisé '
-                                'dont la date d’expiration est dans les 3 prochains mois (calendaires)'
+                                'Articles distincts avec au moins un lot non Ã©puisÃ© '
+                                'dont la date dâ€™expiration est dans les 3 prochains mois (calendaires)'
                             ),
                         ),
                         'expiration_periode': openapi.Schema(
                             type=openapi.TYPE_OBJECT,
-                            description='Fenêtre [date_debut, date_fin] pour expiration_sous_3_mois',
+                            description='FenÃªtre [date_debut, date_fin] pour expiration_sous_3_mois',
                             properties={
                                 'date_debut': openapi.Schema(type=openapi.TYPE_STRING, format='date'),
                                 'date_fin': openapi.Schema(type=openapi.TYPE_STRING, format='date'),
@@ -1867,7 +1964,7 @@ class StockViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ReadOnly
     )
     @action(detail=False, methods=['get'], url_path='stats')
     def stats(self, request):
-        """Agrégation SQL des stocks par statut (hors pagination)."""
+        """AgrÃ©gation SQL des stocks par statut (hors pagination)."""
         from stock.services.stock_stats import aggregate_stock_stats
 
         tenant_id, branch_id = _get_tenant_ids(request)
@@ -1915,7 +2012,7 @@ class LigneEntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
         stock.save()
     
     def update(self, request, *args, **kwargs):
-        """Mise à jour d'une ligne d'entrée avec gestion FIFO."""
+        """Mise Ã  jour d'une ligne d'entrÃ©e avec gestion FIFO."""
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
@@ -1925,7 +2022,7 @@ class LigneEntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
         old_quantite_restante = instance.quantite_restante
         
         with transaction.atomic():
-            # Restaurer le stock de l'ancienne quantité
+            # Restaurer le stock de l'ancienne quantitÃ©
             stock_obj, created = Stock.objects.get_or_create(
                 article=instance.article,
                 defaults={'Qte': 0, 'seuilAlert': 0}
@@ -1933,35 +2030,35 @@ class LigneEntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
             stock_obj.Qte -= old_quantite
             stock_obj.save()
             
-            # Mettre à jour la ligne
+            # Mettre Ã  jour la ligne
             updated_instance = serializer.save()
             
-            # S'assurer que quantite_restante est cohérente
+            # S'assurer que quantite_restante est cohÃ©rente
             nouvelle_quantite = updated_instance.quantite
             diff_quantite = nouvelle_quantite - old_quantite
             
             if diff_quantite > 0:
-                # Augmentation : ajouter à quantite_restante
+                # Augmentation : ajouter Ã  quantite_restante
                 updated_instance.quantite_restante += diff_quantite
             elif diff_quantite < 0:
-                # Diminution : réduire quantite_restante proportionnellement
+                # Diminution : rÃ©duire quantite_restante proportionnellement
                 reduction = min(abs(diff_quantite), updated_instance.quantite_restante)
                 updated_instance.quantite_restante -= reduction
             
-            # S'assurer que quantite_restante ne dépasse pas quantite
+            # S'assurer que quantite_restante ne dÃ©passe pas quantite
             if updated_instance.quantite_restante > updated_instance.quantite:
                 updated_instance.quantite_restante = updated_instance.quantite
             
             updated_instance.save()
             
-            # Mettre à jour le stock avec la nouvelle quantité
+            # Mettre Ã  jour le stock avec la nouvelle quantitÃ©
             stock_obj.Qte += nouvelle_quantite
             stock_obj.save()
         
         return Response(self.get_serializer(updated_instance).data)
     
     def partial_update(self, request, *args, **kwargs):
-        """Mise à jour partielle d'une ligne d'entrée."""
+        """Mise Ã  jour partielle d'une ligne d'entrÃ©e."""
         return self.update(request, *args, **kwargs, partial=True)
 
 
@@ -2001,14 +2098,14 @@ class DeviseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             
             if not autres_devises.exists():
                 raise serializers.ValidationError({
-                    'est_principal': "Impossible de désactiver la seule devise de l'entreprise. "
+                    'est_principal': "Impossible de dÃ©sactiver la seule devise de l'entreprise. "
                                    "Elle doit rester principale."
                 })
             
             # Promouvoir automatiquement une autre devise comme principale
             with transaction.atomic():
                 serializer.save()
-                # Prendre la première autre devise et la rendre principale
+                # Prendre la premiÃ¨re autre devise et la rendre principale
                 premiere_autre = autres_devises.first()
                 premiere_autre.est_principal = True
                 premiere_autre.save()
@@ -2020,15 +2117,15 @@ class DeviseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         
         if not autres_devises.exists():
             raise serializers.ValidationError({
-                'detail': "Impossible de supprimer la dernière devise de l'entreprise. "
-                         "Créez une nouvelle devise avant de supprimer celle-ci."
+                'detail': "Impossible de supprimer la derniÃ¨re devise de l'entreprise. "
+                         "CrÃ©ez une nouvelle devise avant de supprimer celle-ci."
             })
         
         with transaction.atomic():
             etait_principale = instance.est_principal
             instance.delete()
             
-            # Si c'était la devise principale, promouvoir automatiquement une autre
+            # Si c'Ã©tait la devise principale, promouvoir automatiquement une autre
             if etait_principale:
                 premiere_autre = autres_devises.first()
                 premiere_autre.est_principal = True
@@ -2037,7 +2134,7 @@ class DeviseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
 
 
 class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
-    """ViewSet pour gérer les entrées de stock avec support multi-devises (filtré par entreprise/succursale)."""
+    """ViewSet pour gÃ©rer les entrÃ©es de stock avec support multi-devises (filtrÃ© par entreprise/succursale)."""
     queryset = Entree.objects.all()
     serializer_class = EntreeSerializer
 
@@ -2061,7 +2158,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             serializer.save()
 
     def create(self, request, *args, **kwargs):
-        """Création d'une entrée avec gestion intelligente des stocks et multi-devises."""
+        """CrÃ©ation d'une entrÃ©e avec gestion intelligente des stocks et multi-devises."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
@@ -2070,7 +2167,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         messages_reponse = []
         
         if not lignes_data:
-            raise serializers.ValidationError("Au moins une ligne d'entrée est requise.")
+            raise serializers.ValidationError("Au moins une ligne d'entrÃ©e est requise.")
         tenant_id, branch_id = _get_tenant_ids(request)
         if not tenant_id:
             raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
@@ -2078,11 +2175,11 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         articles_groupes = {}
         
         for ligne in lignes_data:
-            # On accepte article_id comme code produit (ex: "CAPE0001") ou comme clé primaire numérique
+            # On accepte article_id comme code produit (ex: "CAPE0001") ou comme clÃ© primaire numÃ©rique
             article_lookup = None
             article_id = ligne.get('article') or ligne.get('article_id')
             if article_id:
-                # Essayer d'abord par code produit, sinon par clé primaire
+                # Essayer d'abord par code produit, sinon par clÃ© primaire
                 try:
                     article_obj = Article.objects.get(article_id=article_id)
                     article_lookup = article_obj.article_id
@@ -2091,7 +2188,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         article_obj = Article.objects.get(nom_commercial=article_id)
                         article_lookup = article_obj.article_id
                     except Article.DoesNotExist:
-                        # Peut-être que c'est déjà la clé primaire numérique
+                        # Peut-Ãªtre que c'est dÃ©jÃ  la clÃ© primaire numÃ©rique
                         article_lookup = article_id
             else:
                 article_lookup = None
@@ -2099,25 +2196,25 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             try:
                 qte = _parse_decimal_quantity(ligne.get('quantite', 0))
             except (InvalidOperation, TypeError, ValueError):
-                raise serializers.ValidationError({'quantite': 'La quantité doit être un nombre décimal valide.'})
+                raise serializers.ValidationError({'quantite': 'La quantitÃ© doit Ãªtre un nombre dÃ©cimal valide.'})
             prix_unitaire_raw = ligne.get('prix_unitaire', 0)
             try:
                 prix_unitaire = Decimal(str(prix_unitaire_raw))
             except (ValueError, TypeError, InvalidOperation):
                 prix_unitaire = Decimal('0.00')
             
-            # Prix de vente (obligatoire pour calculer les bénéfices)
+            # Prix de vente (obligatoire pour calculer les bÃ©nÃ©fices)
             prix_vente_raw = ligne.get('prix_vente', 0)
             try:
                 prix_vente = Decimal(str(prix_vente_raw))
             except (ValueError, TypeError, InvalidOperation):
                 raise serializers.ValidationError({
-                    'prix_vente': 'Le prix de vente est obligatoire pour chaque ligne d\'entrée.'
+                    'prix_vente': 'Le prix de vente est obligatoire pour chaque ligne d\'entrÃ©e.'
                 })
             
             if prix_vente <= 0:
                 raise serializers.ValidationError({
-                    'prix_vente': 'Le prix de vente doit être supérieur à 0.'
+                    'prix_vente': 'Le prix de vente doit Ãªtre supÃ©rieur Ã  0.'
                 })
             
             try:
@@ -2129,7 +2226,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
 
             if article_lookup in articles_groupes:
                 articles_groupes[article_lookup]['quantite'] += qte
-                messages_reponse.append(f"Article {article_id}: quantités additionnées ({qte} ajouté)")
+                messages_reponse.append(f"Article {article_id}: quantitÃ©s additionnÃ©es ({qte} ajoutÃ©)")
             else:
                 articles_groupes[article_lookup] = {
                     'quantite': qte,
@@ -2140,7 +2237,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     'date_expiration': date_expiration
                 }
         
-        # Calcul du coût total par devise
+        # Calcul du coÃ»t total par devise
         totaux_par_devise = {}
         
         for article_id, ligne_data in articles_groupes.items():
@@ -2161,7 +2258,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             
             totaux_par_devise[devise_sigle]['total'] += montant_ligne
         
-        # Vérification des soldes par devise
+        # VÃ©rification des soldes par devise
         erreurs_solde = []
         for devise_sigle, devise_data in totaux_par_devise.items():
             devise_obj = devise_data['devise_obj']
@@ -2170,12 +2267,12 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             solde_devise = self._solde_caisse_par_devise(tenant_id, branch_id, devise_obj)
             
             if total_devise > solde_devise:
-                devise_nom = devise_obj.nom if devise_obj else 'Non spécifiée'
+                devise_nom = devise_obj.nom if devise_obj else 'Non spÃ©cifiÃ©e'
                 symbole = devise_obj.symbole if devise_obj else ''
                 erreurs_solde.append(
                     f"Solde insuffisant en {devise_nom} ({devise_sigle}): "
                     f"Requis {total_devise} {symbole}, Disponible {solde_devise} {symbole}. "
-                    f"Veuillez d'abord effectuer une entrée en caisse dans cette devise."
+                    f"Veuillez d'abord effectuer une entrÃ©e en caisse dans cette devise."
                 )
         
         if erreurs_solde:
@@ -2196,14 +2293,14 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 entree_kwargs['date_op'] = date_op
             entree = Entree.objects.create(**entree_kwargs)
             
-            # Traiter chaque article groupé
+            # Traiter chaque article groupÃ©
             for article_id, ligne_data in articles_groupes.items():
-                # Correction : utiliser article_id comme clé primaire réelle
+                # Correction : utiliser article_id comme clÃ© primaire rÃ©elle
                 try:
                     article_obj = Article.objects.get(article_id=article_id)
                 except Article.DoesNotExist:
                     raise serializers.ValidationError({
-                        'article_id': f"Aucun article trouvé avec article_id={article_id}"
+                        'article_id': f"Aucun article trouvÃ© avec article_id={article_id}"
                     })
                 qte = ligne_data['quantite']
                 prix_unitaire = ligne_data['prix_unitaire']
@@ -2213,7 +2310,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 devise_id = ligne_data['devise']
                 devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=tenant_id) if devise_id else None
 
-                # Créer la ligne d'entrée (quantite_restante sera initialisé automatiquement dans save())
+                # CrÃ©er la ligne d'entrÃ©e (quantite_restante sera initialisÃ© automatiquement dans save())
                 ligne_entree = LigneEntree.objects.create(
                     entree=entree,
                     article=article_obj,
@@ -2236,18 +2333,18 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 # Utiliser nom_commercial si disponible, sinon nom_scientifique
                 article_nom = article_obj.nom_commercial or article_obj.nom_scientifique
                 if created:
-                    messages_reponse.append(f"Nouveau stock créé pour {article_nom}")
+                    messages_reponse.append(f"Nouveau stock crÃ©Ã© pour {article_nom}")
                 else:
                     if stock_obj.Qte == 0:
-                        messages_reponse.append(f"Réapprovisionnement de {article_nom} (stock était épuisé)")
+                        messages_reponse.append(f"RÃ©approvisionnement de {article_nom} (stock Ã©tait Ã©puisÃ©)")
                     else:
-                        messages_reponse.append(f"Ajout au stock existant de {article_nom} (stock: {stock_obj.Qte} → {stock_obj.Qte + qte})")
+                        messages_reponse.append(f"Ajout au stock existant de {article_nom} (stock: {stock_obj.Qte} â†’ {stock_obj.Qte + qte})")
 
                 stock_obj.Qte += qte
                 stock_obj.seuilAlert = seuil_alerte
                 stock_obj.save()
                 
-            # Créer les mouvements de caisse par devise (dépenses approvisionnement)
+            # CrÃ©er les mouvements de caisse par devise (dÃ©penses approvisionnement)
             type_caisse_id = extract_type_caisse_id(request.data)
             if any(d['total'] > 0 for d in totaux_par_devise.values()) and not type_caisse_id:
                 raise serializers.ValidationError({'type_caisse_id': str(MSG_CAISSE_REQUISE)})
@@ -2269,7 +2366,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         type_caisse_id=type_caisse_id,
                     )
         
-        # Retourner la réponse avec les messages informatifs
+        # Retourner la rÃ©ponse avec les messages informatifs
         response_data = self.get_serializer(entree).data
         response_data['messages'] = messages_reponse
         response_data['articles_traites'] = len(articles_groupes)
@@ -2290,11 +2387,11 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             article = article_qs.get()
         except Article.DoesNotExist:
             return Response(
-                {'error': f'Article {article_id} non trouvé'},
+                {'error': f'Article {article_id} non trouvÃ©'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Récupérer tous les lots (disponibles et épuisés)
+        # RÃ©cupÃ©rer tous les lots (disponibles et Ã©puisÃ©s)
         tenant_id, branch_id = self.get_tenant_ids()
         lots = LigneEntree.objects.filter(article=article, entree__entreprise_id=tenant_id)
         if branch_id is not None:
@@ -2321,7 +2418,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 'date_entree': lot.date_entree.isoformat(),
                 'date_expiration': lot.date_expiration.isoformat() if lot.date_expiration else None,
                 'devise': lot.devise.sigle if lot.devise else None,
-                'statut': 'Disponible' if lot.quantite_restante > 0 else 'Épuisé'
+                'statut': 'Disponible' if lot.quantite_restante > 0 else 'Ã‰puisÃ©'
             })
         
         return Response({
@@ -2338,12 +2435,12 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
     @action(detail=False, methods=['get'], url_path='benefices-totaux')
     def benefices_totaux(self, request):
         """
-        Retourne les bénéfices totaux des lots vendus, avec filtre optionnel par mois/année.
-        **Isolation multi-tenant :** uniquement les `BeneficeLot` dont le lot d'entrée appartient à
-        l'entreprise du JWT ; si `succursale_id` est présent dans le token, filtre aussi par cette succursale.
-        Par défaut : mois et année en cours.
+        Retourne les bÃ©nÃ©fices totaux des lots vendus, avec filtre optionnel par mois/annÃ©e.
+        **Isolation multi-tenant :** uniquement les `BeneficeLot` dont le lot d'entrÃ©e appartient Ã 
+        l'entreprise du JWT ; si `succursale_id` est prÃ©sent dans le token, filtre aussi par cette succursale.
+        Par dÃ©faut : mois et annÃ©e en cours.
         GET /api/entrees/benefices-totaux/
-        Query params: month (1-12), year (ex: 2026). Omis = mois et année courants.
+        Query params: month (1-12), year (ex: 2026). Omis = mois et annÃ©e courants.
         """
         from django.db.models import Sum, Count
 
@@ -2370,7 +2467,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         if year < 1900 or year > 2100:
             year = now.year
 
-        # Base : période + entreprise (via le lot → entrée) ; succursale si contexte JWT défini
+        # Base : pÃ©riode + entreprise (via le lot â†’ entrÃ©e) ; succursale si contexte JWT dÃ©fini
         benefices = BeneficeLot.objects.filter(
             date_calcul__year=year,
             date_calcul__month=month,
@@ -2387,8 +2484,8 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             total=Sum('benefice_total')
         )['total'] or Decimal('0.00')
 
-        # Pertes : on n'inclut PAS les ventes à crédit (EN_CREDIT) car ce n'est pas une perte définitive ;
-        # le client doit rembourser ; la perte ne sera éventuellement considérée qu'au remboursement.
+        # Pertes : on n'inclut PAS les ventes Ã  crÃ©dit (EN_CREDIT) car ce n'est pas une perte dÃ©finitive ;
+        # le client doit rembourser ; la perte ne sera Ã©ventuellement considÃ©rÃ©e qu'au remboursement.
         benefices_perte = benefices.filter(benefice_total__lt=0).exclude(
             ligne_sortie__sortie__statut='EN_CREDIT'
         )
@@ -2400,7 +2497,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         nombre_lots_perdants = benefices_perte.count()
         nombre_lots_total = benefices.count()
 
-        # Top 10 articles par bénéfice (agrégation SQL, pas de boucle Python sur tous les lots)
+        # Top 10 articles par bÃ©nÃ©fice (agrÃ©gation SQL, pas de boucle Python sur tous les lots)
         par_article_qs = (
             benefices.values(
                 'lot_entree__article_id',
@@ -2426,37 +2523,37 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             benefices.values('lot_entree__article_id').distinct().count()
         )
 
-        # Évaluation de la performance (ne jamais qualifier de « bonne » une période en perte)
+        # Ã‰valuation de la performance (ne jamais qualifier de Â« bonne Â» une pÃ©riode en perte)
         seuil_perte_moderee = Decimal('-500')
         seuil_perte_grave = Decimal('-5000')
         if total_benefice > 0:
             performance = 'EXCELLENTE'
             message = (
-                f"Période profitable : bénéfice total {total_benefice}. "
+                f"PÃ©riode profitable : bÃ©nÃ©fice total {total_benefice}. "
                 "Conserver la vigilance sur les marges par article."
             )
         elif total_benefice == 0:
             performance = 'NEUTRE'
             message = (
-                "Équilibre sur la période (bénéfice net nul). "
-                "Surveiller les lots perdants dans le détail par article."
+                "Ã‰quilibre sur la pÃ©riode (bÃ©nÃ©fice net nul). "
+                "Surveiller les lots perdants dans le dÃ©tail par article."
             )
         elif total_benefice >= seuil_perte_moderee:
             performance = 'A_SURVEILLER'
             message = (
-                f"Période en légère perte (bénéfice net {total_benefice}). "
-                "Réviser les prix de vente, les remises et les articles les plus déficitaires."
+                f"PÃ©riode en lÃ©gÃ¨re perte (bÃ©nÃ©fice net {total_benefice}). "
+                "RÃ©viser les prix de vente, les remises et les articles les plus dÃ©ficitaires."
             )
         elif total_benefice >= seuil_perte_grave:
             performance = 'PREOCCUPANTE'
             message = (
-                f"Perte significative sur la période ({total_benefice}). "
-                "Analyser le coût d'achat, la politique tarifaire et les sorties à crédit."
+                f"Perte significative sur la pÃ©riode ({total_benefice}). "
+                "Analyser le coÃ»t d'achat, la politique tarifaire et les sorties Ã  crÃ©dit."
             )
         else:
             performance = 'CRITIQUE'
             message = (
-                f"Perte très importante ({total_benefice}). "
+                f"Perte trÃ¨s importante ({total_benefice}). "
                 "Action urgente : revue des marges, du stock et des conditions de vente."
             )
         
@@ -2488,7 +2585,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         })
 
     def update(self, request, *args, **kwargs):
-        """Mise à jour d'une entrée avec gestion FIFO complète."""
+        """Mise Ã  jour d'une entrÃ©e avec gestion FIFO complÃ¨te."""
         partial = kwargs.pop('partial', False)
         entree = self.get_object()
         serializer = self.get_serializer(entree, data=request.data, partial=partial)
@@ -2497,7 +2594,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         user = request.user
         
         if not lignes_data:
-            raise serializers.ValidationError("Au moins une ligne d'entrée est requise.")
+            raise serializers.ValidationError("Au moins une ligne d'entrÃ©e est requise.")
         
         old_total = self._total_entree(entree)
         default_dev = Devise.objects.filter(est_principal=True).first()
@@ -2519,7 +2616,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             try:
                 qte = _parse_decimal_quantity(ligne.get('quantite', 0))
             except (InvalidOperation, TypeError, ValueError):
-                raise serializers.ValidationError("La quantité doit être un nombre décimal valide.")
+                raise serializers.ValidationError("La quantitÃ© doit Ãªtre un nombre dÃ©cimal valide.")
             
             prix_unitaire_raw = ligne.get('prix_unitaire', 0)
             try:
@@ -2533,12 +2630,12 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 prix_vente = Decimal(str(prix_vente_raw))
             except (ValueError, TypeError):
                 raise serializers.ValidationError({
-                    'prix_vente': 'Le prix de vente est obligatoire pour chaque ligne d\'entrée.'
+                    'prix_vente': 'Le prix de vente est obligatoire pour chaque ligne d\'entrÃ©e.'
                 })
             
             if prix_vente <= 0:
                 raise serializers.ValidationError({
-                    'prix_vente': 'Le prix de vente doit être supérieur à 0.'
+                    'prix_vente': 'Le prix de vente doit Ãªtre supÃ©rieur Ã  0.'
                 })
             
             try:
@@ -2567,19 +2664,19 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         
         new_total = new_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         
-        # Si augmentation de dépense: vérifier solde
+        # Si augmentation de dÃ©pense: vÃ©rifier solde
         diff = (new_total - old_total).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         if diff > 0:
             solde = self._solde_caisse(entree.entreprise_id, entree.succursale_id)
             if diff >= solde:
-                raise serializers.ValidationError("Solde de la caisse insuffisant pour augmenter le coût de cette entrée.")
+                raise serializers.ValidationError("Solde de la caisse insuffisant pour augmenter le coÃ»t de cette entrÃ©e.")
         
         with transaction.atomic():
             # Rollback anciennes lignes (restaurer quantite_restante et stock)
             for ancienne_ligne in entree.lignes.all():
-                # Restaurer quantite_restante si des sorties ont été faites
-                # On ne peut pas simplement restaurer car des sorties peuvent avoir été faites
-                # On doit vérifier combien a été vendu
+                # Restaurer quantite_restante si des sorties ont Ã©tÃ© faites
+                # On ne peut pas simplement restaurer car des sorties peuvent avoir Ã©tÃ© faites
+                # On doit vÃ©rifier combien a Ã©tÃ© vendu
                 quantite_vendue = ancienne_ligne.quantite - ancienne_ligne.quantite_restante
                 
                 # Restaurer le stock
@@ -2593,11 +2690,11 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             # Supprimer toutes les anciennes lignes
             entree.lignes.all().delete()
             
-            # Mettre à jour le libellé
+            # Mettre Ã  jour le libellÃ©
             entree.libele = serializer.validated_data.get('libele', entree.libele)
             entree.save(update_fields=['libele'])
             
-            # Créer les nouvelles lignes avec FIFO
+            # CrÃ©er les nouvelles lignes avec FIFO
             for article_id, ligne_data in articles_groupes.items():
                 article_obj = ligne_data['article_obj']
                 qte = ligne_data['quantite']
@@ -2607,7 +2704,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 devise_obj = ligne_data['devise_obj']
                 date_expiration = ligne_data['date_expiration']
                 
-                # Créer la ligne d'entrée avec quantite_restante initialisée
+                # CrÃ©er la ligne d'entrÃ©e avec quantite_restante initialisÃ©e
                 LigneEntree.objects.create(
                     entree=entree,
                     article=article_obj,
@@ -2620,7 +2717,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     seuil_alerte=seuil_alerte
                 )
                 
-                # Mettre à jour le stock
+                # Mettre Ã  jour le stock
                 stock_obj, created = Stock.objects.get_or_create(
                     article=article_obj, 
                     defaults={'Qte': 0, 'seuilAlert': seuil_alerte}
@@ -2646,14 +2743,14 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     content_object=entree,
                     entree=entree,
                     reference_piece=f'AJ-ENT-{entree.pk}',
-                    motif='Ajustement entrée',
+                    motif='Ajustement entrÃ©e',
                     type_caisse_id=type_caisse_id,
                 )
         
         return Response(self.get_serializer(entree).data, status=status.HTTP_200_OK)
     
     def partial_update(self, request, *args, **kwargs):
-        """Mise à jour partielle d'une entrée."""
+        """Mise Ã  jour partielle d'une entrÃ©e."""
         return self.update(request, *args, **kwargs, partial=True)
 
     def destroy(self, request, *args, **kwargs):
@@ -2687,7 +2784,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     content_object=entree,
                     entree=entree,
                     reference_piece=f'ANN-ENT-{entree.pk}',
-                    motif='Annulation entrée',
+                    motif='Annulation entrÃ©e',
                     type_caisse_id=type_caisse_id,
                 )
             
@@ -2696,7 +2793,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def _total_entree(self, entree: Entree) -> Decimal:
-        """Calcule le total d'une entrée."""
+        """Calcule le total d'une entrÃ©e."""
         total = Decimal('0.00')
         for l in entree.lignes.all():
             pu = l.prix_unitaire or Decimal('0')
@@ -2704,7 +2801,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         return total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     def _solde_caisse(self, tenant_id=None, succursale_id=None):
-        """Calcule le solde global de caisse (tenant + éventuellement succursale)."""
+        """Calcule le solde global de caisse (tenant + Ã©ventuellement succursale)."""
         from django.db.models import Sum
         qs = MouvementCaisse.objects.all()
         if tenant_id is not None:
@@ -2716,7 +2813,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         return entree_total - sortie_total
 
     def _solde_caisse_par_devise(self, tenant_id, succursale_id, devise_obj):
-        """Calcule le solde de caisse (tenant + éventuellement succursale) pour une devise spécifique."""
+        """Calcule le solde de caisse (tenant + Ã©ventuellement succursale) pour une devise spÃ©cifique."""
         from django.db.models import Sum
 
         if not tenant_id:
@@ -2739,7 +2836,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
 
     @action(detail=True, methods=['get'], url_path='bon-pos')
     def bon_entree_pos(self, request, pk=None):
-        """Génère un bon d'entrée au format POS."""
+        """GÃ©nÃ¨re un bon d'entrÃ©e au format POS."""
         entree = self.get_object()
         
         ent_ctx = self.request.user.get_entreprise(self.request)
@@ -2747,7 +2844,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             'numero_entree': entree.pk,
             'date': entree.date_op.strftime('%d/%m/%Y %H:%M'),
             'libele': entree.libele,
-            # 'description': entree.description, supprimé
+            # 'description': entree.description, supprimÃ©
             'entreprise': ent_ctx.nom if ent_ctx else '',
             'lignes': [],
             'total': Decimal('0.00')
@@ -2783,7 +2880,7 @@ class SousTypeArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
     def get_queryset(self):
         """
         Filtre les sous-types d'articles.
-        Possibilité de filtrer par type_article avec ?type_article=<id>
+        PossibilitÃ© de filtrer par type_article avec ?type_article=<id>
         """
         queryset = super().get_queryset().select_related('type_article')
         
@@ -2797,7 +2894,7 @@ class SousTypeArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
     @action(detail=False, methods=['get'])
     def par_type(self, request):
         """
-        Liste les sous-types groupés par type d'article.
+        Liste les sous-types groupÃ©s par type d'article.
         GET /api/soustypearticles/par_type/
         """
         from collections import defaultdict
@@ -2816,13 +2913,13 @@ class SousTypeArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
 
 
 class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
-    """ViewSet pour la gestion des clients (filtré par entreprise/succursale via `ClientEntreprise`)."""
+    """ViewSet pour la gestion des clients (filtrÃ© par entreprise/succursale via `ClientEntreprise`)."""
 
     queryset = Client.objects.all()
     serializer_class = ClientSerializer
 
     def get_permissions(self):
-        # Inscription / création de fiche client sans compte staff (ex. portail public).
+        # Inscription / crÃ©ation de fiche client sans compte staff (ex. portail public).
         if self.action == "create":
             return [AllowAny()]
         return super().get_permissions()
@@ -2860,26 +2957,26 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
             openapi.Parameter(
                 'q',
                 openapi.IN_QUERY,
-                description='Texte recherché (obligatoire) : nom, téléphone, adresse, e-mail ou code client. Ex. ?q=dupont',
+                description='Texte recherchÃ© (obligatoire) : nom, tÃ©lÃ©phone, adresse, e-mail ou code client. Ex. ?q=dupont',
                 type=openapi.TYPE_STRING,
                 required=True,
             ),
             openapi.Parameter(
                 'limit',
                 openapi.IN_QUERY,
-                description='Nombre max de résultats (défaut 25, max 100).',
+                description='Nombre max de rÃ©sultats (dÃ©faut 25, max 100).',
                 type=openapi.TYPE_INTEGER,
             ),
             openapi.Parameter(
                 'offset',
                 openapi.IN_QUERY,
-                description='Pagination (décalage).',
+                description='Pagination (dÃ©calage).',
                 type=openapi.TYPE_INTEGER,
             ),
         ],
         responses={
             200: openapi.Response(
-                'Résultats + meta ; champ « message » si aucun client ne correspond.',
+                'RÃ©sultats + meta ; champ Â« message Â» si aucun client ne correspond.',
                 schema=openapi.Schema(type=openapi.TYPE_OBJECT),
             ),
         },
@@ -2899,7 +2996,7 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
             return Response(
                 {
                     'detail': _(
-                        'Indiquez ce que vous cherchez avec le paramètre « q ». '
+                        'Indiquez ce que vous cherchez avec le paramÃ¨tre Â« q Â». '
                         'Exemple : GET /api/clients/search/?q=dupont'
                     ),
                 },
@@ -2926,29 +3023,29 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         ser = ClientSearchSerializer(clients, many=True, context={'request': request})
         payload = {'results': ser.data, 'meta': meta}
         if meta.get('total', 0) == 0:
-            q_display = (q[:200] + '…') if len(q) > 200 else q
+            q_display = (q[:200] + 'â€¦') if len(q) > 200 else q
             if branch_id is not None:
                 msg = _(
-                    'Aucun client ne correspond à « %(term)s » pour cette succursale. '
-                    'Essayez un autre mot-clé (nom, téléphone, adresse, e-mail ou code client), '
-                    'vérifiez l’orthographe ou élargissez la recherche (autre succursale si votre rôle le permet).'
+                    'Aucun client ne correspond Ã  Â« %(term)s Â» pour cette succursale. '
+                    'Essayez un autre mot-clÃ© (nom, tÃ©lÃ©phone, adresse, e-mail ou code client), '
+                    'vÃ©rifiez lâ€™orthographe ou Ã©largissez la recherche (autre succursale si votre rÃ´le le permet).'
                 ) % {'term': q_display}
             else:
                 msg = _(
-                    'Aucun client ne correspond à « %(term)s » dans votre entreprise. '
-                    'Essayez un autre mot-clé (nom, téléphone, adresse, e-mail ou code client) '
-                    'ou vérifiez l’orthographe.'
+                    'Aucun client ne correspond Ã  Â« %(term)s Â» dans votre entreprise. '
+                    'Essayez un autre mot-clÃ© (nom, tÃ©lÃ©phone, adresse, e-mail ou code client) '
+                    'ou vÃ©rifiez lâ€™orthographe.'
                 ) % {'term': q_display}
             payload['message'] = msg
         return Response(payload)
 
     @swagger_auto_schema(
-        operation_summary="Associer un client existant à l’entreprise (ClientEntreprise)",
+        operation_summary="Associer un client existant Ã  lâ€™entreprise (ClientEntreprise)",
         operation_description=(
-            "Crée une association `ClientEntreprise` **sans** recréer le client.\n\n"
-            "- Le client est identifié par `client_id` **ou** `email`.\n"
-            "- L’entreprise est celle du contexte JWT (`entreprise_id`).\n"
-            "- Empêche les doublons : si le lien existe déjà → 400."
+            "CrÃ©e une association `ClientEntreprise` **sans** recrÃ©er le client.\n\n"
+            "- Le client est identifiÃ© par `client_id` **ou** `email`.\n"
+            "- Lâ€™entreprise est celle du contexte JWT (`entreprise_id`).\n"
+            "- EmpÃªche les doublons : si le lien existe dÃ©jÃ  â†’ 400."
         ),
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
@@ -2957,11 +3054,11 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
                 "client_id": openapi.Schema(type=openapi.TYPE_STRING, description="Ex. `CLI0001` (optionnel si email fourni)."),
                 "email": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_EMAIL, description="Email du client (optionnel si client_id fourni)."),
                 "succursale_id": openapi.Schema(type=openapi.TYPE_INTEGER, nullable=True, description="Succursale optionnelle."),
-                "is_special": openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Marquer client spécial pour ce lien (optionnel)."),
+                "is_special": openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Marquer client spÃ©cial pour ce lien (optionnel)."),
             },
         ),
         responses={201: ClientEntrepriseSerializer, 400: "Erreur de validation"},
-        tags=["Clients — associations entreprise"],
+        tags=["Clients â€” associations entreprise"],
     )
     @action(detail=False, methods=["post"], url_path="associate-entreprise")
     def associate_entreprise(self, request):
@@ -2973,7 +3070,7 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         email = (request.data.get("email") or "").strip()
         if not client_id and not email:
             return Response(
-                {"detail": _("Indiquez « client_id » ou « email ».")},
+                {"detail": _("Indiquez Â« client_id Â» ou Â« email Â».")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -2987,14 +3084,14 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
             return Response({"detail": _("Client introuvable.")}, status=status.HTTP_404_NOT_FOUND)
 
         if ClientEntreprise.objects.filter(client=client, entreprise_id=tenant_id).exists():
-            return Response({"detail": _("Ce client est déjà associé à cette entreprise.")}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": _("Ce client est dÃ©jÃ  associÃ© Ã  cette entreprise.")}, status=status.HTTP_400_BAD_REQUEST)
 
         succursale_id = request.data.get("succursale_id", None)
         if succursale_id is not None and str(succursale_id).strip() != "":
             try:
                 succursale_id = int(succursale_id)
             except (TypeError, ValueError):
-                return Response({"detail": _("Le champ « succursale_id » doit être un entier.")}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": _("Le champ Â« succursale_id Â» doit Ãªtre un entier.")}, status=status.HTTP_400_BAD_REQUEST)
             if not Succursale.objects.filter(pk=succursale_id, entreprise_id=tenant_id).exists():
                 return Response({"detail": _("Succursale invalide pour cette entreprise.")}, status=status.HTTP_400_BAD_REQUEST)
         else:
@@ -3015,7 +3112,7 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def dettes(self, request, pk=None):
         """
-        Liste toutes les dettes d'un client spécifique (paginated).
+        Liste toutes les dettes d'un client spÃ©cifique (paginated).
         GET /api/clients/{id}/dettes/
         """
         client = self.get_object()
@@ -3058,26 +3155,26 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
 
 
 class ClientEntrepriseViewSet(BusinessPermissionMixin, viewsets.ReadOnlyModelViewSet):
-    """Lecture des associations `Client ↔ Entreprise` (multi-tenant, succursale optionnelle)."""
+    """Lecture des associations `Client â†” Entreprise` (multi-tenant, succursale optionnelle)."""
 
     queryset = ClientEntreprise.objects.select_related("client", "entreprise", "succursale").all()
     serializer_class = ClientEntrepriseSerializer
 
     @swagger_auto_schema(
-        operation_summary="Liste des associations client ↔ entreprise",
+        operation_summary="Liste des associations client â†” entreprise",
         operation_description=(
-            "Liste paginée des liens `ClientEntreprise`.\n\n"
-            "- **Périmètre** : entreprise du JWT (et succursale si le contexte l’impose).\n"
+            "Liste paginÃ©e des liens `ClientEntreprise`.\n\n"
+            "- **PÃ©rimÃ¨tre** : entreprise du JWT (et succursale si le contexte lâ€™impose).\n"
             "- **Filtres** : `client_id`, `succursale_id`, `is_special`.\n"
             "- **Pagination** : `page`, `page_size`."
         ),
         manual_parameters=[
-            openapi.Parameter("page", openapi.IN_QUERY, type=openapi.TYPE_INTEGER, description="Numéro de page."),
+            openapi.Parameter("page", openapi.IN_QUERY, type=openapi.TYPE_INTEGER, description="NumÃ©ro de page."),
             openapi.Parameter(
                 "page_size",
                 openapi.IN_QUERY,
                 type=openapi.TYPE_INTEGER,
-                description="Taille de page (défaut 25, max 200).",
+                description="Taille de page (dÃ©faut 25, max 200).",
             ),
             openapi.Parameter(
                 "client_id",
@@ -3095,10 +3192,10 @@ class ClientEntrepriseViewSet(BusinessPermissionMixin, viewsets.ReadOnlyModelVie
                 "is_special",
                 openapi.IN_QUERY,
                 type=openapi.TYPE_BOOLEAN,
-                description="Filtrer les liens marqués client spécial (`true` / `false`).",
+                description="Filtrer les liens marquÃ©s client spÃ©cial (`true` / `false`).",
             ),
         ],
-        tags=["Clients — associations entreprise"],
+        tags=["Clients â€” associations entreprise"],
     )
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
@@ -3110,7 +3207,7 @@ class ClientEntrepriseViewSet(BusinessPermissionMixin, viewsets.ReadOnlyModelVie
         if tenant_id is not None:
             qs = qs.filter(entreprise_id=tenant_id)
         if branch_id is not None:
-            # Inclure aussi les liens “sans succursale” (historique / catalogue global)
+            # Inclure aussi les liens â€œsans succursaleâ€ (historique / catalogue global)
             qs = qs.filter(Q(succursale_id=branch_id) | Q(succursale__isnull=True))
 
         p = self.request.query_params
@@ -3137,7 +3234,7 @@ class ClientEntrepriseViewSet(BusinessPermissionMixin, viewsets.ReadOnlyModelVie
 
 
 class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
-    """ViewSet pour la gestion des dettes clients (filtré par entreprise/succursale)."""
+    """ViewSet pour la gestion des dettes clients (filtrÃ© par entreprise/succursale)."""
     queryset = DetteClient.objects.select_related('client', 'devise', 'sortie').all()
     serializer_class = DetteClientSerializer
 
@@ -3148,13 +3245,13 @@ class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
         sortie = serializer.validated_data.get('sortie')
         if sortie and sortie.statut != 'EN_CREDIT':
             raise serializers.ValidationError({
-                'sortie': f"Impossible de créer une dette pour cette sortie. "
+                'sortie': f"Impossible de crÃ©er une dette pour cette sortie. "
                          f"La sortie #{sortie.pk} (Client: {sortie.client.nom if sortie.client else 'Anonyme'}) a le statut '{sortie.statut}'. "
-                         f"Seules les sorties avec le statut 'EN_CREDIT' peuvent générer une dette."
+                         f"Seules les sorties avec le statut 'EN_CREDIT' peuvent gÃ©nÃ©rer une dette."
             })
         if sortie and DetteClient.objects.filter(sortie=sortie).exists():
             raise serializers.ValidationError({
-                'sortie': f"Une dette existe déjà pour la sortie #{sortie.pk}."
+                'sortie': f"Une dette existe dÃ©jÃ  pour la sortie #{sortie.pk}."
             })
         date_echeance = serializer.validated_data.get('date_echeance') or (timezone.now().date() + timezone.timedelta(days=30))
         tenant_id, branch_id = self.get_tenant_ids()
@@ -3193,7 +3290,7 @@ class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
     @action(detail=False, methods=['get'])
     def payees(self, request):
         """
-        Liste toutes les dettes payées (paginated).
+        Liste toutes les dettes payÃ©es (paginated).
         GET /api/dettes/payees/
         """
         dettes = self.get_queryset().filter(statut='PAYEE')
@@ -3207,7 +3304,7 @@ class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
     @action(detail=True, methods=['get'], url_path='paiements')
     def paiements(self, request, pk=None):
         """
-        Liste tous les mouvements de paiement liés à cette dette (paginated).
+        Liste tous les mouvements de paiement liÃ©s Ã  cette dette (paginated).
         GET /api/dettes/{id}/paiements/
         """
         dette = self.get_object()

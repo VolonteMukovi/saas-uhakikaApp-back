@@ -140,7 +140,13 @@ class EntrepriseSerializer(serializers.ModelSerializer):
     CRUD entreprise. Tous les champs sont éditables par l'Admin (logo, email, slogan, etc.).
     Les mises à jour partielles (PATCH) sont supportées pour modifier un ou plusieurs champs.
     En lecture, `logo` est une URL absolue si `request` est dans le contexte (branding UI).
+  `config` est exposé en objet JSON parsé (lecture seule) — écriture via /entreprises/{id}/config/.
     """
+
+    config = serializers.SerializerMethodField(read_only=True)
+
+    def get_config(self, obj):
+        return obj.get_config_dict()
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -162,7 +168,10 @@ class EntrepriseSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Entreprise
-        fields = '__all__'
+        fields = [
+            'id', 'nom', 'secteur', 'pays', 'adresse', 'telephone', 'email', 'nif',
+            'responsable', 'logo', 'slogan', 'has_branches', 'config',
+        ]
 
 
 def entreprise_public_read_dict(entreprise, request=None):

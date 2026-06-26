@@ -99,4 +99,5 @@ def build_active_state_response(
         'ouverte': is_open,
         'session': primary,
         'sessions': serialized,
+        'scope': 'caisse_cash_defaut',
     }

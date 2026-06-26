@@ -13,6 +13,15 @@ from django.utils import timezone
 from django.utils.translation import gettext as _
 
 from caisse.models import EcartCaisse, MouvementCaisse, SessionCaisse, TypeCaisse
+from caisse.services.caisse_defaut import (
+    MSG_CAISSE_CASH_FERMEE,
+    MSG_CAISSE_DEVISE,
+    MSG_CAISSE_INACTIVE,
+    MSG_CAISSE_INTRouvable,
+    MSG_SESSION_UNIQUEMENT_CASH_DEFAUT,
+    caisse_necessite_session,
+    get_caisse_defaut_session_scope,
+)
 from stock.models import Devise
 
 
@@ -51,6 +60,23 @@ def _session_filter_qs(
     return qs
 
 
+def _resolve_type_caisse_session_id(
+    entreprise_id: int,
+    succursale_id: Optional[int],
+    type_caisse_id: Optional[int],
+) -> Optional[int]:
+    """Résout l'id caisse pour une recherche de session (cash défaut si absent)."""
+    if type_caisse_id is not None:
+        tc = TypeCaisse.objects.filter(pk=type_caisse_id, entreprise_id=entreprise_id).first()
+        if tc is None:
+            return type_caisse_id
+        if not caisse_necessite_session(tc):
+            return None
+        return tc.pk
+    caisse_defaut = get_caisse_defaut_session_scope(entreprise_id, succursale_id)
+    return caisse_defaut.pk if caisse_defaut else None
+
+
 def get_session_caisse_ouverte(
     entreprise_id: int,
     succursale_id: Optional[int],
@@ -58,25 +84,16 @@ def get_session_caisse_ouverte(
     type_caisse_id: Optional[int] = None,
 ) -> Optional[SessionCaisse]:
     """
-    Retourne la session OUVERTE pour le contexte donné.
-    Si type_caisse_id est absent et qu'une seule session ouverte existe pour la devise, la retourne.
+    Retourne la session OUVERTE de la caisse cash par défaut pour le contexte donné.
+    Les autres caisses (banque, mobile money) n'ont pas de session : retourne None.
     """
-    qs = _session_filter_qs(entreprise_id, succursale_id, devise_id, type_caisse_id).filter(
-        statut='OUVERTE',
-    )
-    if type_caisse_id is None:
-        count = qs.count()
-        if count == 1:
-            return qs.first()
-        if count > 1:
-            raise SessionCaisseError(
-                _(
-                    'Plusieurs sessions de caisse ouvertes pour cette devise. '
-                    'Précisez le type de caisse.'
-                )
-            )
+    resolved_id = _resolve_type_caisse_session_id(entreprise_id, succursale_id, type_caisse_id)
+    if resolved_id is None:
         return None
-    return qs.first()
+
+    return _session_filter_qs(
+        entreprise_id, succursale_id, devise_id, resolved_id,
+    ).filter(statut='OUVERTE').first()
 
 
 def require_session_caisse_ouverte(
@@ -85,24 +102,12 @@ def require_session_caisse_ouverte(
     devise_id: int,
     type_caisse_id: Optional[int] = None,
 ) -> SessionCaisse:
-    """Lève SessionCaisseError si aucune session ouverte."""
+    """Lève SessionCaisseError si la caisse cash par défaut n'a pas de session ouverte."""
     session = get_session_caisse_ouverte(
         entreprise_id, succursale_id, devise_id, type_caisse_id,
     )
     if session is None:
-        if type_caisse_id:
-            raise SessionCaisseError(
-                _(
-                    'Aucune session ouverte pour cette caisse. '
-                    'Veuillez ouvrir la caisse avant d\'effectuer cette opération.'
-                )
-            )
-        raise SessionCaisseError(
-            _(
-                'Aucune session de caisse n\'est ouverte. '
-                'Veuillez ouvrir une session de caisse avant d\'effectuer cette opération.'
-            )
-        )
+        raise SessionCaisseError(str(MSG_CAISSE_CASH_FERMEE))
     return session
 
 
@@ -110,13 +115,13 @@ def get_session_ouverte_for_caisse(
     type_caisse: TypeCaisse,
     succursale_id: Optional[int],
     devise_id: int,
-) -> SessionCaisse:
+) -> Optional[SessionCaisse]:
     """
-    Contrôle central : caisse active, bon contexte, session ouverte.
-    Utilisé par toutes les opérations financières.
-    """
-    from caisse.services.caisse_defaut import MSG_CAISSE_DEVISE, MSG_CAISSE_INACTIVE, MSG_CAISSE_INTRouvable
+    Contrôle central des opérations financières.
 
+    - Caisse cash par défaut : session ouverte obligatoire.
+    - Autres caisses : pas de session (retourne None).
+    """
     if not type_caisse.is_active:
         raise SessionCaisseError(str(MSG_CAISSE_INACTIVE))
 
@@ -129,6 +134,9 @@ def get_session_ouverte_for_caisse(
 
     if type_caisse.succursale_id is not None:
         branch = type_caisse.succursale_id
+
+    if not caisse_necessite_session(type_caisse):
+        return None
 
     return require_session_caisse_ouverte(
         type_caisse.entreprise_id,
@@ -193,6 +201,9 @@ def ouvrir_session_caisse(
         from caisse.services.caisse_defaut import MSG_CAISSE_INACTIVE
         raise SessionCaisseError(str(MSG_CAISSE_INACTIVE))
 
+    if not caisse_necessite_session(type_caisse):
+        raise SessionCaisseError(str(MSG_SESSION_UNIQUEMENT_CASH_DEFAUT))
+
     devise = Devise.objects.filter(pk=devise_id, entreprise_id=entreprise_id).first()
     if not devise:
         raise SessionCaisseError(_('Devise introuvable pour cette entreprise.'))
@@ -236,6 +247,9 @@ def cloturer_session_caisse(
 ) -> SessionCaisse:
     if session.statut != 'OUVERTE':
         raise SessionCaisseError(_('Seule une session ouverte peut être clôturée.'))
+
+    if not caisse_necessite_session(session.type_caisse):
+        raise SessionCaisseError(str(MSG_SESSION_UNIQUEMENT_CASH_DEFAUT))
 
     montant_physique = _q5(montant_physique)
     totaux = calculer_totaux_session(session)
@@ -342,74 +356,14 @@ def valider_ecart_caisse(
     return ecart
 
 
-def _caisse_payload(type_caisse: Optional[TypeCaisse]) -> dict:
-    if not type_caisse:
-        return {}
-    return {
-        'caisse_id': type_caisse.pk,
-        'caisse_nom': type_caisse.nom or type_caisse.libelle,
-        'caisse_libelle': type_caisse.libelle_affiche,
-        'caisse_code_type': type_caisse.code_type,
-    }
-
-
 def rapport_caisse_general(session: SessionCaisse) -> dict:
-    totaux = calculer_totaux_session(session)
-    payload = {
-        'session_id': session.pk,
-        'numero': session.numero,
-        'caisse': session.type_caisse.libelle_affiche if session.type_caisse_id else '',
-        'devise': session.devise.sigle if session.devise_id else '',
-        'total_entrees': str(totaux['total_entrees']),
-        'total_sorties': str(totaux['total_sorties']),
-        'solde': str(totaux['solde_theorique']),
-        'nombre_mouvements': totaux['nombre_mouvements'],
-        'statut': session.statut,
-    }
-    payload.update(_caisse_payload(session.type_caisse if session.type_caisse_id else None))
-    return payload
+    from caisse.services.rapports_caisse import build_rapport_general_session
+    return build_rapport_general_session(session)
 
 
-def rapport_caisse_detaille(session: SessionCaisse) -> dict:
-    totaux = calculer_totaux_session(session)
-    solde = _q5(session.solde_ouverture or Decimal('0'))
-    lignes = []
-    for mv in session.mouvements.select_related(
-        'utilisateur', 'devise', 'type_caisse', 'session_caisse',
-    ).order_by('date', 'id'):
-        entree = str(mv.montant) if mv.type == 'ENTREE' else ''
-        sortie = str(mv.montant) if mv.type == 'SORTIE' else ''
-        if mv.type == 'ENTREE':
-            solde = _q5(solde + mv.montant)
-        else:
-            solde = _q5(solde - mv.montant)
-        ligne = {
-            'id': mv.pk,
-            'datetime': mv.date.isoformat(),
-            'reference': mv.reference_piece or f'MVT-{mv.pk}',
-            'type': mv.type,
-            'categorie': mv.categorie,
-            'source': mv.categorie,
-            'description': mv.motif,
-            'utilisateur': mv.utilisateur.username if mv.utilisateur_id else '',
-            'montant_entree': entree,
-            'montant_sortie': sortie,
-            'solde_progressif': str(solde),
-            'session_numero': mv.session_caisse.numero if mv.session_caisse_id else '',
-            'caisse': mv.type_caisse.libelle_affiche if mv.type_caisse_id else '',
-        }
-        if mv.type_caisse_id:
-            ligne.update(_caisse_payload(mv.type_caisse))
-        lignes.append(ligne)
-    result = {
-        'session_id': session.pk,
-        'numero': session.numero,
-        'solde_ouverture': str(session.solde_ouverture),
-        'solde_final': str(totaux['solde_theorique']),
-        'lignes': lignes,
-    }
-    result.update(_caisse_payload(session.type_caisse if session.type_caisse_id else None))
-    return result
+def rapport_caisse_detaille(session: SessionCaisse, filtres=None) -> dict:
+    from caisse.services.rapports_caisse import build_rapport_detaille_session
+    return build_rapport_detaille_session(session, filtres)
 
 
 def rapport_par_caisse(
@@ -417,27 +371,23 @@ def rapport_par_caisse(
     *,
     date_min=None,
     date_max=None,
+    date_debut=None,
+    date_fin=None,
+    devise_id=None,
+    type_mouvement=None,
+    source=None,
 ) -> dict:
-    """Synthèse des mouvements pour une caisse (toutes sessions confondues sur la période)."""
-    qs = MouvementCaisse.objects.filter(type_caisse=type_caisse)
-    if date_min:
-        qs = qs.filter(date__date__gte=date_min)
-    if date_max:
-        qs = qs.filter(date__date__lte=date_max)
-    agg = qs.aggregate(
-        total_entrees=Sum('montant', filter=Q(type='ENTREE')),
-        total_sorties=Sum('montant', filter=Q(type='SORTIE')),
+    from caisse.services.rapports_caisse import build_rapport_general_caisse, parse_rapport_filtres
+    filtres = parse_rapport_filtres(
+        date_debut=date_debut,
+        date_fin=date_fin,
+        date_min=date_min,
+        date_max=date_max,
+        devise_id=devise_id,
+        type_mouvement=type_mouvement,
+        source=source,
     )
-    entrees = _q5(agg.get('total_entrees') or Decimal('0'))
-    sorties = _q5(agg.get('total_sorties') or Decimal('0'))
-    return {
-        **_caisse_payload(type_caisse),
-        'devise': type_caisse.devise.sigle if type_caisse.devise_id else '',
-        'total_entrees': str(entrees),
-        'total_sorties': str(sorties),
-        'solde': str(_q5(entrees - sorties)),
-        'nombre_mouvements': qs.count(),
-    }
+    return build_rapport_general_caisse(type_caisse, filtres)
 
 
 def rapport_detaille_par_caisse(
@@ -445,40 +395,20 @@ def rapport_detaille_par_caisse(
     *,
     date_min=None,
     date_max=None,
+    date_debut=None,
+    date_fin=None,
+    devise_id=None,
+    type_mouvement=None,
+    source=None,
 ) -> dict:
-    """Liste chronologique des mouvements d'une caisse avec solde progressif."""
-    qs = MouvementCaisse.objects.filter(type_caisse=type_caisse).select_related(
-        'utilisateur', 'devise', 'session_caisse',
-    ).order_by('date', 'id')
-    if date_min:
-        qs = qs.filter(date__date__gte=date_min)
-    if date_max:
-        qs = qs.filter(date__date__lte=date_max)
-    solde = Decimal('0')
-    lignes = []
-    for mv in qs:
-        if mv.type == 'ENTREE':
-            solde = _q5(solde + mv.montant)
-            entree, sortie = str(mv.montant), ''
-        else:
-            solde = _q5(solde - mv.montant)
-            entree, sortie = '', str(mv.montant)
-        lignes.append({
-            'id': mv.pk,
-            'datetime': mv.date.isoformat(),
-            'reference': mv.reference_piece or f'MVT-{mv.pk}',
-            'session': mv.session_caisse.numero if mv.session_caisse_id else '',
-            'type': mv.type,
-            'categorie': mv.categorie,
-            'source': mv.categorie,
-            'montant_entree': entree,
-            'montant_sortie': sortie,
-            'solde_progressif': str(solde),
-            'utilisateur': mv.utilisateur.username if mv.utilisateur_id else '',
-            'description': mv.motif,
-        })
-    return {
-        **_caisse_payload(type_caisse),
-        'lignes': lignes,
-        'solde_final': str(solde),
-    }
+    from caisse.services.rapports_caisse import build_rapport_detaille_caisse, parse_rapport_filtres
+    filtres = parse_rapport_filtres(
+        date_debut=date_debut,
+        date_fin=date_fin,
+        date_min=date_min,
+        date_max=date_max,
+        devise_id=devise_id,
+        type_mouvement=type_mouvement,
+        source=source,
+    )
+    return build_rapport_detaille_caisse(type_caisse, filtres)

@@ -76,7 +76,7 @@ def creer_mouvement_caisse(
     Crée un ``MouvementCaisse`` unique (pas de lignes ``DetailMouvementCaisse``).
 
     - ``type_caisse`` ou ``type_caisse_id`` obligatoire sauf ``skip_session_check`` ou montant nul.
-    - Vérifie caisse active + session ouverte via ``get_session_ouverte_for_caisse``.
+    - Vérifie caisse active ; session ouverte uniquement pour la caisse cash par défaut.
     """
     details = details or []
     lines_total = sum(Decimal(str(d.get("montant", 0) or 0)) for d in details)
@@ -141,13 +141,15 @@ def creer_mouvement_caisse(
             devise_id=devise_id,
             montant_zero=montant_zero,
         )
-        session = session_caisse or get_session_ouverte_for_caisse(
-            type_caisse,
-            succursale_id,
-            devise_id,
-        )
-        session_caisse = session
-        type_caisse = session.type_caisse
+        session = session_caisse
+        if session is None:
+            session = get_session_ouverte_for_caisse(
+                type_caisse,
+                succursale_id,
+                devise_id,
+            )
+        if session is not None:
+            session_caisse = session
     elif not montant_zero and type_caisse is None and type_caisse_id:
         type_caisse = TypeCaisse.objects.filter(pk=type_caisse_id, entreprise_id=entreprise_id).first()
 

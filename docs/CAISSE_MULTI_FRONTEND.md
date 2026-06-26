@@ -94,10 +94,11 @@ Ajouter **`type_caisse_id`** (ou `caisse_id`) dans le body :
 
 ## UI — champ « Caisse * »
 
-- Charger `/api/types-caisse/actives/`
+- Charger `/api/types-caisse/actives/` — chaque caisse expose `necessite_session` / `requires_session`
 - Si une seule caisse : pré-sélectionner mais **toujours envoyer** `type_caisse_id`
 - Filtrer par agence courante si applicable
-- Avant validation : vérifier session ouverte via `GET /api/caisse/session-active/?devise_id=X&type_caisse_id=Y` (ou `/api/sessions-caisse/active/` — même format `is_open` + `type_caisse_id` plat)
+- **Caisse cash par défaut** (`necessite_session: true`) : vérifier `GET /api/caisse/session-active/?devise_id=X&type_caisse_id=Y` avant opération cash
+- **Autres caisses** (`necessite_session: false`) : pas de blocage session ; badge header cash indépendant
 
 ## Rapports
 

@@ -6,7 +6,7 @@ from rest_framework import serializers
 from caisse.constants import CODE_TYPE_CAISSE_CHOICES
 from caisse.models import DetailMouvementCaisse, MouvementCaisse, TypeCaisse
 from caisse.services.caisse import creer_mouvement_caisse, mouvement_moyen_affiche
-from caisse.services.caisse_defaut import CaisseError, parse_type_caisse_id_from_payload
+from caisse.services.caisse_defaut import CaisseError, caisse_necessite_session, parse_type_caisse_id_from_payload
 from stock.models import DetteClient, Devise
 from stock.serializers import DeviseSerializer
 
@@ -23,14 +23,23 @@ class TypeCaisseSerializer(serializers.ModelSerializer):
         allow_null=True,
     )
     code_type_display = serializers.CharField(source='get_code_type_display', read_only=True)
+    necessite_session = serializers.SerializerMethodField()
+    requires_session = serializers.SerializerMethodField()
 
     class Meta:
         model = TypeCaisse
         fields = [
             'id', 'nom', 'libelle', 'code_type', 'code_type_display', 'description', 'image',
-            'entreprise', 'succursale', 'devise', 'devise_id', 'is_active', 'est_defaut', 'created_at',
+            'entreprise', 'succursale', 'devise', 'devise_id', 'is_active', 'est_defaut',
+            'necessite_session', 'requires_session', 'created_at',
         ]
-        read_only_fields = ['created_at', 'entreprise', 'est_defaut']
+        read_only_fields = ['created_at', 'entreprise', 'est_defaut', 'necessite_session', 'requires_session']
+
+    def get_necessite_session(self, obj):
+        return caisse_necessite_session(obj)
+
+    def get_requires_session(self, obj):
+        return caisse_necessite_session(obj)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

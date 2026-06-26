@@ -8,9 +8,16 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
+from caisse.constants import CAISSE_DEFAUT_CODE
 from caisse.models import EcartCaisse, SessionCaisse, TypeCaisse
 from caisse.services.errors import validation_error_message
 from caisse.services.session_active_state import build_active_state_response
+from caisse.services.rapports_caisse import (
+    build_mouvements_session_payload,
+    build_rapport_detaille_session,
+    build_rapport_general_session,
+    parse_rapport_filtres_from_request,
+)
 from caisse.services.session_caisse import (
     SessionAlreadyOpenError,
     SessionCaisseError,
@@ -18,8 +25,6 @@ from caisse.services.session_caisse import (
     cloturer_session_caisse,
     get_session_caisse_ouverte,
     ouvrir_session_caisse,
-    rapport_caisse_detaille,
-    rapport_caisse_general,
     valider_ecart_caisse,
 )
 from stock.serializers import DeviseSerializer
@@ -106,16 +111,31 @@ class SessionCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
     def get_queryset(self):
         qs = super().get_queryset().select_related(
             'type_caisse', 'devise', 'ouvert_par', 'cloture_par', 'ecart',
+            'ecart__valide_par', 'ecart__mouvement_ajustement',
         ).order_by('-ouvert_le', '-id')
+        # Historique sessions : uniquement caisse cash physique par défaut
+        qs = qs.filter(
+            type_caisse__est_defaut=True,
+            type_caisse__code_type=CAISSE_DEFAUT_CODE,
+        )
         statut = self.request.query_params.get('statut')
         if statut:
             qs = qs.filter(statut=statut)
         devise_id = self.request.query_params.get('devise_id')
         if devise_id:
             qs = qs.filter(devise_id=devise_id)
-        type_caisse_id = self.request.query_params.get('type_caisse_id')
+        type_caisse_id = self.request.query_params.get('type_caisse_id') or self.request.query_params.get('caisse_id')
         if type_caisse_id:
             qs = qs.filter(type_caisse_id=type_caisse_id)
+        date_debut = self.request.query_params.get('date_debut') or self.request.query_params.get('date_min')
+        if date_debut:
+            qs = qs.filter(ouvert_le__date__gte=date_debut)
+        date_fin = self.request.query_params.get('date_fin') or self.request.query_params.get('date_max')
+        if date_fin:
+            qs = qs.filter(ouvert_le__date__lte=date_fin)
+        utilisateur = self.request.query_params.get('utilisateur') or self.request.query_params.get('ouvert_par_id')
+        if utilisateur:
+            qs = qs.filter(ouvert_par_id=utilisateur)
         return qs
 
     @action(detail=False, methods=['get'], url_path='active')
@@ -149,6 +169,8 @@ class SessionCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         qs = SessionCaisse.objects.filter(
             entreprise_id=tenant_id,
             statut='OUVERTE',
+            type_caisse__est_defaut=True,
+            type_caisse__code_type=CAISSE_DEFAUT_CODE,
         ).select_related('type_caisse', 'devise', 'ouvert_par')
         if branch_id is not None:
             qs = qs.filter(succursale_id=branch_id)
@@ -234,12 +256,20 @@ class SessionCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
     @action(detail=True, methods=['get'], url_path='rapport-general')
     def rapport_general(self, request, pk=None):
         session = self.get_object()
-        return Response(rapport_caisse_general(session))
+        return Response(build_rapport_general_session(session))
 
     @action(detail=True, methods=['get'], url_path='rapport-detaille')
     def rapport_detaille(self, request, pk=None):
         session = self.get_object()
-        return Response(rapport_caisse_detaille(session))
+        filtres = parse_rapport_filtres_from_request(request)
+        return Response(build_rapport_detaille_session(session, filtres))
+
+    @action(detail=True, methods=['get'], url_path='mouvements')
+    def mouvements(self, request, pk=None):
+        """Mouvements de la session uniquement (JSON, tous statuts)."""
+        session = self.get_object()
+        filtres = parse_rapport_filtres_from_request(request)
+        return Response(build_mouvements_session_payload(session, filtres))
 
     @action(detail=True, methods=['get'], url_path='proces-verbal')
     def proces_verbal(self, request, pk=None):

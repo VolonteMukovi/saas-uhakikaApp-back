@@ -27,6 +27,37 @@ MSG_CAISSE_INTRouvable = _('Caisse introuvable pour cette entreprise.')
 MSG_CAISSE_DEVISE = _(
     'La devise de l\'opération ne correspond pas à la devise de la caisse sélectionnée.'
 )
+MSG_CAISSE_CASH_FERMEE = _(
+    'La caisse cash est fermée. Veuillez ouvrir la caisse avant d\'effectuer cette opération.'
+)
+MSG_SESSION_UNIQUEMENT_CASH_DEFAUT = _(
+    'Seule la caisse cash physique par défaut peut être ouverte ou fermée.'
+)
+
+
+def caisse_necessite_session(type_caisse: TypeCaisse) -> bool:
+    """
+    True uniquement pour la caisse cash physique par défaut (ouverture / clôture / mouvements).
+    Banque, mobile money, etc. : pas de session requise.
+    """
+    return type_caisse.code_type == CAISSE_DEFAUT_CODE and type_caisse.est_defaut
+
+
+def get_caisse_defaut_session_scope(
+    entreprise_id: int,
+    succursale_id: Optional[int] = None,
+) -> Optional[TypeCaisse]:
+    """Caisse cash par défaut du contexte (sans création automatique)."""
+    qs = TypeCaisse.objects.filter(
+        entreprise_id=entreprise_id,
+        est_defaut=True,
+        code_type=CAISSE_DEFAUT_CODE,
+    )
+    if succursale_id is not None:
+        branch_caisse = qs.filter(succursale_id=succursale_id).first()
+        if branch_caisse:
+            return branch_caisse
+    return qs.filter(succursale_id__isnull=True).first()
 
 
 def _devise_principale(entreprise_id: int):

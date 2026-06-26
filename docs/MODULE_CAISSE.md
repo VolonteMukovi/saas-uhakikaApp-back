@@ -312,6 +312,28 @@ Dans tous les payloads, ces clés sont équivalentes :
 
 ## 6. Sessions de caisse
 
+### Règle des sessions de caisse
+
+Dans le système, la session de caisse concerne **uniquement la caisse cash physique par défaut** (`code_type = CASH` et `est_defaut = true`).
+
+La caisse cash physique représente l'argent liquide réellement manipulé par le caissier. C'est pourquoi elle doit être ouverte avant les opérations cash et clôturée après comptage physique (écart, surplus, perte, validation admin).
+
+Les autres caisses (banque, Airtel Money, M-Pesa, Orange Money, Mobile Money, etc.) **ne nécessitent pas** d'ouverture ni de fermeture de session. Elles restent utilisables directement si elles sont actives et sélectionnées dans l'opération.
+
+| Caisse | Caisse obligatoire | Session obligatoire |
+|--------|-------------------|---------------------|
+| Caisse principale CASH (`est_defaut`) | Oui | Oui (ouverte) |
+| Airtel Money, M-Pesa, Banque, etc. | Oui | Non (`session_caisse = null`) |
+
+Champ API sur chaque caisse : `necessite_session` / `requires_session` (booléen).
+
+Messages :
+
+- Caisse cash fermée : `La caisse cash est fermée. Veuillez ouvrir la caisse avant d'effectuer cette opération.`
+- Tentative d'ouverture sur autre caisse : `Seule la caisse cash physique par défaut peut être ouverte ou fermée.`
+
+Le header et `GET /api/caisse/session-active/` reflètent **uniquement** l'état de la caisse cash par défaut.
+
 ### 6.1 Endpoints
 
 | Action | Méthode | URL |
@@ -331,7 +353,7 @@ Filtres liste : `?statut=OUVERTE`, `?devise_id=`, `?type_caisse_id=`
 
 ### 6.2 Ouvrir une session
 
-**Toujours pour une caisse précise** (pas de session « globale »).
+**Uniquement pour la caisse cash physique par défaut** (`type_caisse_id` = caisse `CASH` + `est_defaut`).
 
 ```http
 POST /api/sessions-caisse/ouvrir/
@@ -713,6 +735,90 @@ POST /api/entrees/
 ---
 
 ## 11. Rapports et tableaux de bord
+
+### Rapports JSON de caisse
+
+Le module caisse expose des **rapports JSON** consultables à tout moment (pas seulement en PDF ni en interface).
+
+**Règle :** toute session enregistrée reste consultable en rapport JSON, quel que soit son statut (`OUVERTE`, `CLOTUREE`, `CLOTUREE_EN_ATTENTE_VALIDATION`, `ANNULEE`, etc.).
+
+Les rapports d'une **session** n'incluent **que** les mouvements rattachés à cette session (`session_caisse_id`).
+
+#### Rapport général (synthèse)
+
+| Scope | URL recommandée | URL historique |
+|-------|-----------------|----------------|
+| Session | `GET /api/caisse/sessions/{id}/rapport-general/` | `GET /api/sessions-caisse/{id}/rapport-general/` |
+| Caisse (période) | `GET /api/caisse/{id}/rapport-general/` | `GET /api/types-caisse/{id}/rapport-general/` |
+
+Structure JSON :
+
+```json
+{
+  "rapport": "general",
+  "scope": "session",
+  "session": {
+    "id": 42,
+    "numero": "SESS-0001-000042",
+    "statut": "OUVERTE",
+    "date_ouverture": "2026-06-22T08:00:00",
+    "date_cloture": null
+  },
+  "caisse": {
+    "id": 1,
+    "nom": "Caisse principale",
+    "type": "CASH",
+    "devise": "USD"
+  },
+  "resume": {
+    "solde_ouverture": 100,
+    "solde_ouverture_affiche": "100.00 $",
+    "total_entrees": 674.25,
+    "total_sorties": 14,
+    "solde_theorique": 760.25,
+    "nombre_mouvements": 782
+  },
+  "ecart": null,
+  "genere_le": "2026-06-24T12:00:00"
+}
+```
+
+#### Rapport détaillé (mouvements + solde progressif)
+
+| Scope | URL recommandée | URL historique |
+|-------|-----------------|----------------|
+| Session | `GET /api/caisse/sessions/{id}/rapport-detaille/` | `GET /api/sessions-caisse/{id}/rapport-detaille/` |
+| Caisse (période) | `GET /api/caisse/{id}/rapport-detaille/` | `GET /api/types-caisse/{id}/rapport-detaille/` |
+
+Filtres optionnels (query) : `type_mouvement` (`ENTREE`/`SORTIE`), `source` / `categorie`, `devise_id`, `date_debut`, `date_fin` (alias `date_min`, `date_max` pour les caisses).
+
+Chaque mouvement inclut : `date`, `reference`, `type`, `source`, `description`, `entree`, `sortie`, `solde_apres`, `utilisateur`, champs `*_affiche` pour l'UI.
+
+#### Mouvements seuls
+
+| Scope | URL |
+|-------|-----|
+| Session | `GET /api/caisse/sessions/{id}/mouvements/` ou `GET /api/sessions-caisse/{id}/mouvements/` |
+| Caisse | `GET /api/caisse/{id}/mouvements/` |
+
+#### Historique des sessions
+
+```http
+GET /api/caisse/sessions/
+GET /api/sessions-caisse/
+```
+
+Filtres : `statut`, `devise_id`, `type_caisse_id` / `caisse_id`, `date_debut`, `date_fin`, `utilisateur` / `ouvert_par_id`.
+
+Actions depuis l'historique (tous statuts) : détail, rapport général, rapport détaillé, mouvements, procès-verbal (`/proces-verbal/`), export PDF côté frontend.
+
+#### Écart de caisse dans le rapport
+
+Si la session a un écart, le bloc `ecart` contient : `type` (`SURPLUS`/`PERTE`), `montant`, `statut`, `valide_par`, `date_validation`, `mouvement_ajustement`.
+
+#### Formatage montants
+
+Le JSON conserve les valeurs précises (`*_brut`, nombres) et fournit des champs `*_affiche` (ex. `5.00 $`, `3 566.63 $`) pour l'interface.
 
 ### 11.1 Par session (période de travail)
 

@@ -23,9 +23,36 @@ class Entreprise(models.Model):
     logo = models.ImageField(upload_to='entreprises/logos/', blank=True, null=True)
     slogan = models.CharField(max_length=255, blank=True, null=True, help_text="Devise ou slogan de l'entreprise (affiché dans l'en-tête des rapports)")
     has_branches = models.BooleanField(default=False, help_text="Active la gestion par succursales (branches).")
+    config = models.TextField(
+        blank=True,
+        default='',
+        help_text='Configuration JSON (apparence rapports, POS, UI…)',
+    )
 
     def __str__(self):
         return self.nom
+
+    def get_config_dict(self) -> dict:
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        from stock.services.entreprise_config import default_entreprise_config, parse_config_raw
+        if not self.config or not str(self.config).strip():
+            return default_entreprise_config()
+        try:
+            return parse_config_raw(self.config)
+        except (DRFValidationError, ValueError, TypeError):
+            return default_entreprise_config()
+
+    def set_config_dict(self, data: dict) -> None:
+        from stock.services.entreprise_config import serialize_config_dict
+        self.config = serialize_config_dict(data)
+
+    def merge_config(self, patch: dict, user_id: int | None = None) -> dict:
+        from stock.services.entreprise_config import merge_config_dict
+        current = self.get_config_dict()
+        merged = merge_config_dict(current, patch, user_id=user_id)
+        self.set_config_dict(merged)
+        return merged
 
 
 class Succursale(models.Model):
