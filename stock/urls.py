@@ -16,13 +16,10 @@ router.register(r'ligneentrees', LigneEntreeViewSet)
 router.register(r'sorties', SortieViewSet)
 router.register(r'lignesorties', LigneSortieViewSet)
 router.register(r'rapports', RapportViewSet, basename='rapport')
-router.register(r'mouvements-caisse', MouvementCaisseViewSet)
-router.register(r'types-caisse', TypeCaisseViewSet)
 router.register(r'devises', DeviseViewSet)
 router.register(r'clients', ClientViewSet)
 router.register(r'client-entreprises', ClientEntrepriseViewSet, basename='client-entreprise')
 router.register(r'dettes', DetteClientViewSet)
-router.register(r'paiements-dettes', PaiementDetteViewSet, basename='paiementdette')
 router.register(r'inventaires', InventaireSessionViewSet, basename='inventaire')
 
 

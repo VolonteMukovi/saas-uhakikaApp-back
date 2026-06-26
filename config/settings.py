@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     "drf_yasg",
     "users",  # Nouvelle app pour la gestion des utilisateurs
     "stock",
+    "caisse",
     "import_excel",
     "rapports",  # Application pour la génération des rapports
     "order",  # Gestion des marchandises en cours de transport
@@ -130,6 +131,7 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_PAGINATION_CLASS': 'config.pagination.StandardResultsSetPagination',
     'PAGE_SIZE': 25,
+    'EXCEPTION_HANDLER': 'config.exception_handlers.exception_handler',
     # 'DEFAULT_PERMISSION_CLASSES': (
     #     'rest_framework.permissions.IsAuthenticated',
     # ),

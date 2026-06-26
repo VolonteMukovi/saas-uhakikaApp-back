@@ -22,11 +22,12 @@ from stock.models import (
     Sortie,
     Stock,
 )
-from stock.services.caisse import creer_mouvement_caisse
+from caisse.services.caisse import creer_mouvement_caisse
+from caisse.services.caisse_defaut import MSG_CAISSE_REQUISE
 
 
 @transaction.atomic
-def apply_sortie_on_commande_livree(commande: Commande) -> Sortie:
+def apply_sortie_on_commande_livree(commande: Commande, *, type_caisse_id: int | None = None) -> Sortie:
     """
     Crée une ``Sortie`` + lignes FIFO pour les articles de la commande, lie ``commande.sortie_livraison``.
 
@@ -213,6 +214,8 @@ def apply_sortie_on_commande_livree(commande: Commande) -> Sortie:
         devise_obj = devise_data["devise_obj"]
         total_devise = devise_data["total"]
         if total_devise > 0:
+            if not type_caisse_id:
+                raise ValidationError({'type_caisse_id': str(MSG_CAISSE_REQUISE)})
             ref_cmd = (commande.reference or "").strip() or str(commande.pk)
             piece = f"LIV-CMD-{ref_cmd}-{devise_key}"[:100]
             creer_mouvement_caisse(
@@ -225,6 +228,7 @@ def apply_sortie_on_commande_livree(commande: Commande) -> Sortie:
                 sortie=sortie,
                 reference_piece=piece,
                 motif="",
+                type_caisse_id=type_caisse_id,
             )
 
     commande.sortie_livraison = sortie
