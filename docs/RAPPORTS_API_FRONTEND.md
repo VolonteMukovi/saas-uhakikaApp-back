@@ -382,22 +382,49 @@ Autres champs : `numero_entree`, `date_entree`, `libelle_entree`, `article_id`, 
 
 | | |
 |---|---|
-| **Avant JSON** | `GET .../ventes/` — paginé ; totaux sur toute la période |
-| **Avant PDF** | `GET .../ventes/pdf/` — toutes les lignes |
-| **Maintenant** | `GET .../ventes/?complet=true` pour export ; pagination sinon |
-| **Changement endpoint** | URL **inchangée** |
+| **Avant JSON** | `GET .../ventes/` - pilotage principal par dates |
+| **Maintenant** | `GET .../ventes/` - **pilotage principal par session** |
+| **Changement endpoint** | URL **inchang?e** ; logique m?tier d?plac?e vers la session |
 
-**Période (une option obligatoire) :**
+**Param?tres principaux :**
 
-- `date_jour=2026-01-31`
-- `mois=1&annee=2026`
-- `date_debut=...&date_fin=...`
+- `session_id=12`
+- `session_numero=SESS-2026-00012`
 
-**Filtres :** `client_id`, `client_nom`, `reference`, `statut_paiement` (`COMPTANT`|`CREDIT`), `montant_min`, `montant_max`
+**Comportement par d?faut :**
 
-**Lignes (`details` / `lignes_ventes`) :** `sortie_id`, `date`, `client`, `statut_paiement`, `article`, `pu_achat`, `pu_vente`, `quantite`, `benefice`, `reference` (`FACT-000015`)
+- sans param?tre de session, le backend charge automatiquement la **session ouverte** du contexte courant ;
+- si aucune session ouverte n'existe, l'API retourne une r?ponse JSON vide avec un message explicite ;
+- une session s?lectionn?e manuellement est accept?e **quel que soit son statut**.
 
-**`resume` :** `total_sorties`, `total_clients`, `sorties_comptant`, `sorties_credit`, `total_quantite`, `total_montant_vente`, `total_benefice`
+**Filtres compl?mentaires :**
+
+- `client_id`, `client_nom`, `reference`
+- `statut_paiement` (`COMPTANT`|`CREDIT`)
+- `montant_min`, `montant_max`
+- `agence_id` / `succursale_id`
+- `page`, `page_size`
+- `complet=true`
+
+**Lignes (`details` / `lignes_ventes`) :** `sortie_id`, `ligne_id`, `date`, `client`, `client_id`, `statut_paiement`, `article`, `article_id`, `pu_achat`, `pu_vente`, `quantite`, `montant_ligne`, `benefice`, `reference`
+
+**Nouveaux blocs m?tier :**
+
+- `session` : session utilis?e pour le rapport
+- `ventes` : ventes group?es par sortie, avec leurs lignes
+- `totaux` : `total_comptant`, `total_credit`, `total_general`, `total_quantite`, `total_benefice`
+
+**`resume` :** `nombre_ventes`, `total_clients`, `sorties_comptant`, `sorties_credit`, `total_comptant`, `total_credit`, `total_general`, `total_quantite`, `total_benefice`
+
+**Exemples :**
+
+```http
+GET /api/rapports/ventes/
+GET /api/rapports/ventes/?session_id=12&page=1&page_size=25
+GET /api/rapports/ventes/?session_numero=SESS-2026-00012&statut_paiement=CREDIT
+```
+
+Voir aussi : **`docs/RAPPORT_VENTES_PAR_SESSION.md`**
 
 ---
 

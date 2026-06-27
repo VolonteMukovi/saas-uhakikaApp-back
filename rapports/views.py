@@ -14,12 +14,12 @@ from config.pagination import StandardResultsSetPagination
 
 
 class InventaireResultsSetPagination(StandardResultsSetPagination):
-    """Pagination uniquement si complet=false : plafond élevé pour les gros inventaires."""
+    """Pagination uniquement si complet=false : plafond Ã©levÃ© pour les gros inventaires."""
     max_page_size = 5000
 
 
 class InventaireStockLine:
-    """Ligne d'inventaire : article + quantités (stock réel ou 0 si aucune fiche Stock)."""
+    """Ligne d'inventaire : article + quantitÃ©s (stock rÃ©el ou 0 si aucune fiche Stock)."""
     __slots__ = ('article', 'Qte', 'seuilAlert')
 
     def __init__(self, article, qte=0, seuil=0):
@@ -56,9 +56,9 @@ from .utils.report_envelope import wrap_report_response
 
 def _dettes_rapport_is_special_filter(request):
     """
-    Filtre « client spécial » pour les rapports dettes (query string, pas body).
-    - Param absent : uniquement clients spéciaux (is_special=True), comme demandé métier.
-    - is_special=true : spéciaux uniquement.
+    Filtre Â« client spÃ©cial Â» pour les rapports dettes (query string, pas body).
+    - Param absent : uniquement clients spÃ©ciaux (is_special=True), comme demandÃ© mÃ©tier.
+    - is_special=true : spÃ©ciaux uniquement.
     - is_special=false : clients standards uniquement.
     - is_special=all (ou both, *, any, tous) : tous les clients (sans filtre sur is_special).
 
@@ -66,7 +66,7 @@ def _dettes_rapport_is_special_filter(request):
         dict: {'is_special': bool} pour filtrer via `ClientEntreprise` (lien entreprise courant)
         None: aucun filtre sur is_special
     Raises:
-        ValueError: paramètre non reconnu
+        ValueError: paramÃ¨tre non reconnu
     """
     raw = request.query_params.get('is_special')
     if raw is None:
@@ -79,7 +79,7 @@ def _dettes_rapport_is_special_filter(request):
     if raw_l in ('false', '0', 'no', 'non'):
         return {'is_special': False}
     raise ValueError(
-        _('Paramètre is_special invalide pour ce rapport. Utilisez: true, false, ou all.')
+        _('ParamÃ¨tre is_special invalide pour ce rapport. Utilisez: true, false, ou all.')
     )
 
 
@@ -93,7 +93,7 @@ def _dettes_encours_qs(
 ):
     """
     Dettes EN_COURS avec solde > 0.
-    Utilise les annotations DB (solde_restant_agg) — pas les @property montant_paye / solde_restant.
+    Utilise les annotations DB (solde_restant_agg) â€” pas les @property montant_paye / solde_restant.
     """
     qs = DetteClient.objects.with_paiements_aggregate().filter(
         statut='EN_COURS',
@@ -117,9 +117,9 @@ def _dettes_encours_qs(
 
 class RapportsViewSet(viewsets.ViewSet):
     """
-    ViewSet pour les rapports métier (données JSON uniquement).
-    Le frontend gère l'affichage, l'impression et l'export PDF/Excel.
-    Accès réservé aux Admin et User (Agent). SuperAdmin n'a pas accès aux rapports métier.
+    ViewSet pour les rapports mÃ©tier (donnÃ©es JSON uniquement).
+    Le frontend gÃ¨re l'affichage, l'impression et l'export PDF/Excel.
+    AccÃ¨s rÃ©servÃ© aux Admin et User (Agent). SuperAdmin n'a pas accÃ¨s aux rapports mÃ©tier.
     """
     permission_classes = [IsAdminOrUser]
 
@@ -142,7 +142,7 @@ class RapportsViewSet(viewsets.ViewSet):
         """
         Contexte multi-tenant :
         - entreprise obligatoire (via membership / JWT).
-        - succursale : depuis JWT ou default_succursale ; peut être None (agent sans succursale).
+        - succursale : depuis JWT ou default_succursale ; peut Ãªtre None (agent sans succursale).
         """
         user = request.user
         entreprise = user.get_entreprise(request)
@@ -158,8 +158,8 @@ class RapportsViewSet(viewsets.ViewSet):
     @staticmethod
     def _default_exercice_dates(request):
         """
-        Période d'exercice par défaut (comptabilité courante) : 1er janv. → 31 déc.
-        de l'année de référence (année courante si date_fin absente, sinon année de date_fin).
+        PÃ©riode d'exercice par dÃ©faut (comptabilitÃ© courante) : 1er janv. â†’ 31 dÃ©c.
+        de l'annÃ©e de rÃ©fÃ©rence (annÃ©e courante si date_fin absente, sinon annÃ©e de date_fin).
         """
         date_debut = request.query_params.get('date_debut')
         date_fin = request.query_params.get('date_fin')
@@ -185,21 +185,21 @@ class RapportsViewSet(viewsets.ViewSet):
             raise ValidationError(
                 {
                     'detail': _(
-                        'date_debut et date_fin doivent être au format ISO YYYY-MM-DD '
+                        'date_debut et date_fin doivent Ãªtre au format ISO YYYY-MM-DD '
                         '(ex. 2026-01-01).'
                     )
                 }
             )
         if d0 > d1:
             raise ValidationError(
-                {'detail': _('date_debut doit être antérieure ou égale à date_fin.')}
+                {'detail': _('date_debut doit Ãªtre antÃ©rieure ou Ã©gale Ã  date_fin.')}
             )
         return date_debut_s, date_fin_s, d0, d1
 
     def _filter_articles_mouvements_periode(self, article_qs, request, d_debut: date, d_fin: date):
         """
-        Garde les articles ayant au moins une ligne d'entrée ou de sortie sur la période
-        (date du bon d'entrée / de la sortie, partie date uniquement, bornes inclusives).
+        Garde les articles ayant au moins une ligne d'entrÃ©e ou de sortie sur la pÃ©riode
+        (date du bon d'entrÃ©e / de la sortie, partie date uniquement, bornes inclusives).
         """
         user = request.user
         eid, branch_id = self._get_tenant_ids_strict(request)
@@ -229,7 +229,7 @@ class RapportsViewSet(viewsets.ViewSet):
     def _inventaire_article_queryset(self, request):
         """
         Tous les articles du tenant (entreprise + succursale si agent avec branche),
-        avec quantités issues de Stock (0 si aucune fiche Stock pour l'article).
+        avec quantitÃ©s issues de Stock (0 si aucune fiche Stock pour l'article).
         """
         user = request.user
         eid, branch_id = self._get_tenant_ids_strict(request)
@@ -323,7 +323,7 @@ class RapportsViewSet(viewsets.ViewSet):
         }
 
     def _serialize_inventaire_session(self, request, session, *, force_complet: bool = False):
-        """Rapport d'inventaire basé sur une session opérationnelle (comptage + écarts)."""
+        """Rapport d'inventaire basÃ© sur une session opÃ©rationnelle (comptage + Ã©carts)."""
         statut_filtre = request.query_params.get('statut')
         statut_ligne_filtre = request.query_params.get('statut_ligne')
         if force_complet:
@@ -344,7 +344,7 @@ class RapportsViewSet(viewsets.ViewSet):
 
         if statut_ligne_filtre:
             code = statut_ligne_filtre.upper().replace(' ', '_')
-            if code == 'NON_COMPTÉ' or code == 'NON_COMpte':
+            if code == 'NON_COMPTÃ‰' or code == 'NON_COMpte':
                 lignes_qs = lignes_qs.filter(stock_physique__isnull=True)
             elif code == 'CONFORME':
                 lignes_qs = lignes_qs.filter(ecart=0)
@@ -354,7 +354,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 lignes_qs = lignes_qs.filter(ecart__lt=0)
 
         if statut_filtre:
-            # Filtre stock sur stock théorique figé — post-filter en Python
+            # Filtre stock sur stock thÃ©orique figÃ© â€” post-filter en Python
             statut_upper = statut_filtre.upper()
             filtered = []
             for ligne in lignes_qs:
@@ -417,11 +417,11 @@ class RapportsViewSet(viewsets.ViewSet):
 
     def _serialize_inventaire(self, request, *, force_complet: bool = False):
         """
-        Corps du rapport d'inventaire (dict prêt pour JSON ou PDF).
-        Par défaut (complet=true) : tous les articles, sans pagination.
-        complet=false : pagination (page_size jusqu'à 5000).
-        Si filtrer_mouvements=true : seuls les articles avec au moins une entrée ou une sortie
-        dont la date tombe dans [date_debut, date_fin] (tenant-scopé). Sinon : catalogue complet.
+        Corps du rapport d'inventaire (dict prÃªt pour JSON ou PDF).
+        Par dÃ©faut (complet=true) : tous les articles, sans pagination.
+        complet=false : pagination (page_size jusqu'Ã  5000).
+        Si filtrer_mouvements=true : seuls les articles avec au moins une entrÃ©e ou une sortie
+        dont la date tombe dans [date_debut, date_fin] (tenant-scopÃ©). Sinon : catalogue complet.
         """
         user = request.user
         date_debut, date_fin, d0, d1 = self._parse_inventaire_date_bounds(request)
@@ -515,15 +515,15 @@ class RapportsViewSet(viewsets.ViewSet):
         **Rapport d'inventaire** JSON (affichage / export frontend).
 
         Deux modes :
-        - **catalogue** (défaut) : stock théorique actuel, colonnes inventaire avec
+        - **catalogue** (dÃ©faut) : stock thÃ©orique actuel, colonnes inventaire avec
           `stock_physique` et `ecart` vides (`statut_ligne_code`: NON_APPLICABLE).
-        - **session** (`session_id`) : session opérationnelle avec comptage, écarts,
-          statuts ligne (NON_COMPTÉ, CONFORME, ECART_POSITIF, ECART_NEGATIF).
+        - **session** (`session_id`) : session opÃ©rationnelle avec comptage, Ã©carts,
+          statuts ligne (NON_COMPTÃ‰, CONFORME, ECART_POSITIF, ECART_NEGATIF).
 
-        Paramètres :
-        - session_id : ID session `/api/inventaires/` (rapport après comptage)
-        - statut : NORMAL | ALERTE | RUPTURE (stock théorique)
-        - statut_ligne : NON_COMPTÉ | CONFORME | ECART_POSITIF | ECART_NEGATIF (mode session)
+        ParamÃ¨tres :
+        - session_id : ID session `/api/inventaires/` (rapport aprÃ¨s comptage)
+        - statut : NORMAL | ALERTE | RUPTURE (stock thÃ©orique)
+        - statut_ligne : NON_COMPTÃ‰ | CONFORME | ECART_POSITIF | ECART_NEGATIF (mode session)
         - seulement_en_stock, type_article, filtrer_mouvements, complet, date_debut, date_fin
 
         GET /api/rapports/inventaire/
@@ -541,7 +541,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 raise PermissionDenied('Session hors de votre succursale.')
             if session.statut == InventaireSession.STATUT_BROUILLON:
                 raise ValidationError({
-                    'session_id': 'Démarrez la session avant d\'éditer le rapport (POST .../demarrer/).',
+                    'session_id': 'DÃ©marrez la session avant d\'Ã©diter le rapport (POST .../demarrer/).',
                 })
             data = self._serialize_inventaire_session(request, session)
         else:
@@ -549,7 +549,7 @@ class RapportsViewSet(viewsets.ViewSet):
         return self._report_response(request, 'inventaire', data)
 
     def _get_bon_entree_queryset_and_stats(self, request):
-        """Retourne (queryset stocks, dict statistiques) pour le rapport de réquisition."""
+        """Retourne (queryset stocks, dict statistiques) pour le rapport de rÃ©quisition."""
         user = request.user
         eid, branch_id = self._get_tenant_ids_strict(request)
         base_filter = {'article__entreprise_id': eid} if eid else {}
@@ -579,7 +579,7 @@ class RapportsViewSet(viewsets.ViewSet):
         }
 
     def _bon_entree_stocks_with_extras(self, request):
-        """Liste complète des stocks réquisition (+ extra_articles optionnels)."""
+        """Liste complÃ¨te des stocks rÃ©quisition (+ extra_articles optionnels)."""
         user = request.user
         stocks, _ = self._get_bon_entree_queryset_and_stats(request)
         stocks_list = list(stocks)
@@ -635,11 +635,11 @@ class RapportsViewSet(viewsets.ViewSet):
             articles_data = BonEntreeArticleSerializer(page_stocks, many=True).data
             stats = self._enrich_bon_entree_statistiques(statistiques, articles_data)
             resp = {
-                'titre': _("RAPPORT DE RÉQUISITION"),
+                'titre': _("RAPPORT DE RÃ‰QUISITION"),
                 'instructions': _(
-                    'Quantités et montants estimés calculés automatiquement : stock actuel, '
-                    'dernier prix d\'achat, quantité suggérée (jusqu\'au seuil) et montant estimé. '
-                    'Ajustez côté client si besoin avant de passer commande.'
+                    'QuantitÃ©s et montants estimÃ©s calculÃ©s automatiquement : stock actuel, '
+                    'dernier prix d\'achat, quantitÃ© suggÃ©rÃ©e (jusqu\'au seuil) et montant estimÃ©. '
+                    'Ajustez cÃ´tÃ© client si besoin avant de passer commande.'
                 ),
                 'filtres': {
                     'inclure_normaux': inclure_normaux,
@@ -664,11 +664,11 @@ class RapportsViewSet(viewsets.ViewSet):
         articles_data = BonEntreeArticleSerializer(stocks_list, many=True).data
         stats = self._enrich_bon_entree_statistiques(statistiques, articles_data)
         return {
-            'titre': _("RAPPORT DE RÉQUISITION"),
+            'titre': _("RAPPORT DE RÃ‰QUISITION"),
             'instructions': _(
-                'Quantités et montants estimés calculés automatiquement : stock actuel, '
-                'dernier prix d\'achat, quantité suggérée (jusqu\'au seuil) et montant estimé. '
-                'Ajustez côté client si besoin avant de passer commande.'
+                'QuantitÃ©s et montants estimÃ©s calculÃ©s automatiquement : stock actuel, '
+                'dernier prix d\'achat, quantitÃ© suggÃ©rÃ©e (jusqu\'au seuil) et montant estimÃ©. '
+                'Ajustez cÃ´tÃ© client si besoin avant de passer commande.'
             ),
             'filtres': {
                 'inclure_normaux': inclure_normaux,
@@ -686,15 +686,15 @@ class RapportsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='bon-entree')
     def bon_entree(self, request):
         """
-        Rapport de réquisition (JSON) — préparation des achats.
+        Rapport de rÃ©quisition (JSON) â€” prÃ©paration des achats.
 
-        Chaque ligne inclut : stock actuel, dernier PU d'achat, quantité suggérée
-        (`quantite_a_commander`) et montant estimé (`montant_estime` / `prix_total`).
+        Chaque ligne inclut : stock actuel, dernier PU d'achat, quantitÃ© suggÃ©rÃ©e
+        (`quantite_a_commander`) et montant estimÃ© (`montant_estime` / `prix_total`).
 
-        Paramètres:
-        - inclure_normaux: true/false (défaut false)
-        - extra_articles: IDs séparés par virgule (ex. PRLI0007,ID2)
-        - complet: true = sans pagination (défaut si extra_articles présent)
+        ParamÃ¨tres:
+        - inclure_normaux: true/false (dÃ©faut false)
+        - extra_articles: IDs sÃ©parÃ©s par virgule (ex. PRLI0007,ID2)
+        - complet: true = sans pagination (dÃ©faut si extra_articles prÃ©sent)
         - page, page_size: pagination standard
 
         GET /api/rapports/bon-entree/
@@ -709,16 +709,16 @@ class RapportsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='clients-dettes')
     def clients_dettes(self, request):
         """
-        Retourne un client spécifique avec ses dettes détaillées (JSON).
+        Retourne un client spÃ©cifique avec ses dettes dÃ©taillÃ©es (JSON).
         
-        Paramètre obligatoire:
+        ParamÃ¨tre obligatoire:
         - client_id: ID du client (ex: CLI0001)
         
         GET /api/rapports/clients-dettes/?client_id=CLI0001
 
-        Filtre is_special (query) — même logique que clients-dettes-general :
-        par défaut (param absent) seuls les clients spéciaux sont visibles ;
-        is_special=all pour tout client du tenant ; true / false pour forcer le périmètre.
+        Filtre is_special (query) â€” mÃªme logique que clients-dettes-general :
+        par dÃ©faut (param absent) seuls les clients spÃ©ciaux sont visibles ;
+        is_special=all pour tout client du tenant ; true / false pour forcer le pÃ©rimÃ¨tre.
         """
         user = request.user
         eid, branch_id = self._get_tenant_ids_strict(request)
@@ -728,11 +728,11 @@ class RapportsViewSet(viewsets.ViewSet):
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Récupérer le client_id depuis les paramètres de requête
+        # RÃ©cupÃ©rer le client_id depuis les paramÃ¨tres de requÃªte
         client_id = request.query_params.get('client_id')
         if not client_id:
             return Response({
-                'error': 'Le paramètre "client_id" est obligatoire',
+                'error': 'Le paramÃ¨tre "client_id" est obligatoire',
                 'exemple': '/api/rapports/clients-dettes/?client_id=CLI0001'
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -752,14 +752,14 @@ class RapportsViewSet(viewsets.ViewSet):
             client = client_qs.get()
         except Client.DoesNotExist:
             return Response({
-                'error': f'Client avec ID "{client_id}" non trouvé'
+                'error': f'Client avec ID "{client_id}" non trouvÃ©'
             }, status=status.HTTP_404_NOT_FOUND)
 
         lien = client.liens_entreprise.filter(entreprise_id=eid).first() if eid else None
         if special_kw is not None and (not lien or lien.is_special != special_kw['is_special']):
             return Response({
                 'error': _(
-                    'Client non trouvé ou hors du périmètre du filtre is_special pour ce rapport.'
+                    'Client non trouvÃ© ou hors du pÃ©rimÃ¨tre du filtre is_special pour ce rapport.'
                 )
             }, status=status.HTTP_404_NOT_FOUND)
 
@@ -862,22 +862,22 @@ class RapportsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='clients-dettes-general')
     def clients_dettes_general(self, request):
         """
-        Rapport général synthétique des dettes clients.
+        Rapport gÃ©nÃ©ral synthÃ©tique des dettes clients.
         Liste tous les clients ayant des dettes (solde_restant > 0) avec leurs totaux.
-        Rapport synthétique sans détails des dettes individuelles.
+        Rapport synthÃ©tique sans dÃ©tails des dettes individuelles.
         
-        Paramètres optionnels:
-        - date_debut: Date de début (format: YYYY-MM-DD) - Si fournie, filtre les dettes créées à partir de cette date
-        - date_fin: Date de fin (format: YYYY-MM-DD) - Optionnel, filtre les dettes créées jusqu'à cette date
+        ParamÃ¨tres optionnels:
+        - date_debut: Date de dÃ©but (format: YYYY-MM-DD) - Si fournie, filtre les dettes crÃ©Ã©es Ã  partir de cette date
+        - date_fin: Date de fin (format: YYYY-MM-DD) - Optionnel, filtre les dettes crÃ©Ã©es jusqu'Ã  cette date
         
         GET /api/rapports/clients-dettes-general/
         GET /api/rapports/clients-dettes-general/?date_debut=2025-01-01
         GET /api/rapports/clients-dettes-general/?date_debut=2025-01-01&date_fin=2025-12-31
 
         Filtre is_special (query) :
-        - absent → uniquement clients spéciaux (is_special=true) ;
-        - is_special=true / false → périmètre explicite ;
-        - is_special=all → tous les clients (spéciaux + standards), toujours scoping entreprise/succursale.
+        - absent â†’ uniquement clients spÃ©ciaux (is_special=true) ;
+        - is_special=true / false â†’ pÃ©rimÃ¨tre explicite ;
+        - is_special=all â†’ tous les clients (spÃ©ciaux + standards), toujours scoping entreprise/succursale.
         """
         user = request.user
         eid, branch_id = self._get_tenant_ids_strict(request)
@@ -890,7 +890,7 @@ class RapportsViewSet(viewsets.ViewSet):
         from stock.models import Client, DetteClient
         from decimal import Decimal
 
-        # Récupération des paramètres de date
+        # RÃ©cupÃ©ration des paramÃ¨tres de date
         date_debut = request.query_params.get('date_debut')
         date_fin = request.query_params.get('date_fin')
         
@@ -916,13 +916,13 @@ class RapportsViewSet(viewsets.ViewSet):
                     'exemple': '2025-12-31'
                 }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Vérifier que date_debut <= date_fin si les deux sont fournies
+        # VÃ©rifier que date_debut <= date_fin si les deux sont fournies
         if date_debut_obj and date_fin_obj and date_debut_obj > date_fin_obj:
             return Response({
-                'error': 'La date_debut doit être antérieure ou égale à la date_fin'
+                'error': 'La date_debut doit Ãªtre antÃ©rieure ou Ã©gale Ã  la date_fin'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Dettes en cours (solde > 0) — annotations DB, pas les @property
+        # Dettes en cours (solde > 0) â€” annotations DB, pas les @property
         branch_filter = branch_id if user.is_agent(request) else None
         dettes_encours_qs = _dettes_encours_qs(
             eid=eid,
@@ -936,7 +936,7 @@ class RapportsViewSet(viewsets.ViewSet):
             id__in=dettes_encours_qs.values('client_id'),
         ).distinct().order_by('-date_enregistrement', 'nom')
 
-        # Totaux globaux sur toute la période / tous les clients filtrés (pas seulement la page)
+        # Totaux globaux sur toute la pÃ©riode / tous les clients filtrÃ©s (pas seulement la page)
         global_agg = dettes_encours_qs.aggregate(
             montant_total=Sum('montant_total'),
             montant_paye=Sum('montant_paye_agg'),
@@ -982,22 +982,22 @@ class RapportsViewSet(viewsets.ViewSet):
                     }
                 })
 
-        titre = _('Rapport général des dettes clients')
+        titre = _('Rapport gÃ©nÃ©ral des dettes clients')
         periode = None
         if date_debut_obj or date_fin_obj:
             if date_debut_obj and date_fin_obj:
-                titre = _('Rapport général des dettes clients (%(debut)s - %(fin)s)') % {
+                titre = _('Rapport gÃ©nÃ©ral des dettes clients (%(debut)s - %(fin)s)') % {
                     'debut': date_debut_obj.strftime('%d/%m/%Y'),
                     'fin': date_fin_obj.strftime('%d/%m/%Y'),
                 }
                 periode = {'date_debut': date_debut, 'date_fin': date_fin}
             elif date_debut_obj:
-                titre = _('Rapport général des dettes clients (à partir du %(date)s)') % {
+                titre = _('Rapport gÃ©nÃ©ral des dettes clients (Ã  partir du %(date)s)') % {
                     'date': date_debut_obj.strftime('%d/%m/%Y'),
                 }
                 periode = {'date_debut': date_debut, 'date_fin': None}
             elif date_fin_obj:
-                titre = _('Rapport général des dettes clients (jusqu\'au %(date)s)') % {
+                titre = _('Rapport gÃ©nÃ©ral des dettes clients (jusqu\'au %(date)s)') % {
                     'date': date_fin_obj.strftime('%d/%m/%Y'),
                 }
                 periode = {'date_debut': None, 'date_fin': date_fin}
@@ -1040,27 +1040,27 @@ class RapportsViewSet(viewsets.ViewSet):
 
     def _build_bon_achat_data(self, request, *, complet: bool = False):
         """
-        Construit les données du bon d'achat (JSON).
+        Construit les donnÃ©es du bon d'achat (JSON).
         - complet=False: pagination JSON active
-        - complet=True: liste intégrale sans pagination
+        - complet=True: liste intÃ©grale sans pagination
         """
         user = request.user
 
-        # Récupération des paramètres
+        # RÃ©cupÃ©ration des paramÃ¨tres
         date_debut = request.query_params.get('date_debut')
         date_fin = request.query_params.get('date_fin')
         article_id = request.query_params.get('article_id')
         entree_id = request.query_params.get('entree_id')
         
-        # Mode 1: entree_id fourni -> filtre direct par entrée, sans dates obligatoires.
-        # Mode 2: pas de entree_id -> filtrage par période (date_debut requis).
+        # Mode 1: entree_id fourni -> filtre direct par entrÃ©e, sans dates obligatoires.
+        # Mode 2: pas de entree_id -> filtrage par pÃ©riode (date_debut requis).
         if entree_id:
             try:
                 entree_id_int = int(str(entree_id).strip())
             except (TypeError, ValueError):
                 return Response(
                     {
-                        'error': 'Le paramètre "entree_id" doit être un entier valide',
+                        'error': 'Le paramÃ¨tre "entree_id" doit Ãªtre un entier valide',
                         'exemple': '/api/rapports/bon-achat/?entree_id=12'
                     },
                     status=status.HTTP_400_BAD_REQUEST
@@ -1070,7 +1070,7 @@ class RapportsViewSet(viewsets.ViewSet):
         else:
             if not date_debut:
                 return Response({
-                    'error': 'Le paramètre "date_debut" est obligatoire (sauf si entree_id est fourni)',
+                    'error': 'Le paramÃ¨tre "date_debut" est obligatoire (sauf si entree_id est fourni)',
                     'exemple': '/api/rapports/bon-achat/?date_debut=2025-11-01'
                 }, status=status.HTTP_400_BAD_REQUEST)
             try:
@@ -1103,7 +1103,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 date_entree__date__lte=date_fin_obj,
             )
         
-        # Filtrage par article si spécifié
+        # Filtrage par article si spÃ©cifiÃ©
         if article_id:
             lignes_entree = lignes_entree.filter(article__article_id=article_id)
         
@@ -1169,7 +1169,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 }
         
         resp = {
-            'titre': _("BON D'ACHAT - APPROVISIONNEMENTS EFFECTUÉS"),
+            'titre': _("BON D'ACHAT - APPROVISIONNEMENTS EFFECTUÃ‰S"),
             'periode': {
                 'date_debut': date_debut,
                 'date_fin': (date_fin or timezone.now().date().strftime('%Y-%m-%d')) if not entree_id else None
@@ -1209,15 +1209,15 @@ class RapportsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='bon-achat')
     def bon_achat(self, request):
         """
-        Bon d'achat - Liste des approvisionnements effectués.
+        Bon d'achat - Liste des approvisionnements effectuÃ©s.
         
-        Liste tous les approvisionnements (entrées) à partir d'une date donnée.
+        Liste tous les approvisionnements (entrÃ©es) Ã  partir d'une date donnÃ©e.
         
-        Paramètres:
-        - entree_id: Filtrer par N° d'entrée spécifique (optionnel, prioritaire)
-        - date_debut: Date de début (obligatoire si entree_id absent, format: YYYY-MM-DD)
+        ParamÃ¨tres:
+        - entree_id: Filtrer par NÂ° d'entrÃ©e spÃ©cifique (optionnel, prioritaire)
+        - date_debut: Date de dÃ©but (obligatoire si entree_id absent, format: YYYY-MM-DD)
         - date_fin: Date de fin (optionnel, format: YYYY-MM-DD)
-        - article_id: Filtrer par article spécifique (optionnel)
+        - article_id: Filtrer par article spÃ©cifique (optionnel)
         
         GET /api/rapports/bon-achat/?entree_id=12
         GET /api/rapports/bon-achat/?date_debut=2025-11-01
@@ -1231,79 +1231,146 @@ class RapportsViewSet(viewsets.ViewSet):
             return data
         return self._report_response(request, 'bon-achat', data)
 
-    def _parse_ventes_dates(self, request):
-        """
-        Période des ventes avec priorités:
-        1) date_jour (prioritaire)
-        2) mois + annee
-        3) date_debut + date_fin
-        """
-        date_jour = (request.query_params.get('date_jour') or '').strip()
-        mois = (request.query_params.get('mois') or '').strip()
-        annee = (request.query_params.get('annee') or '').strip()
-        ds = (request.query_params.get('date_debut') or '').strip()
-        df = (request.query_params.get('date_fin') or '').strip()
+    def _empty_ventes_report(self, message, filtres=None):
+        zero_amount = '0.00000'
+        zero_resume = {
+            'nombre_ventes': 0,
+            'total_clients': 0,
+            'sorties_comptant': 0,
+            'sorties_credit': 0,
+            'total_comptant': zero_amount,
+            'total_credit': zero_amount,
+            'total_general': zero_amount,
+            'total_quantite': '0',
+            'total_benefice': zero_amount,
+            'total_remises': zero_amount,
+            'total_taxes': zero_amount,
+            'total_annulations': zero_amount,
+        }
+        return {
+            'success': False,
+            'message': message,
+            'titre': _("RAPPORT DES VENTES"),
+            'session': None,
+            'periode': None,
+            'ventes': [],
+            'lignes_ventes': [],
+            'details': [],
+            'totaux': dict(zero_resume),
+            'resume_global': dict(zero_resume),
+            'filtres': filtres or {},
+        }
 
-        if date_jour:
-            try:
-                d = date.fromisoformat(date_jour[:10])
-            except ValueError:
-                raise ValidationError({'detail': _('Format date_jour invalide (YYYY-MM-DD).')})
-            return d, d
+    def _resolve_ventes_session(self, request, eid, branch_id):
+        from caisse.constants import CAISSE_DEFAUT_CODE
+        from caisse.models import SessionCaisse
 
-        if mois or annee:
-            if not (mois and annee):
-                raise ValidationError({'detail': _('Les paramètres mois et annee doivent être fournis ensemble.')})
-            try:
-                m = int(mois)
-                y = int(annee)
-            except ValueError:
-                raise ValidationError({'detail': _('mois et annee doivent être numériques.')})
-            if m < 1 or m > 12:
-                raise ValidationError({'detail': _('mois doit être compris entre 1 et 12.')})
-            if y < 1900 or y > 2100:
-                raise ValidationError({'detail': _('annee invalide.')})
-            from calendar import monthrange
-            d0 = date(y, m, 1)
-            d1 = date(y, m, monthrange(y, m)[1])
-            return d0, d1
+        user = request.user
+        session_id_raw = (request.query_params.get('session_id') or '').strip()
+        session_numero = (request.query_params.get('session_numero') or '').strip()
+        session_uuid = (request.query_params.get('session_uuid') or '').strip()
+        agence_id_raw = (
+            request.query_params.get('agence_id')
+            or request.query_params.get('succursale_id')
+            or ''
+        ).strip()
 
-        if not ds or not df:
+        if session_uuid:
             raise ValidationError(
                 {
                     'detail': _(
-                        'Fournissez soit date_jour, soit mois+annee, soit date_debut et date_fin '
-                        '(format YYYY-MM-DD) pour le rapport des ventes.'
+                        "Le parametre session_uuid n'est pas supporte par ce projet. "
+                        'Utilisez session_id ou session_numero.'
                     )
                 }
             )
-        try:
-            d0 = date.fromisoformat(ds[:10])
-            d1 = date.fromisoformat(df[:10])
-        except ValueError:
-            raise ValidationError({'detail': _('Formats date_debut / date_fin invalides (YYYY-MM-DD).')})
-        if d0 > d1:
-            raise ValidationError({'detail': _('date_debut doit être antérieure ou égale à date_fin.')})
-        return d0, d1
+
+        agence_id = None
+        if agence_id_raw:
+            try:
+                agence_id = int(agence_id_raw)
+            except ValueError:
+                raise ValidationError({'detail': _('agence_id / succursale_id doit etre un entier.')})
+
+        qs = SessionCaisse.objects.select_related(
+            'type_caisse', 'devise', 'ouvert_par', 'succursale', 'entreprise'
+        ).filter(
+            entreprise_id=eid,
+            type_caisse__est_defaut=True,
+            type_caisse__code_type=CAISSE_DEFAUT_CODE,
+        )
+
+        if user.is_agent(request) and branch_id is not None:
+            qs = qs.filter(succursale_id=branch_id)
+        elif agence_id is not None:
+            qs = qs.filter(succursale_id=agence_id)
+
+        if session_id_raw:
+            try:
+                session_id = int(session_id_raw)
+            except ValueError:
+                raise ValidationError({'detail': _('session_id doit etre un entier.')})
+            session = qs.filter(pk=session_id).first()
+            if not session:
+                raise ValidationError({'detail': _('Session introuvable pour cette entreprise / agence.')})
+            return session, False
+
+        if session_numero:
+            session = qs.filter(numero=session_numero).first()
+            if not session:
+                raise ValidationError({'detail': _('Session introuvable pour ce numero.')})
+            return session, False
+
+        session = qs.filter(statut='OUVERTE').order_by('-ouvert_le', '-id').first()
+        return session, True
 
     def _build_ventes_report(self, request, *, complet: bool = False):
         """
-        Construit le JSON du rapport des ventes (lignes de sortie : article, qté, PU, référence).
+        Construit le JSON du rapport des ventes par session de caisse.
 
-        Pagination SQL via page / page_size ; totaux sur toute la période en agrégat BDD.
-        complet=True : toutes les lignes, sans clé pagination.
+        - Si session_id / session_numero est fourni : charge cette session, quel que soit son statut.
+        - Sinon : charge automatiquement la session ouverte du contexte courant.
+        - Si aucune session ouverte n'existe : renvoie une reponse vide avec message explicite.
         """
         user = request.user
-        d0, d1 = self._parse_ventes_dates(request)
         client_id = (request.query_params.get('client_id') or '').strip()
         client_nom = (request.query_params.get('client_nom') or '').strip()
         reference = (request.query_params.get('reference') or '').strip()
-        statut_paiement = (request.query_params.get('statut_paiement') or '').strip().upper()
+        statut_paiement = (
+            request.query_params.get('statut_paiement')
+            or request.query_params.get('type_vente')
+            or ''
+        ).strip().upper()
         montant_min_raw = (request.query_params.get('montant_min') or '').strip()
         montant_max_raw = (request.query_params.get('montant_max') or '').strip()
+        session_statut = (request.query_params.get('session_statut') or '').strip().upper()
         eid, branch_id = self._get_tenant_ids_strict(request)
         if not eid:
             raise ValidationError({'detail': _('Contexte entreprise manquant.')})
+
+        filtres = {
+            'session_id': request.query_params.get('session_id') or None,
+            'session_numero': request.query_params.get('session_numero') or None,
+            'session_statut': session_statut or None,
+            'agence_id': request.query_params.get('agence_id') or request.query_params.get('succursale_id') or None,
+            'entreprise_id': eid,
+            'client_id': client_id or None,
+            'client_nom': client_nom or None,
+            'reference': reference or None,
+            'statut_paiement': statut_paiement or None,
+            'montant_min': montant_min_raw or None,
+            'montant_max': montant_max_raw or None,
+        }
+
+        session, auto_selected = self._resolve_ventes_session(request, eid, branch_id)
+        if session is None:
+            return self._empty_ventes_report(
+                _(
+                    'Aucune session en cours. Veuillez selectionner une session pour consulter '
+                    'le rapport des ventes.'
+                ),
+                filtres=filtres,
+            )
 
         montant_min = None
         montant_max = None
@@ -1318,39 +1385,47 @@ class RapportsViewSet(viewsets.ViewSet):
             except Exception:
                 raise ValidationError({'detail': _('montant_max invalide.')})
         if montant_min is not None and montant_max is not None and montant_min > montant_max:
-            raise ValidationError({'detail': _('montant_min doit être inférieur ou égal à montant_max.')})
+            raise ValidationError({'detail': _('montant_min doit etre inferieur ou egal a montant_max.')})
         if statut_paiement and statut_paiement not in ('COMPTANT', 'CREDIT'):
-            raise ValidationError({'detail': _('statut_paiement doit être COMPTANT ou CREDIT.')})
+            raise ValidationError({'detail': _('statut_paiement doit etre COMPTANT ou CREDIT.')})
 
-        base_sortie = {'sortie__entreprise_id': eid}
-        if user.is_agent(request) and branch_id is not None:
-            base_sortie['sortie__succursale_id'] = branch_id
+        session_start = session.ouvert_le
+        session_end = session.cloture_le or timezone.now()
+        if session_end < session_start:
+            session_end = session_start
+
+        sortie_scope = Sortie.objects.filter(
+            entreprise_id=eid,
+            date_creation__gte=session_start,
+            date_creation__lte=session_end,
+        )
+        if session.succursale_id is not None:
+            sortie_scope = sortie_scope.filter(succursale_id=session.succursale_id)
+        elif user.is_agent(request) and branch_id is not None:
+            sortie_scope = sortie_scope.filter(succursale_id=branch_id)
+
+        if client_id:
+            sortie_scope = sortie_scope.filter(client_id=client_id)
+        if client_nom:
+            sortie_scope = sortie_scope.filter(client__nom__icontains=client_nom)
+        if reference:
+            ref_q_scope = Q(motif__icontains=reference)
+            if reference.isdigit():
+                ref_q_scope = ref_q_scope | Q(id=int(reference))
+            ref_up_scope = reference.upper()
+            if ref_up_scope.startswith('FACT-'):
+                fact_part_scope = ref_up_scope.replace('FACT-', '').strip()
+                if fact_part_scope.isdigit():
+                    ref_q_scope = ref_q_scope | Q(id=int(fact_part_scope))
+            sortie_scope = sortie_scope.filter(ref_q_scope)
 
         lignes_qs = (
-            LigneSortie.objects.filter(
-                sortie__date_creation__date__gte=d0,
-                sortie__date_creation__date__lte=d1,
-                **base_sortie,
-            )
+            LigneSortie.objects.filter(sortie_id__in=Subquery(sortie_scope.values('id')))
             .select_related('sortie', 'sortie__client', 'article', 'devise')
             .prefetch_related('lots_utilises__lot_entree')
             .order_by('sortie__date_creation', 'sortie_id', 'id')
         )
 
-        if client_id:
-            lignes_qs = lignes_qs.filter(sortie__client_id=client_id)
-        if client_nom:
-            lignes_qs = lignes_qs.filter(sortie__client__nom__icontains=client_nom)
-        if reference:
-            ref_q = Q(sortie__motif__icontains=reference)
-            if reference.isdigit():
-                ref_q = ref_q | Q(sortie_id=int(reference))
-            ref_up = reference.upper()
-            if ref_up.startswith('FACT-'):
-                fact_part = ref_up.replace('FACT-', '').strip()
-                if fact_part.isdigit():
-                    ref_q = ref_q | Q(sortie_id=int(fact_part))
-            lignes_qs = lignes_qs.filter(ref_q)
         if montant_min is not None or montant_max is not None:
             line_total = ExpressionWrapper(
                 F('quantite') * F('prix_unitaire'),
@@ -1369,42 +1444,28 @@ class RapportsViewSet(viewsets.ViewSet):
             lignes_qs = lignes_qs.annotate(_has_credit=Exists(dettes_non_soldees))
             if statut_paiement == 'CREDIT':
                 lignes_qs = lignes_qs.filter(Q(sortie__statut='EN_CREDIT') | Q(_has_credit=True))
-            else:  # COMPTANT
+            else:
                 lignes_qs = lignes_qs.filter(sortie__statut='PAYEE', _has_credit=False)
 
-        sortie_scope = Sortie.objects.filter(
-            entreprise_id=eid,
-            date_creation__date__gte=d0,
-            date_creation__date__lte=d1,
+        sortie_scope_filtered = sortie_scope.filter(
+            pk__in=Subquery(lignes_qs.values('sortie_id').distinct())
         )
-        if user.is_agent(request) and branch_id is not None:
-            sortie_scope = sortie_scope.filter(succursale_id=branch_id)
-        if client_id:
-            sortie_scope = sortie_scope.filter(client_id=client_id)
-        if client_nom:
-            sortie_scope = sortie_scope.filter(client__nom__icontains=client_nom)
-        if reference:
-            ref_q_scope = Q(motif__icontains=reference)
-            if reference.isdigit():
-                ref_q_scope = ref_q_scope | Q(id=int(reference))
-            sortie_scope = sortie_scope.filter(ref_q_scope)
-        if statut_paiement == 'CREDIT':
-            sortie_scope = sortie_scope.filter(statut='EN_CREDIT')
-        elif statut_paiement == 'COMPTANT':
-            sortie_scope = sortie_scope.filter(statut='PAYEE')
 
-        # Totaux sur la période complète (requêtes agrégées, sans charger toutes les lignes)
+        line_total_expr = ExpressionWrapper(
+            F('quantite') * F('prix_unitaire'),
+            output_field=DecimalField(max_digits=20, decimal_places=5),
+        )
         agg = lignes_qs.aggregate(
             total_qte=Sum('quantite'),
-            total_montant=Sum(
-                ExpressionWrapper(
-                    F('quantite') * F('prix_unitaire'),
-                    output_field=DecimalField(max_digits=20, decimal_places=5),
-                )
-            ),
+            total_montant=Sum(line_total_expr),
+            total_comptant=Sum(line_total_expr, filter=Q(sortie__statut='PAYEE')),
+            total_credit=Sum(line_total_expr, filter=Q(sortie__statut='EN_CREDIT')),
         )
         tot_qte = Decimal(str(agg['total_qte'] or 0))
         tot_m_vente = (agg['total_montant'] or Decimal('0')).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        total_comptant = (agg['total_comptant'] or Decimal('0')).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        total_credit = (agg['total_credit'] or Decimal('0')).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+
         total_benefice = Decimal('0.00')
         for ls in lignes_qs:
             if ls.lots_utilises.exists():
@@ -1422,10 +1483,11 @@ class RapportsViewSet(viewsets.ViewSet):
                 benef_ligne = Decimal(str(ls.quantite)) * (pu_vente_ls - pu_achat_ls)
             total_benefice += benef_ligne
         total_benefice = total_benefice.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-        total_sorties = sortie_scope.count()
-        total_clients = sortie_scope.exclude(client_id__isnull=True).values('client_id').distinct().count()
-        sorties_credit = sortie_scope.filter(statut='EN_CREDIT').count()
-        sorties_comptant = sortie_scope.filter(statut='PAYEE').count()
+
+        total_sorties = sortie_scope_filtered.count()
+        total_clients = sortie_scope_filtered.exclude(client_id__isnull=True).values('client_id').distinct().count()
+        sorties_credit = sortie_scope_filtered.filter(statut='EN_CREDIT').count()
+        sorties_comptant = sortie_scope_filtered.filter(statut='PAYEE').count()
 
         pagination_meta = None
         if complet:
@@ -1444,17 +1506,14 @@ class RapportsViewSet(viewsets.ViewSet):
                 )
             except (TypeError, ValueError):
                 page_size = StandardResultsSetPagination.page_size
-            page_size = max(
-                1, min(page_size, StandardResultsSetPagination.max_page_size)
-            )
+            page_size = max(1, min(page_size, StandardResultsSetPagination.max_page_size))
 
             count = lignes_qs.count()
             total_pages = max(1, math.ceil(count / page_size)) if count else 1
             if page > total_pages and count:
                 page = total_pages
             start = (page - 1) * page_size
-            page_slice_qs = lignes_qs[start : start + page_size]
-
+            page_slice_qs = lignes_qs[start:start + page_size]
             pagination_meta = {
                 'page': page,
                 'page_size': page_size,
@@ -1462,12 +1521,13 @@ class RapportsViewSet(viewsets.ViewSet):
                 'total_pages': total_pages,
                 'has_next': start + page_size < count,
                 'has_previous': page > 1,
+                'mode': 'lignes_ventes',
             }
 
-        # Une fois le queryset slicé (pagination), Django interdit .distinct() dessus : on matérialise la page.
         page_lines = list(page_slice_qs)
 
         lignes_ventes = []
+        ventes_map = {}
         for ligne in page_lines:
             s = ligne.sortie
             pu_achat = ligne.get_cout_achat_unitaire()
@@ -1478,6 +1538,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 pu_vente = Decimal(str(pu_vente))
             q = ligne.quantite
             qd = Decimal(str(q or 0))
+            total_ligne = (qd * pu_vente).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             if ligne.lots_utilises.exists():
                 benefice_ligne = sum(
                     (Decimal(str(lu.quantite)) * (Decimal(str(lu.prix_vente)) - Decimal(str(lu.prix_achat))))
@@ -1487,65 +1548,114 @@ class RapportsViewSet(viewsets.ViewSet):
                 benefice_ligne = (qd * (pu_vente - pu_achat)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             ref = f"FACT-{int(s.id):06d}"
 
-            lignes_ventes.append(
-                {
+            ligne_data = {
+                'sortie_id': s.id,
+                'ligne_id': ligne.id,
+                'date': s.date_creation.strftime('%Y-%m-%d %H:%M') if s.date_creation else '',
+                'client': s.client.nom if s.client else _('Client anonyme'),
+                'client_id': s.client_id,
+                'statut_paiement': 'CREDIT' if (s.statut == 'EN_CREDIT') else 'COMPTANT',
+                'article': ligne.article.nom_scientifique,
+                'article_id': ligne.article.article_id,
+                'pu_achat': str(pu_achat.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                'pu_vente': str(pu_vente.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
+                'quantite': q,
+                'montant_ligne': str(total_ligne),
+                'benefice': str(benefice_ligne),
+                'reference': ref,
+            }
+            lignes_ventes.append(ligne_data)
+
+            if s.id not in ventes_map:
+                ventes_map[s.id] = {
                     'sortie_id': s.id,
+                    'reference': ref,
                     'date': s.date_creation.strftime('%Y-%m-%d %H:%M') if s.date_creation else '',
                     'client': s.client.nom if s.client else _('Client anonyme'),
+                    'client_id': s.client_id,
                     'statut_paiement': 'CREDIT' if (s.statut == 'EN_CREDIT') else 'COMPTANT',
-                    'article': ligne.article.nom_scientifique,
-                    'pu_achat': str(pu_achat.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
-                    'pu_vente': str(pu_vente),
-                    'quantite': q,
-                    'benefice': str(benefice_ligne),
-                    'reference': ref,
+                    'nombre_lignes': 0,
+                    'total_vente': Decimal('0.00000'),
+                    'total_benefice': Decimal('0.00000'),
+                    'lignes': [],
                 }
-            )
+            ventes_map[s.id]['nombre_lignes'] += 1
+            ventes_map[s.id]['total_vente'] += total_ligne
+            ventes_map[s.id]['total_benefice'] += benefice_ligne
+            ventes_map[s.id]['lignes'].append(ligne_data)
+
+        ventes = []
+        for vente in ventes_map.values():
+            vente['total_vente'] = str(vente['total_vente'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
+            vente['total_benefice'] = str(vente['total_benefice'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
+            ventes.append(vente)
+
+        ventes.sort(key=lambda row: (row['date'], row['sortie_id']))
+
+        session_user_name = ''
+        if session.ouvert_par:
+            session_user_name = session.ouvert_par.get_full_name() or session.ouvert_par.username
 
         out = {
+            'success': True,
+            'message': _(
+                'Session en cours chargee par defaut.'
+            ) if auto_selected else _('Rapport genere pour la session selectionnee.'),
             'titre': _("RAPPORT DES VENTES"),
-            'periode': {'date_debut': str(d0), 'date_fin': str(d1)},
+            'session': {
+                'id': session.pk,
+                'uuid': None,
+                'numero': session.numero,
+                'statut': session.statut,
+                'date_ouverture': session.ouvert_le.isoformat() if session.ouvert_le else None,
+                'date_cloture': session.cloture_le.isoformat() if session.cloture_le else None,
+                'utilisateur': session_user_name,
+                'utilisateur_id': session.ouvert_par_id,
+                'caisse': session.type_caisse.nom or session.type_caisse.libelle,
+                'caisse_id': session.type_caisse_id,
+                'devise_id': session.devise_id,
+                'devise_sigle': session.devise.sigle if session.devise else None,
+                'agence_id': session.succursale_id,
+                'agence_nom': session.succursale.nom if session.succursale else None,
+                'entreprise_id': session.entreprise_id,
+                'selection_automatique': auto_selected,
+            },
+            'periode': {
+                'date_debut': session_start.date().isoformat(),
+                'date_fin': session_end.date().isoformat(),
+                'date_ouverture': session_start.isoformat() if session_start else None,
+                'date_cloture': session_end.isoformat() if session_end else None,
+            },
+            'ventes': ventes,
             'lignes_ventes': lignes_ventes,
             'details': lignes_ventes,
-            'total_quantite': str(tot_qte),
-            'total_montant_vente': str(tot_m_vente),
-            'filtres': {
-                'client_id': client_id or None,
-                'client_nom': client_nom or None,
-                'reference': reference or None,
-                'statut_paiement': statut_paiement or None,
-                'montant_min': str(montant_min) if montant_min is not None else None,
-                'montant_max': str(montant_max) if montant_max is not None else None,
-                'date_jour': (request.query_params.get('date_jour') or None),
-                'mois': (request.query_params.get('mois') or None),
-                'annee': (request.query_params.get('annee') or None),
+            'filtres': filtres,
+            'totaux': {
+                'total_comptant': str(total_comptant),
+                'total_credit': str(total_credit),
+                'total_general': str(tot_m_vente),
+                'total_quantite': str(tot_qte),
+                'total_benefice': str(total_benefice),
+                'total_remises': '0.00000',
+                'total_taxes': '0.00000',
+                'total_annulations': '0.00000',
             },
             'resume_global': {
-                'total_sorties': total_sorties,
+                'nombre_ventes': total_sorties,
                 'total_clients': total_clients,
                 'sorties_comptant': sorties_comptant,
                 'sorties_credit': sorties_credit,
+                'total_comptant': str(total_comptant),
+                'total_credit': str(total_credit),
+                'total_general': str(tot_m_vente),
                 'total_quantite': str(tot_qte),
-                'total_montant_vente': str(tot_m_vente),
                 'total_benefice': str(total_benefice),
+                'total_remises': '0.00000',
+                'total_taxes': '0.00000',
+                'total_annulations': '0.00000',
             },
         }
-        # Titre dynamique selon filtres actifs
-        titre_suffix = []
-        if request.query_params.get('date_jour'):
-            titre_suffix.append(_("Journalier"))
-        elif request.query_params.get('mois') and request.query_params.get('annee'):
-            titre_suffix.append(_("Mensuel"))
-        else:
-            titre_suffix.append(_("Période"))
-        if client_id or client_nom:
-            titre_suffix.append(_("Client"))
-        if statut_paiement:
-            titre_suffix.append(statut_paiement)
-        if montant_min is not None or montant_max is not None:
-            titre_suffix.append(_("Montant"))
-        if titre_suffix:
-            out['titre'] = f"{out['titre']} ({' | '.join(titre_suffix)})"
+        out['titre'] = f"{out['titre']} ({session.numero})"
         if pagination_meta is not None:
             out['pagination'] = pagination_meta
         return out
@@ -1553,28 +1663,30 @@ class RapportsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='ventes')
     def ventes(self, request):
         """
-        Rapport des ventes sur une période stricte.
+        Rapport des ventes par session de caisse.
 
-        Paramètres obligatoires:
-        - date_jour (YYYY-MM-DD), ou mois+annee, ou date_debut+date_fin.
+        Parametres principaux:
+        - session_id : identifiant de session (tout statut accepte)
+        - session_numero : numero de session (tout statut accepte)
+
+        Comportement par defaut:
+        - si aucun parametre de session n'est fourni, le backend charge la session ouverte du contexte courant
+        - si aucune session ouverte n'existe, l'API retourne une reponse vide avec message explicite
 
         Filtres optionnels:
         - client_id, client_nom, reference
         - montant_min, montant_max
         - statut_paiement = COMPTANT | CREDIT
+        - agence_id / succursale_id (utile surtout pour les admins)
 
-        Pagination (requêtes BDD directes : LIMIT/OFFSET + agrégats SQL pour les totaux période) :
-        - page (défaut 1), page_size (défaut 25, max 200).
+        Pagination:
+        - page (defaut 1), page_size (defaut 25, max 200)
+        - complet=true pour recuperer toutes les lignes
 
-        Les champs total_quantite et total_montant_vente portent sur **toute la période**, pas seulement la page.
-
-        Contenu:
-        - Lignes : article, quantité, PU achat (FIFO), PU vente, référence (sortie + pièce caisse si présente).
-
-        GET /api/rapports/ventes/?date_jour=2026-01-31
-        GET /api/rapports/ventes/?mois=1&annee=2026
-        GET /api/rapports/ventes/?date_debut=2026-01-01&date_fin=2026-01-31&page=1&page_size=25
-        GET /api/rapports/ventes/?date_debut=2026-01-01&date_fin=2026-01-31&client_id=CLI0001&statut_paiement=CREDIT
+        Exemples:
+        GET /api/rapports/ventes/
+        GET /api/rapports/ventes/?session_id=12&page=1&page_size=25
+        GET /api/rapports/ventes/?session_numero=SESS-2026-00012&statut_paiement=CREDIT
         """
         try:
             complet = request.query_params.get('complet', '').lower() in ('true', '1', 'yes', 'oui')
@@ -1584,10 +1696,10 @@ class RapportsViewSet(viewsets.ViewSet):
             return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
 
     def _build_fiche_stock_data(self, request, pk=None):
-        """Construit les données JSON de la fiche de stock avec calcul FIFO."""
+        """Construit les donnÃ©es JSON de la fiche de stock avec calcul FIFO."""
         user = request.user
         if not user.is_authenticated:
-            raise PermissionDenied(_("Utilisateur non authentifié."))
+            raise PermissionDenied(_("Utilisateur non authentifiÃ©."))
         eid, branch_id = self._get_tenant_ids_strict(request)
         article_qs = Article.objects.filter(pk=pk)
         if eid:
@@ -1596,7 +1708,7 @@ class RapportsViewSet(viewsets.ViewSet):
             article_qs = article_qs.filter(succursale_id=branch_id)
         article = article_qs.first()
         if not article:
-            raise NotFound(_("Article non trouvé ou accès refusé."))
+            raise NotFound(_("Article non trouvÃ© ou accÃ¨s refusÃ©."))
 
         date_min = request.query_params.get('date_min')
         date_max = request.query_params.get('date_max')
@@ -1604,7 +1716,7 @@ class RapportsViewSet(viewsets.ViewSet):
         stock_row = Stock.objects.filter(article=article).first()
         type_article = getattr(getattr(article, 'sous_type_article', None), 'type_article', None)
 
-        # Récupération des mouvements
+        # RÃ©cupÃ©ration des mouvements
         entrees_qs = LigneEntree.objects.filter(article=article)
         sorties_qs = LigneSortie.objects.filter(article=article)
         if user.is_agent(request) and branch_id is not None:
@@ -1626,7 +1738,7 @@ class RapportsViewSet(viewsets.ViewSet):
         for e in entrees:
             mouvements.append({
                 'datetime': e['date_entree'],
-                'designation': e['entree__libele'] or _("Entrée"),
+                'designation': e['entree__libele'] or _("EntrÃ©e"),
                 'q_in': e['quantite'],
                 'pu_in': e['prix_unitaire'] or Decimal('0'),
                 'q_out': 0
@@ -1640,7 +1752,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 'q_out': s['quantite']
             })
         
-        # Tri chronologique (entrées avant sorties pour même datetime)
+        # Tri chronologique (entrÃ©es avant sorties pour mÃªme datetime)
         mouvements.sort(key=lambda m: (m['datetime'], 0 if m['q_in']>0 else 1))
 
         # Calcul FIFO
@@ -1657,7 +1769,7 @@ class RapportsViewSet(viewsets.ViewSet):
             pt_out = Decimal('0')
 
             if q_in:
-                # Entrée
+                # EntrÃ©e
                 fifo_layers.append([q_in, pu_in])
                 stock_qty += q_in
                 stock_val += pt_in
@@ -1675,7 +1787,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 stock_qty -= q_out
                 stock_val -= pt_out
 
-            # PU sortie = coût moyen sorti (PT / Qté)
+            # PU sortie = coÃ»t moyen sorti (PT / QtÃ©)
             pu_out = (pt_out / q_out) if q_out else Decimal('0')
             stock_pu = (stock_val / stock_qty) if stock_qty else Decimal('0')
             rows.append(
@@ -1732,7 +1844,7 @@ class RapportsViewSet(viewsets.ViewSet):
 
     @action(detail=True, methods=['get'], url_path='fiche-stock/json')
     def fiche_stock_article_json(self, request, pk=None):
-        """Alias JSON de fiche-stock (rétrocompatibilité)."""
+        """Alias JSON de fiche-stock (rÃ©trocompatibilitÃ©)."""
         return self.fiche_stock_article(request, pk=pk)
 
     @action(detail=True, methods=['get'], url_path='fiche-stock')
