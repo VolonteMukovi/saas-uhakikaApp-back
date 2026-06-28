@@ -12,6 +12,7 @@ from rest_framework import status
 from stock.models import Article, Devise, SousTypeArticle, Unite, Stock, Client, Succursale, Entreprise
 from stock.serializers import EntreeSerializer, ArticleSerializer
 from stock.services.article_names import normalize_nom_scientifique
+from stock.services.currency import build_conversion_snapshot
 import json
 
 # Colonne optionnelle type export inventaire / listing (ex. FOAG0001) — non utilisée à la création.
@@ -412,9 +413,7 @@ def import_approvisionnement(request):
     """Importe un fichier Excel d'approvisionnement et crée une Entree avec ses lignes."""
     from datetime import datetime
     from decimal import Decimal
-    from django.db.models import Sum
     from users.models import UserBranch
-    from stock.models import MouvementCaisse
     from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
 
     file = request.FILES.get('file')
@@ -620,8 +619,7 @@ def import_approvisionnement(request):
                 devise_id_val = devise_principale.id if devise_principale else None
         ligne['devise_id'] = devise_id_val
 
-    # Vérification du solde de caisse par devise avant création
-    erreurs_solde = []
+    # Calcul des totaux par devise pour g?n?rer les mouvements de caisse d'approvisionnement
     totaux_par_devise = {}
     for ligne in lignes:
         devise_id = ligne.get('devise_id')
@@ -636,22 +634,6 @@ def import_approvisionnement(request):
             totaux_par_devise[devise_id] = Decimal('0.00')
         totaux_par_devise[devise_id] += montant
 
-    for devise_id, total in totaux_par_devise.items():
-        devise_obj = Devise.objects.filter(pk=devise_id).first()
-        if not devise_obj:
-            continue
-        qs = MouvementCaisse.objects.filter(devise=devise_obj, entreprise_id=final_ent)
-        entrees = qs.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        sorties = qs.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        solde = entrees - sorties
-        if total > solde:
-            erreurs_solde.append(f"Solde insuffisant en {devise_obj.nom} ({devise_obj.sigle}): Requis {total} {devise_obj.symbole}, Disponible {solde} {devise_obj.symbole}. Veuillez d'abord effectuer une entrée en caisse dans cette devise.")
-
-    if erreurs_solde:
-        return JsonResponse({
-            'soldes_insuffisants': erreurs_solde,
-            'message': 'Approvisionnement impossible: soldes insuffisants dans certaines devises.'
-        }, status=400)
 
     data = {
         'libele': request.POST.get('libele', 'Import Excel'),
@@ -1297,11 +1279,19 @@ def import_sortie(request):
             if devise_dette is None:
                 devise_dette = Devise.objects.filter(entreprise_id=sortie.entreprise_id, est_principal=True).first()
             client_obj = Client.objects.get(id=client_id_global)
+            snapshot_dette = build_conversion_snapshot(
+                entreprise_id=sortie.entreprise_id,
+                amount=total_dette.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                devise_source=devise_dette,
+            )
             DetteClient.objects.create(
                 sortie=sortie,
                 client=client_obj,
                 montant_total=total_dette.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                 devise=devise_dette,
+                devise_reference=snapshot_dette['devise_reference'],
+                taux_change=snapshot_dette['taux_change'],
+                montant_reference=snapshot_dette['montant_reference'],
                 entreprise_id=sortie.entreprise_id,
                 succursale_id=sortie.succursale_id,
             )

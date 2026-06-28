@@ -3,6 +3,7 @@ from .models import (
     Entreprise,
     Succursale,
     Devise,
+    TauxChange,
     TypeArticle,
     SousTypeArticle,
     Unite,
@@ -27,6 +28,7 @@ from order.services.lot_closure import entree_is_from_lot_closure
 
 from stock.services.article_names import article_duplicate_exists, normalize_nom_scientifique
 from stock.services.tenant_context import get_tenant_ids
+from stock.services.currency import build_conversion_snapshot, get_principal_devise
 
 
 class LocalizedDecimalField(serializers.DecimalField):
@@ -42,6 +44,48 @@ class DeviseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Devise
         fields = '__all__'
+
+
+class TauxChangeSerializer(serializers.ModelSerializer):
+    devise_source = DeviseSerializer(read_only=True)
+    devise_source_id = serializers.PrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise_source', write_only=True)
+    devise_cible = DeviseSerializer(read_only=True)
+    devise_cible_id = serializers.PrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise_cible', write_only=True)
+
+    class Meta:
+        model = TauxChange
+        fields = [
+            'id', 'devise_source', 'devise_source_id', 'devise_cible', 'devise_cible_id',
+            'taux', 'date_application', 'is_active', 'cree_par', 'entreprise', 'created_at',
+        ]
+        read_only_fields = ['cree_par', 'entreprise', 'created_at']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        req = self.context.get('request')
+        if req and getattr(req.user, 'is_authenticated', False):
+            eid = getattr(req, 'tenant_id', None) or (
+                req.user.get_entreprise_id(req) if hasattr(req.user, 'get_entreprise_id') else None
+            )
+            if eid:
+                devise_qs = Devise.objects.filter(entreprise_id=eid)
+                self.fields['devise_source_id'].queryset = devise_qs
+                self.fields['devise_cible_id'].queryset = devise_qs
+
+    def validate(self, attrs):
+        source = attrs.get('devise_source') or getattr(self.instance, 'devise_source', None)
+        cible = attrs.get('devise_cible') or getattr(self.instance, 'devise_cible', None)
+        if source and cible and source.pk == cible.pk:
+            raise serializers.ValidationError({'devise_cible_id': _('La devise cible doit etre differente de la devise source.')})
+        if source and cible and source.entreprise_id != cible.entreprise_id:
+            raise serializers.ValidationError(_('Les deux devises doivent appartenir a la meme entreprise.'))
+        entreprise = getattr(self.instance, 'entreprise', None) or attrs.get('entreprise')
+        if entreprise is not None:
+            if source and source.entreprise_id != entreprise.id:
+                raise serializers.ValidationError({'devise_source_id': _('La devise source doit appartenir a l entreprise courante.')})
+            if cible and cible.entreprise_id != entreprise.id:
+                raise serializers.ValidationError({'devise_cible_id': _('La devise cible doit appartenir a l entreprise courante.')})
+        return attrs
 
 class TypeArticleSerializer(serializers.ModelSerializer):
     class Meta:
@@ -211,6 +255,7 @@ class LigneSortieSerializer(serializers.ModelSerializer):
         required=True
     )
     devise = DeviseSerializer(read_only=True)
+    devise_reference = DeviseSerializer(read_only=True)
     devise_id = serializers.PrimaryKeyRelatedField(
         queryset=Devise.objects.all(), 
         source='devise', 
@@ -227,7 +272,7 @@ class LigneSortieSerializer(serializers.ModelSerializer):
         model = LigneSortie
         fields = [
             'id', 'article', 'article_id', 'quantite', 'prix_unitaire',
-            'date_sortie', 'sortie', 'devise', 'devise_id', 
+            'date_sortie', 'sortie', 'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference',
             'lots_utilises', 'benefices_lots'
         ]
         read_only_fields = ['date_sortie', 'sortie']
@@ -534,12 +579,22 @@ class SortieSerializer(serializers.ModelSerializer):
                 )
 
             # Création ligne avec devise
+            montant_ligne = (Decimal(str(ligne.get('prix_unitaire') or 0)) * Decimal(str(quantite))).quantize(Decimal('0.00001'))
+            snapshot_ligne = build_conversion_snapshot(
+                entreprise_id=None,
+                amount=montant_ligne,
+                devise_source=devise_obj,
+                devise_reference=get_principal_devise(None),
+            )
             LigneSortie.objects.create(
                 sortie=sortie,
                 article=article_obj,
                 quantite=quantite,
                 prix_unitaire=ligne.get('prix_unitaire'),
-                devise=devise_obj
+                devise=devise_obj,
+                devise_reference=snapshot_ligne['devise_reference'],
+                taux_change=snapshot_ligne['taux_change'],
+                montant_reference=snapshot_ligne['montant_reference'],
             )
 
 
@@ -578,12 +633,22 @@ class SortieSerializer(serializers.ModelSerializer):
                     f"Stock insuffisant pour l’article {article_obj.nom} (Disponible: {stock.Qte}, Demandé: {quantite})"
                 )
 
+            montant_ligne = (Decimal(str(ligne.get('prix_unitaire') or 0)) * Decimal(str(quantite))).quantize(Decimal('0.00001'))
+            snapshot_ligne = build_conversion_snapshot(
+                entreprise_id=None,
+                amount=montant_ligne,
+                devise_source=devise_obj,
+                devise_reference=get_principal_devise(None),
+            )
             LigneSortie.objects.create(
                 sortie=instance,
                 article=article_obj,
                 quantite=quantite,
                 prix_unitaire=ligne.get('prix_unitaire'),
-                devise=devise_obj
+                devise=devise_obj,
+                devise_reference=snapshot_ligne['devise_reference'],
+                taux_change=snapshot_ligne['taux_change'],
+                montant_reference=snapshot_ligne['montant_reference'],
             )
             stock.Qte = models.F('Qte') - quantite
             stock.save()
@@ -711,6 +776,7 @@ class LigneEntreeSerializer(serializers.ModelSerializer):
         required=True
     )
     devise = DeviseSerializer(read_only=True)
+    devise_reference = DeviseSerializer(read_only=True)
     quantite = LocalizedDecimalField(max_digits=12, decimal_places=5)
     seuil_alerte = LocalizedDecimalField(max_digits=12, decimal_places=5)
     devise_id = serializers.PrimaryKeyRelatedField(
@@ -726,7 +792,7 @@ class LigneEntreeSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'article', 'article_id', 'quantite', 'quantite_restante', 
             'prix_unitaire', 'prix_vente', 'date_entree', 'date_expiration', 
-            'entree', 'devise', 'devise_id', 'seuil_alerte'
+            'entree', 'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference', 'seuil_alerte'
         ]
         read_only_fields = ['date_entree', 'entree', 'quantite_restante']
 
@@ -841,6 +907,13 @@ class EntreeSerializer(serializers.ModelSerializer):
                     devise_obj = devise_principale
             else:
                 devise_obj = devise_principale
+            montant_ligne = (Decimal(str(ligne.get('prix_unitaire') or 0)) * Decimal(str(quantite))).quantize(Decimal('0.00001'))
+            snapshot_ligne = build_conversion_snapshot(
+                entreprise_id=entreprise_id,
+                amount=montant_ligne,
+                devise_source=devise_obj,
+                devise_reference=devise_principale,
+            )
             LigneEntree.objects.create(
                 entree=entree,
                 article=article_obj,
@@ -850,6 +923,9 @@ class EntreeSerializer(serializers.ModelSerializer):
                 prix_vente=ligne.get('prix_vente'),  # Prix de vente obligatoire
                 date_expiration=ligne.get('date_expiration'),
                 devise=devise_obj,
+                devise_reference=snapshot_ligne['devise_reference'],
+                taux_change=snapshot_ligne['taux_change'],
+                montant_reference=snapshot_ligne['montant_reference'],
                 seuil_alerte=ligne.get('seuil_alerte', 0)
             )
             Stock.objects.filter(article=article_obj).update(
@@ -882,6 +958,13 @@ class EntreeSerializer(serializers.ModelSerializer):
             quantite = ligne['quantite']
             devise_id = ligne.get('devise')
             devise_obj = Devise.objects.get(pk=devise_id) if devise_id else None
+            montant_ligne = (Decimal(str(ligne.get('prix_unitaire') or 0)) * Decimal(str(quantite))).quantize(Decimal('0.00001'))
+            snapshot_ligne = build_conversion_snapshot(
+                entreprise_id=getattr(instance, 'entreprise_id', None),
+                amount=montant_ligne,
+                devise_source=devise_obj,
+                devise_reference=get_principal_devise(getattr(instance, 'entreprise_id', None)),
+            )
             LigneEntree.objects.create(
                 entree=instance,
                 article=article_obj,
@@ -891,6 +974,9 @@ class EntreeSerializer(serializers.ModelSerializer):
                 prix_vente=ligne.get('prix_vente'),  # Prix de vente obligatoire
                 date_expiration=ligne.get('date_expiration'),
                 devise=devise_obj,
+                devise_reference=snapshot_ligne['devise_reference'],
+                taux_change=snapshot_ligne['taux_change'],
+                montant_reference=snapshot_ligne['montant_reference'],
                 seuil_alerte=ligne.get('seuil_alerte', 0)
             )
             Stock.objects.filter(article=article_obj).update(
@@ -906,6 +992,7 @@ class DetteClientSerializer(serializers.ModelSerializer):
     client = ClientSerializer(read_only=True)
     client_id = serializers.SlugRelatedField(slug_field='id', queryset=Client.objects.all(), source='client', write_only=True)
     devise = DeviseSerializer(read_only=True)
+    devise_reference = DeviseSerializer(read_only=True)
     devise_id = serializers.PrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise', write_only=True, required=False, allow_null=True)
     sortie = serializers.PrimaryKeyRelatedField(read_only=True)
     sortie_id = serializers.PrimaryKeyRelatedField(queryset=Sortie.objects.all(), source='sortie', write_only=True)
@@ -916,7 +1003,7 @@ class DetteClientSerializer(serializers.ModelSerializer):
         model = DetteClient
         fields = [
             'id', 'client', 'client_id', 'sortie', 'sortie_id', 'montant_total', 'montant_paye', 'solde_restant',
-            'devise', 'devise_id', 'date_creation', 'date_echeance', 'statut', 'commentaire', 'paiements'
+            'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference', 'date_creation', 'date_echeance', 'statut', 'commentaire', 'paiements'
         ]
         read_only_fields = ['montant_paye', 'solde_restant', 'statut', 'date_creation']
 

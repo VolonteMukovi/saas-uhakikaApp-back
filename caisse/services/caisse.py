@@ -16,6 +16,7 @@ from caisse.models import MouvementCaisse, TypeCaisse
 from caisse.services.caisse_defaut import CaisseError, valider_caisse_pour_operation
 from caisse.services.session_caisse import SessionCaisseError, get_session_ouverte_for_caisse
 from stock.models import DetteClient
+from stock.services.currency import assert_caisse_devise_compatible, build_conversion_snapshot
 
 
 def _merge_details_into_motif(details: List[dict], entreprise_id: int, motif_base: str) -> str:
@@ -71,6 +72,10 @@ def creer_mouvement_caisse(
     type_caisse_id: Optional[int] = None,
     categorie: str = "AUTRE",
     skip_session_check: bool = False,
+    devise_reference=None,
+    taux_change=None,
+    montant_reference=None,
+    date_operation=None,
 ) -> MouvementCaisse:
     """
     Crée un ``MouvementCaisse`` unique (pas de lignes ``DetailMouvementCaisse``).
@@ -130,6 +135,9 @@ def creer_mouvement_caisse(
 
     devise_id = devise.pk if devise else None
 
+    if type_caisse is not None and devise is not None:
+        assert_caisse_devise_compatible(type_caisse, devise)
+
     if not skip_session_check and not montant_zero:
         if not devise_id:
             raise CaisseError("Devise requise pour un mouvement de caisse.")
@@ -164,9 +172,25 @@ def creer_mouvement_caisse(
     elif type_mouvement == "SORTIE" and categorie == "AUTRE":
         categorie = "SORTIE_MANUELLE"
 
+    if devise is not None and (devise_reference is None or montant_reference is None):
+        snapshot = build_conversion_snapshot(
+            entreprise_id=entreprise_id,
+            amount=montant,
+            devise_source=devise,
+            devise_reference=devise_reference,
+            date_operation=date_operation,
+            explicit_rate=taux_change,
+        )
+        devise_reference = snapshot['devise_reference']
+        taux_change = snapshot['taux_change']
+        montant_reference = snapshot['montant_reference']
+
     mc = MouvementCaisse(
         montant=montant,
         devise=devise,
+        devise_reference=devise_reference,
+        taux_change=taux_change,
+        montant_reference=montant_reference if montant_reference is not None else Decimal('0'),
         type=type_mouvement,
         motif=motif,
         moyen=moyen,

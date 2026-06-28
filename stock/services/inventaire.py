@@ -25,6 +25,7 @@ from stock.models import (
     Sortie,
     Stock,
 )
+from stock.services.currency import build_conversion_snapshot
 
 
 def _dec(value, default='0') -> Decimal:
@@ -227,6 +228,8 @@ def _creer_sortie_ajustement(
         client=None,
         entreprise_id=session.entreprise_id,
         succursale_id=session.succursale_id,
+        devise=devise,
+        devise_reference=devise,
     )
 
     for ligne in lignes_neg:
@@ -234,12 +237,20 @@ def _creer_sortie_ajustement(
         article = ligne.article
         lots_utilises = _consommer_fifo(article, qte, devise)
 
+        snapshot_ligne = build_conversion_snapshot(
+            entreprise_id=sortie.entreprise_id,
+            amount=Decimal('0'),
+            devise_source=devise,
+        )
         ligne_sortie = LigneSortie.objects.create(
             sortie=sortie,
             article=article,
             quantite=qte,
             prix_unitaire=Decimal('0'),
             devise=devise,
+            devise_reference=snapshot_ligne['devise_reference'],
+            taux_change=snapshot_ligne['taux_change'],
+            montant_reference=snapshot_ligne['montant_reference'],
         )
 
         for lot_data in lots_utilises:
@@ -305,6 +316,12 @@ def _creer_entree_ajustement(
         )
         seuil = stock_obj.seuilAlert if not created else Decimal('0')
 
+        montant_ligne = (pu * qte).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        snapshot_ligne = build_conversion_snapshot(
+            entreprise_id=entree.entreprise_id,
+            amount=montant_ligne,
+            devise_source=devise,
+        )
         LigneEntree.objects.create(
             entree=entree,
             article=article,
@@ -313,6 +330,9 @@ def _creer_entree_ajustement(
             prix_unitaire=pu,
             prix_vente=pv,
             devise=devise,
+            devise_reference=snapshot_ligne['devise_reference'],
+            taux_change=snapshot_ligne['taux_change'],
+            montant_reference=snapshot_ligne['montant_reference'],
             seuil_alerte=seuil,
         )
         stock_obj.Qte += qte

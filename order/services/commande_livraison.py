@@ -24,6 +24,7 @@ from stock.models import (
 )
 from caisse.services.caisse import creer_mouvement_caisse
 from caisse.services.caisse_defaut import MSG_CAISSE_REQUISE
+from stock.services.currency import build_conversion_snapshot
 
 
 @transaction.atomic
@@ -84,6 +85,8 @@ def apply_sortie_on_commande_livree(commande: Commande, *, type_caisse_id: int |
         client=commande.client,
         entreprise_id=tenant_id,
         succursale_id=branch_id,
+        devise=default_dev,
+        devise_reference=default_dev,
     )
 
     totaux_par_devise: dict[str, dict] = {}
@@ -165,12 +168,21 @@ def apply_sortie_on_commande_livree(commande: Commande, *, type_caisse_id: int |
         )
         prix_unitaire_final = prix_vente_moyen_lots
 
+        montant_ligne = (prix_unitaire_final * Decimal(str(qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        snapshot_ligne = build_conversion_snapshot(
+            entreprise_id=sortie.entreprise_id,
+            amount=montant_ligne,
+            devise_source=devise_obj,
+        )
         ligne_sortie = LigneSortie.objects.create(
             sortie=sortie,
             article=article_obj,
             quantite=qte,
             prix_unitaire=prix_unitaire_final,
             devise=devise_obj,
+            devise_reference=snapshot_ligne['devise_reference'],
+            taux_change=snapshot_ligne['taux_change'],
+            montant_reference=snapshot_ligne['montant_reference'],
         )
 
         for lot_data in lots_utilises_data:
@@ -197,7 +209,7 @@ def apply_sortie_on_commande_livree(commande: Commande, *, type_caisse_id: int |
                 benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
             )
 
-        montant_ligne = prix_unitaire_final * Decimal(str(qte))
+        montant_ligne = montant_ligne
         devise_key = devise_obj.sigle if devise_obj else "DEFAULT"
         if devise_key not in totaux_par_devise:
             totaux_par_devise[devise_key] = {"devise_obj": devise_obj, "total": Decimal("0.00")}
@@ -210,6 +222,14 @@ def apply_sortie_on_commande_livree(commande: Commande, *, type_caisse_id: int |
         stock_obj.Qte -= qte
         stock_obj.save(update_fields=["Qte"])
 
+    if totaux_par_devise:
+        sortie.devise = (
+            next(iter(totaux_par_devise.values()))['devise_obj']
+            if len(totaux_par_devise) == 1
+            else default_dev
+        ) or default_dev
+        sortie.save(update_fields=['devise'])
+
     for devise_key, devise_data in totaux_par_devise.items():
         devise_obj = devise_data["devise_obj"]
         total_devise = devise_data["total"]
@@ -218,9 +238,15 @@ def apply_sortie_on_commande_livree(commande: Commande, *, type_caisse_id: int |
                 raise ValidationError({'type_caisse_id': str(MSG_CAISSE_REQUISE)})
             ref_cmd = (commande.reference or "").strip() or str(commande.pk)
             piece = f"LIV-CMD-{ref_cmd}-{devise_key}"[:100]
+            devise_mouvement = devise_obj or default_dev
+            snapshot_mouvement = build_conversion_snapshot(
+                entreprise_id=sortie.entreprise_id,
+                amount=total_devise.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                devise_source=devise_mouvement,
+            )
             creer_mouvement_caisse(
                 montant=total_devise.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
-                devise=devise_obj or default_dev,
+                devise=devise_mouvement,
                 type_mouvement="ENTREE",
                 entreprise_id=sortie.entreprise_id,
                 succursale_id=sortie.succursale_id,
@@ -229,6 +255,9 @@ def apply_sortie_on_commande_livree(commande: Commande, *, type_caisse_id: int |
                 reference_piece=piece,
                 motif="",
                 type_caisse_id=type_caisse_id,
+                devise_reference=snapshot_mouvement['devise_reference'],
+                taux_change=snapshot_mouvement['taux_change'],
+                montant_reference=snapshot_mouvement['montant_reference'],
             )
 
     commande.sortie_livraison = sortie

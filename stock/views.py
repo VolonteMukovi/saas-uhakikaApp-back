@@ -11,6 +11,7 @@ from .models import (
     Entreprise,
     Succursale,
     Devise,
+    TauxChange,
     TypeArticle,
     SousTypeArticle,
     Unite,
@@ -31,6 +32,12 @@ from caisse.services.caisse import creer_mouvement_caisse, mouvement_moyen_affic
 from caisse.services.caisse_defaut import MSG_CAISSE_REQUISE
 from caisse.services.operation_helpers import extract_type_caisse_id
 from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
+from stock.services.currency import (
+    CurrencyError,
+    build_conversion_snapshot,
+    get_exchange_rate,
+    get_principal_devise as get_principal_devise_for_entreprise,
+)
 from django.db import transaction, models
 from django.db.models import Prefetch, Q, Sum
 from django.contrib.contenttypes.models import ContentType
@@ -175,19 +182,19 @@ def _article_display_name(article):
     return getattr(article, 'article_id', str(article))
 
 
-def _get_principal_devise():
+def _get_principal_devise(entreprise_id=None):
+    if entreprise_id:
+        return get_principal_devise_for_entreprise(entreprise_id)
     return Devise.objects.filter(est_principal=True).first()
 
 
-def _get_latest_rate(source_dev: Devise, target_dev: Devise):
-    """Return Decimal rate to convert amount from source_dev to target_dev or None if not found.
-   
-    """
+def _get_latest_rate(source_dev: Devise, target_dev: Devise, entreprise_id=None):
     if not source_dev or not target_dev:
         return None
-    if source_dev.id == target_dev.id:
-        return Decimal('1')
-
+    try:
+        return get_exchange_rate(source_dev, target_dev, entreprise_id=entreprise_id)
+    except CurrencyError:
+        return None
 
 
 def _convert_amount(amount: Decimal, source_dev: Devise, target_dev: Devise, entreprise):
@@ -603,7 +610,8 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 statut=serializer.validated_data.get('statut', 'PAYEE'),
                 client=client,
                 entreprise_id=tenant_id,
-                succursale_id=branch_id
+                succursale_id=branch_id,
+                devise_reference=default_dev,
             )
             total = Decimal('0.00')
             devise_mouvement = None
@@ -715,13 +723,23 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 prix_unitaire_final = prix_unitaire_encaisse if prix_unitaire_encaisse is not None else prix_vente_moyen_lots
                 prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 
-                # CrÃ©er la ligne de sortie avec le prix rÃ©ellement encaissÃ©
+
+            # CrÃ©er la ligne de sortie avec le prix rÃ©ellement encaissÃ©
+                montant_ligne = (prix_unitaire_final * Decimal(str(qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                snapshot_ligne = build_conversion_snapshot(
+                    entreprise_id=sortie.entreprise_id,
+                    amount=montant_ligne,
+                    devise_source=devise_obj,
+                )
                 ligne_sortie = LigneSortie.objects.create(
                     sortie=sortie,
                     article=article_obj,
                     quantite=qte,
-                    prix_unitaire=prix_unitaire_final,  # Prix rÃ©ellement encaissÃ© (peut diffÃ©rer du prix du lot)
-                    devise=devise_obj
+                    prix_unitaire=prix_unitaire_final,
+                    devise=devise_obj,
+                    devise_reference=snapshot_ligne['devise_reference'],
+                    taux_change=snapshot_ligne['taux_change'],
+                    montant_reference=snapshot_ligne['montant_reference'],
                 )
                 
                 # CrÃ©er les traÃ§abilitÃ©s et bÃ©nÃ©fices
@@ -756,7 +774,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     )
                 
                 # Calcul du montant pour cette ligne (prix rÃ©ellement encaissÃ©)
-                montant_ligne = prix_unitaire_final * Decimal(str(qte))
+                montant_ligne = montant_ligne
                 
                 # Accumulation par devise
                 devise_key = devise_obj.sigle if devise_obj else 'DEFAULT'
@@ -794,9 +812,15 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 montant_caisse = Decimal('0.00') if sortie.statut == 'EN_CREDIT' else total_devise
                 
                 if total_devise > 0:
+                    devise_mouvement = devise_obj or default_dev
+                    snapshot_mouvement = build_conversion_snapshot(
+                        entreprise_id=sortie.entreprise_id,
+                        amount=montant_caisse.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                        devise_source=devise_mouvement,
+                    )
                     creer_mouvement_caisse(
                         montant=montant_caisse.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
-                        devise=devise_obj or default_dev,
+                        devise=devise_mouvement,
                         type_mouvement='ENTREE',
                         entreprise_id=sortie.entreprise_id,
                         succursale_id=sortie.succursale_id,
@@ -805,6 +829,9 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         reference_piece=f'VENT-{sortie.pk}-{devise_key}',
                         motif='',
                         type_caisse_id=type_caisse_id,
+                        devise_reference=snapshot_mouvement['devise_reference'],
+                        taux_change=snapshot_mouvement['taux_change'],
+                        montant_reference=snapshot_mouvement['montant_reference'],
                     )
         return Response(self.get_serializer(sortie).data, status=status.HTTP_201_CREATED)
     
@@ -1060,9 +1087,15 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         )
                     
                     # CrÃ©er le mouvement de caisse inverse (SORTIE)
+                    devise_mouvement = devise_obj or default_dev
+                    snapshot_mouvement = build_conversion_snapshot(
+                        entreprise_id=sortie.entreprise_id,
+                        amount=total_devise.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                        devise_source=devise_mouvement,
+                    )
                     creer_mouvement_caisse(
                         montant=total_devise.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
-                        devise=devise_obj or default_dev,
+                        devise=devise_mouvement,
                         type_mouvement='SORTIE',
                         entreprise_id=sortie.entreprise_id,
                         succursale_id=sortie.succursale_id,
@@ -1071,6 +1104,9 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         reference_piece=f'ANN-VENT-{sortie.pk}-{devise_key}',
                         motif='Annulation vente',
                         type_caisse_id=type_caisse_id,
+                        devise_reference=snapshot_mouvement['devise_reference'],
+                        taux_change=snapshot_mouvement['taux_change'],
+                        montant_reference=snapshot_mouvement['montant_reference'],
                     )
             
             sortie.delete()
@@ -1259,12 +1295,21 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 
                 # CrÃ©er la ligne de sortie avec le prix rÃ©ellement encaissÃ©
+                montant_ligne = (prix_unitaire_final * Decimal(str(qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                snapshot_ligne = build_conversion_snapshot(
+                    entreprise_id=instance.entreprise_id,
+                    amount=montant_ligne,
+                    devise_source=devise_obj,
+                )
                 ligne_sortie = LigneSortie.objects.create(
                     sortie=instance,
                     article=article_obj,
                     quantite=qte,
-                    prix_unitaire=prix_unitaire_final,  # Prix rÃ©ellement encaissÃ©
-                    devise=devise_obj
+                    prix_unitaire=prix_unitaire_final,
+                    devise=devise_obj,
+                    devise_reference=snapshot_ligne['devise_reference'],
+                    taux_change=snapshot_ligne['taux_change'],
+                    montant_reference=snapshot_ligne['montant_reference'],
                 )
                 
                 # CrÃ©er les traÃ§abilitÃ©s et bÃ©nÃ©fices
@@ -1332,6 +1377,11 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     if solde < montant_abs:
                         raise serializers.ValidationError("Solde caisse insuffisant pour ajuster cette vente.")
                 default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first() if tenant_id else Devise.objects.filter(est_principal=True).first()
+                snapshot_mouvement = build_conversion_snapshot(
+                    entreprise_id=instance.entreprise_id,
+                    amount=montant_abs,
+                    devise_source=default_dev,
+                )
                 creer_mouvement_caisse(
                     montant=montant_abs,
                     devise=default_dev,
@@ -1343,6 +1393,9 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     reference_piece=f'AJ-VENT-{instance.pk}',
                     motif='Ajustement vente',
                     type_caisse_id=type_caisse_id,
+                    devise_reference=snapshot_mouvement['devise_reference'],
+                    taux_change=snapshot_mouvement['taux_change'],
+                    montant_reference=snapshot_mouvement['montant_reference'],
                 )
         
         return Response(self.get_serializer(instance).data)
@@ -1591,7 +1644,18 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
 
     def perform_create(self, serializer):
         user = self.request.user
-        ligne_sortie = serializer.save()
+        devise_ligne = serializer.validated_data.get('devise')
+        montant_ligne = (serializer.validated_data.get('prix_unitaire') or Decimal('0.00')) * serializer.validated_data.get('quantite', Decimal('0.00'))
+        snapshot_ligne = build_conversion_snapshot(
+            entreprise_id=getattr(serializer.validated_data.get('sortie'), 'entreprise_id', None),
+            amount=montant_ligne,
+            devise_source=devise_ligne,
+        )
+        ligne_sortie = serializer.save(
+            devise_reference=snapshot_ligne['devise_reference'],
+            taux_change=snapshot_ligne['taux_change'],
+            montant_reference=snapshot_ligne['montant_reference'],
+        )
         stock, created = Stock.objects.get_or_create(
             article=ligne_sortie.article, 
             defaults={'Qte': 0, 'seuilAlert': 0}
@@ -1711,6 +1775,14 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
                 devise_id = request.data.get('devise_id')
                 if devise_id:
                     instance.devise = Devise.objects.get(pk=devise_id)
+            snapshot_ligne = build_conversion_snapshot(
+                entreprise_id=instance.sortie.entreprise_id,
+                amount=(instance.prix_unitaire * instance.quantite).quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
+                devise_source=instance.devise,
+            )
+            instance.devise_reference = snapshot_ligne['devise_reference']
+            instance.taux_change = snapshot_ligne['taux_change']
+            instance.montant_reference = snapshot_ligne['montant_reference']
             instance.save()
             
             # Mettre Ã  jour le stock
@@ -1738,7 +1810,18 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
         old_instance = self.get_object()
         old_article = old_instance.article
         old_quantite = old_instance.quantite
-        new_instance = serializer.save()
+        devise_ligne = serializer.validated_data.get('devise') or old_instance.devise
+        montant_ligne = (serializer.validated_data.get('prix_unitaire') or old_instance.prix_unitaire or Decimal('0.00')) * (serializer.validated_data.get('quantite') or old_instance.quantite or Decimal('0.00'))
+        snapshot_ligne = build_conversion_snapshot(
+            entreprise_id=old_instance.sortie.entreprise_id,
+            amount=montant_ligne,
+            devise_source=devise_ligne,
+        )
+        new_instance = serializer.save(
+            devise_reference=snapshot_ligne['devise_reference'],
+            taux_change=snapshot_ligne['taux_change'],
+            montant_reference=snapshot_ligne['montant_reference'],
+        )
         new_article = new_instance.article
         new_quantite = new_instance.quantite
         # Remettre l'ancienne quantitÃ© dans le stock de l'ancien article
@@ -2003,7 +2086,19 @@ class LigneEntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
         return super().get_queryset().order_by('-date_entree', '-id')
 
     def perform_create(self, serializer):
-        ligne_entree = serializer.save()
+        devise_ligne = serializer.validated_data.get('devise')
+        montant_ligne = (serializer.validated_data.get('prix_unitaire') or Decimal('0.00')) * serializer.validated_data.get('quantite', Decimal('0.00'))
+        entree_obj = serializer.validated_data.get('entree')
+        snapshot_ligne = build_conversion_snapshot(
+            entreprise_id=getattr(entree_obj, 'entreprise_id', None),
+            amount=montant_ligne,
+            devise_source=devise_ligne,
+        )
+        ligne_entree = serializer.save(
+            devise_reference=snapshot_ligne['devise_reference'],
+            taux_change=snapshot_ligne['taux_change'],
+            montant_reference=snapshot_ligne['montant_reference'],
+        )
         stock, created = Stock.objects.get_or_create(
             article=ligne_entree.article,
             defaults={'Qte': 0, 'seuilAlert': 0}
@@ -2031,7 +2126,18 @@ class LigneEntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
             stock_obj.save()
             
             # Mettre Ã  jour la ligne
-            updated_instance = serializer.save()
+            devise_ligne = serializer.validated_data.get('devise') or instance.devise
+            montant_ligne = (serializer.validated_data.get('prix_unitaire') or instance.prix_unitaire or Decimal('0.00')) * (serializer.validated_data.get('quantite') or instance.quantite or Decimal('0.00'))
+            snapshot_ligne = build_conversion_snapshot(
+                entreprise_id=instance.entree.entreprise_id,
+                amount=montant_ligne,
+                devise_source=devise_ligne,
+            )
+            updated_instance = serializer.save(
+                devise_reference=snapshot_ligne['devise_reference'],
+                taux_change=snapshot_ligne['taux_change'],
+                montant_reference=snapshot_ligne['montant_reference'],
+            )
             
             # S'assurer que quantite_restante est cohÃ©rente
             nouvelle_quantite = updated_instance.quantite
@@ -2130,6 +2236,23 @@ class DeviseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 premiere_autre = autres_devises.first()
                 premiere_autre.est_principal = True
                 premiere_autre.save()
+
+
+class TauxChangeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    queryset = TauxChange.objects.select_related('devise_source', 'devise_cible', 'cree_par').all()
+    serializer_class = TauxChangeSerializer
+
+    def get_queryset(self):
+        return super().get_queryset().order_by('-date_application', '-id')
+
+    def perform_create(self, serializer):
+        tenant_id, _ = self.get_tenant_ids()
+        if not tenant_id:
+            raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
+        serializer.save(entreprise_id=tenant_id, cree_par=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save()
 
 
 
@@ -2243,7 +2366,6 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         for article_id, ligne_data in articles_groupes.items():
             q = Decimal(str(ligne_data['quantite']))
             pu = ligne_data['prix_unitaire']
-            pv = ligne_data.get('prix_vente', Decimal('0.00'))  # Prix de vente
             devise_id = ligne_data['devise']
             devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=tenant_id) if devise_id else default_dev
             devise_sigle = devise_obj.sigle if devise_obj else 'N/A'
@@ -2258,50 +2380,11 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             
             totaux_par_devise[devise_sigle]['total'] += montant_ligne
         
-        # VÃ©rification des soldes par devise
-        erreurs_solde = []
-        for devise_sigle, devise_data in totaux_par_devise.items():
-            devise_obj = devise_data['devise_obj']
-            total_devise = devise_data['total']
-            
-            solde_devise = self._solde_caisse_par_devise(tenant_id, branch_id, devise_obj)
-            
-            if total_devise > solde_devise:
-                devise_nom = devise_obj.nom if devise_obj else 'Non spÃ©cifiÃ©e'
-                symbole = devise_obj.symbole if devise_obj else ''
-                erreurs_solde.append(
-                    f"Solde insuffisant en {devise_nom} ({devise_sigle}): "
-                    f"Requis {total_devise} {symbole}, Disponible {solde_devise} {symbole}. "
-                    f"Veuillez d'abord effectuer une entrÃ©e en caisse dans cette devise."
-                )
-        
-        if erreurs_solde:
-            raise serializers.ValidationError({
-                'soldes_insuffisants': erreurs_solde,
-                'message': 'Approvisionnement impossible: soldes insuffisants dans certaines devises.'
-            })
-
         with transaction.atomic():
-            entree_kwargs = {
-                'libele': serializer.validated_data.get('libele', ''),
-                'description': serializer.validated_data.get('description', ''),
-                'entreprise_id': tenant_id,
-                'succursale_id': branch_id,
-            }
-            date_op = serializer.validated_data.get('date_op')
-            if date_op is not None:
-                entree_kwargs['date_op'] = date_op
-            entree = Entree.objects.create(**entree_kwargs)
-            
-            # Traiter chaque article groupÃ©
+            entree = serializer.save(entreprise_id=tenant_id, succursale_id=branch_id)
+
             for article_id, ligne_data in articles_groupes.items():
-                # Correction : utiliser article_id comme clÃ© primaire rÃ©elle
-                try:
-                    article_obj = Article.objects.get(article_id=article_id)
-                except Article.DoesNotExist:
-                    raise serializers.ValidationError({
-                        'article_id': f"Aucun article trouvÃ© avec article_id={article_id}"
-                    })
+                article_obj = Article.objects.get(article_id=article_id)
                 qte = ligne_data['quantite']
                 prix_unitaire = ligne_data['prix_unitaire']
                 prix_vente = ligne_data.get('prix_vente', Decimal('0.00'))
@@ -2310,41 +2393,49 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 devise_id = ligne_data['devise']
                 devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=tenant_id) if devise_id else None
 
-                # CrÃ©er la ligne d'entrÃ©e (quantite_restante sera initialisÃ© automatiquement dans save())
-                ligne_entree = LigneEntree.objects.create(
+                # Cr?er la ligne d'entr?e (quantite_restante sera initialis?e automatiquement dans save())
+                montant_ligne = (prix_unitaire * Decimal(str(qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                snapshot_ligne = build_conversion_snapshot(
+                    entreprise_id=entree.entreprise_id,
+                    amount=montant_ligne,
+                    devise_source=devise_obj,
+                )
+                LigneEntree.objects.create(
                     entree=entree,
                     article=article_obj,
                     quantite=qte,
-                    quantite_restante=qte,  # Initialiser explicitement
+                    quantite_restante=qte,
                     prix_unitaire=prix_unitaire,
                     prix_vente=prix_vente,
                     date_expiration=date_expiration,
                     devise=devise_obj,
+                    devise_reference=snapshot_ligne['devise_reference'],
+                    taux_change=snapshot_ligne['taux_change'],
+                    montant_reference=snapshot_ligne['montant_reference'],
                     seuil_alerte=seuil_alerte
                 )
 
                 # Gestion intelligente du stock
                 stock_obj, created = Stock.objects.get_or_create(
-                    article=article_obj, 
-    
+                    article=article_obj,
                     defaults={'Qte': 0, 'seuilAlert': seuil_alerte}
                 )
 
                 # Utiliser nom_commercial si disponible, sinon nom_scientifique
                 article_nom = article_obj.nom_commercial or article_obj.nom_scientifique
                 if created:
-                    messages_reponse.append(f"Nouveau stock crÃ©Ã© pour {article_nom}")
+                    messages_reponse.append(f"Nouveau stock cr?? pour {article_nom}")
                 else:
                     if stock_obj.Qte == 0:
-                        messages_reponse.append(f"RÃ©approvisionnement de {article_nom} (stock Ã©tait Ã©puisÃ©)")
+                        messages_reponse.append(f"R?approvisionnement de {article_nom} (stock ?tait ?puis?)")
                     else:
-                        messages_reponse.append(f"Ajout au stock existant de {article_nom} (stock: {stock_obj.Qte} â†’ {stock_obj.Qte + qte})")
+                        messages_reponse.append(f"Ajout au stock existant de {article_nom} (stock: {stock_obj.Qte} ? {stock_obj.Qte + qte})")
 
                 stock_obj.Qte += qte
                 stock_obj.seuilAlert = seuil_alerte
                 stock_obj.save()
                 
-            # CrÃ©er les mouvements de caisse par devise (dÃ©penses approvisionnement)
+            # Cr?er les mouvements de caisse par devise (d?penses approvisionnement)
             type_caisse_id = extract_type_caisse_id(request.data)
             if any(d['total'] > 0 for d in totaux_par_devise.values()) and not type_caisse_id:
                 raise serializers.ValidationError({'type_caisse_id': str(MSG_CAISSE_REQUISE)})
@@ -2353,9 +2444,15 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 total_devise = devise_data['total']
                 
                 if total_devise > 0:
+                    devise_mouvement = devise_obj or default_dev
+                    snapshot_mouvement = build_conversion_snapshot(
+                        entreprise_id=entree.entreprise_id,
+                        amount=total_devise,
+                        devise_source=devise_mouvement,
+                    )
                     creer_mouvement_caisse(
                         montant=total_devise,
-                        devise=devise_obj,
+                        devise=devise_mouvement,
                         type_mouvement='SORTIE',
                         entreprise_id=entree.entreprise_id,
                         succursale_id=entree.succursale_id,
@@ -2364,6 +2461,9 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         reference_piece=f'APPRO-{entree.pk}-{devise_sigle}',
                         motif='',
                         type_caisse_id=type_caisse_id,
+                        devise_reference=snapshot_mouvement['devise_reference'],
+                        taux_change=snapshot_mouvement['taux_change'],
+                        montant_reference=snapshot_mouvement['montant_reference'],
                     )
         
         # Retourner la rÃ©ponse avec les messages informatifs
@@ -2705,15 +2805,24 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 date_expiration = ligne_data['date_expiration']
                 
                 # CrÃ©er la ligne d'entrÃ©e avec quantite_restante initialisÃ©e
+                montant_ligne = (prix_unitaire * Decimal(str(qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                snapshot_ligne = build_conversion_snapshot(
+                    entreprise_id=entree.entreprise_id,
+                    amount=montant_ligne,
+                    devise_source=devise_obj,
+                )
                 LigneEntree.objects.create(
                     entree=entree,
                     article=article_obj,
                     quantite=qte,
-                    quantite_restante=qte,  # Initialiser pour FIFO
+                    quantite_restante=qte,
                     prix_unitaire=prix_unitaire,
-                    prix_vente=prix_vente,  # Prix de vente obligatoire
+                    prix_vente=prix_vente,
                     date_expiration=date_expiration,
                     devise=devise_obj,
+                    devise_reference=snapshot_ligne['devise_reference'],
+                    taux_change=snapshot_ligne['taux_change'],
+                    montant_reference=snapshot_ligne['montant_reference'],
                     seuil_alerte=seuil_alerte
                 )
                 
@@ -2734,6 +2843,11 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     raise serializers.ValidationError({'type_caisse_id': str(MSG_CAISSE_REQUISE)})
                 tenant_id = entree.entreprise_id
                 default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first() if tenant_id else Devise.objects.filter(est_principal=True).first()
+                snapshot_mouvement = build_conversion_snapshot(
+                    entreprise_id=entree.entreprise_id,
+                    amount=abs(diff),
+                    devise_source=default_dev,
+                )
                 creer_mouvement_caisse(
                     montant=abs(diff),
                     devise=default_dev,
@@ -2745,6 +2859,9 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     reference_piece=f'AJ-ENT-{entree.pk}',
                     motif='Ajustement entrÃ©e',
                     type_caisse_id=type_caisse_id,
+                    devise_reference=snapshot_mouvement['devise_reference'],
+                    taux_change=snapshot_mouvement['taux_change'],
+                    montant_reference=snapshot_mouvement['montant_reference'],
                 )
         
         return Response(self.get_serializer(entree).data, status=status.HTTP_200_OK)
@@ -2775,6 +2892,11 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first() if tenant_id else Devise.objects.filter(est_principal=True).first()
                 ligne_dev = entree.lignes.first()
                 devise_annul = ligne_dev.devise if ligne_dev and ligne_dev.devise else default_dev
+                snapshot_mouvement = build_conversion_snapshot(
+                    entreprise_id=entree.entreprise_id,
+                    amount=total,
+                    devise_source=devise_annul,
+                )
                 creer_mouvement_caisse(
                     montant=total,
                     devise=devise_annul,
@@ -3257,7 +3379,21 @@ class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
         tenant_id, branch_id = self.get_tenant_ids()
         if not tenant_id:
             raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
-        serializer.save(date_echeance=date_echeance, entreprise_id=tenant_id, succursale_id=branch_id)
+        devise_dette = serializer.validated_data.get('devise') or getattr(sortie, 'devise', None) or _get_principal_devise(tenant_id)
+        snapshot = build_conversion_snapshot(
+            entreprise_id=tenant_id,
+            amount=serializer.validated_data.get('montant_total'),
+            devise_source=devise_dette,
+        )
+        serializer.save(
+            date_echeance=date_echeance,
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            devise=devise_dette,
+            devise_reference=snapshot['devise_reference'],
+            taux_change=snapshot['taux_change'],
+            montant_reference=snapshot['montant_reference'],
+        )
 
     @action(detail=False, methods=['get'])
     def en_retard(self, request):

@@ -20,6 +20,7 @@ from rest_framework.exceptions import ValidationError
 
 from order.models import Lot, LotItem
 from stock.models import Devise, Entree, LigneEntree, Stock
+from stock.services.currency import build_conversion_snapshot
 
 
 def entree_is_from_lot_closure(entree) -> bool:
@@ -183,6 +184,12 @@ def apply_stock_on_lot_closure(lot: Lot, approvisionnement: list[dict]) -> Entre
         date_expiration = cl.date_expiration
         devise_obj = default_dev
 
+        montant_ligne = (prix_unitaire * Decimal(str(qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        snapshot_ligne = build_conversion_snapshot(
+            entreprise_id=entree.entreprise_id,
+            amount=montant_ligne,
+            devise_source=devise_obj,
+        )
         LigneEntree.objects.create(
             entree=entree,
             article=article_obj,
@@ -192,6 +199,9 @@ def apply_stock_on_lot_closure(lot: Lot, approvisionnement: list[dict]) -> Entre
             prix_vente=prix_vente,
             date_expiration=date_expiration,
             devise=devise_obj,
+            devise_reference=snapshot_ligne['devise_reference'],
+            taux_change=snapshot_ligne['taux_change'],
+            montant_reference=snapshot_ligne['montant_reference'],
             seuil_alerte=seuil_alerte,
         )
 
