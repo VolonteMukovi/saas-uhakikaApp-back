@@ -179,6 +179,90 @@ def _get_principal_devise():
     return Devise.objects.filter(est_principal=True).first()
 
 
+def _get_entreprise_exchange_rates(entreprise):
+    """Retourne la liste brute des taux de change stockes dans la config entreprise."""
+    if not entreprise:
+        return []
+    try:
+        config_data = entreprise.get_config_dict()
+    except Exception:
+        return []
+    integrations = config_data.get('integrations') or {}
+    rates = integrations.get('exchange_rates') or []
+    return rates if isinstance(rates, list) else []
+def _exchange_rate_sort_key(entry):
+    return (
+        str(entry.get('effective_at') or ''),
+        str(entry.get('created_at') or ''),
+        int(entry.get('id') or 0),
+    )
+def _get_latest_exchange_rate_entry(entreprise, source_dev_id, target_dev_id):
+    latest = None
+    for entry in _get_entreprise_exchange_rates(entreprise):
+        if entry.get('source_devise_id') != source_dev_id:
+            continue
+        if entry.get('target_devise_id') != target_dev_id:
+            continue
+        if entry.get('is_active', True) is False:
+            continue
+        if latest is None or _exchange_rate_sort_key(entry) > _exchange_rate_sort_key(latest):
+            latest = entry
+    return latest
+def _persist_exchange_rates(entreprise, rates, user_id=None):
+    entreprise.merge_config(
+        {'integrations': {'exchange_rates': rates}},
+        user_id=user_id,
+    )
+    entreprise.save(update_fields=['config'])
+def _serialize_exchange_rate_entry(entry, entreprise):
+    devise_ids = {
+        entry.get('source_devise_id'),
+        entry.get('target_devise_id'),
+    }
+    devises = {
+        d.id: d
+        for d in Devise.objects.filter(
+            entreprise=entreprise,
+            id__in=[did for did in devise_ids if did],
+        )
+    }
+    source = devises.get(entry.get('source_devise_id'))
+    target = devises.get(entry.get('target_devise_id'))
+    return {
+        'id': entry.get('id'),
+        'source_devise_id': entry.get('source_devise_id'),
+        'target_devise_id': entry.get('target_devise_id'),
+        'source_devise': DeviseSerializer(source).data if source else None,
+        'target_devise': DeviseSerializer(target).data if target else None,
+        'taux': str(entry.get('rate')),
+        'date_application': entry.get('effective_at'),
+        'is_active': bool(entry.get('is_active', True)),
+        'created_at': entry.get('created_at'),
+        'created_by_user_id': entry.get('created_by_user_id'),
+    }
+def _extract_exchange_rate_payload(data):
+    source_id = (
+        data.get('source_devise_id')
+        or data.get('source_devise')
+        or data.get('devise_source_id')
+        or data.get('devise_source')
+    )
+    target_id = (
+        data.get('target_devise_id')
+        or data.get('target_devise')
+        or data.get('devise_cible_id')
+        or data.get('devise_cible')
+    )
+    rate_raw = data.get('taux')
+    if rate_raw in (None, ''):
+        rate_raw = data.get('rate')
+    if rate_raw in (None, ''):
+        rate_raw = data.get('taux_change')
+    effective_at = data.get('date_application') or data.get('effective_at')
+    is_active = data.get('is_active', True)
+    return source_id, target_id, rate_raw, effective_at, is_active
+
+
 def _get_latest_rate(source_dev: Devise, target_dev: Devise):
     """Return Decimal rate to convert amount from source_dev to target_dev or None if not found.
    
@@ -187,7 +271,25 @@ def _get_latest_rate(source_dev: Devise, target_dev: Devise):
         return None
     if source_dev.id == target_dev.id:
         return Decimal('1')
-
+    if source_dev.entreprise_id != target_dev.entreprise_id:
+        return None
+    entreprise = getattr(source_dev, 'entreprise', None)
+    direct_entry = _get_latest_exchange_rate_entry(entreprise, source_dev.id, target_dev.id)
+    if direct_entry is not None:
+        try:
+            return Decimal(str(direct_entry.get('rate')))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+    reverse_entry = _get_latest_exchange_rate_entry(entreprise, target_dev.id, source_dev.id)
+    if reverse_entry is None:
+        return None
+    try:
+        reverse_rate = Decimal(str(reverse_entry.get('rate')))
+        if reverse_rate == 0:
+            return None
+        return (Decimal('1') / reverse_rate).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
+    except (InvalidOperation, TypeError, ValueError, ZeroDivisionError):
+        return None
 
 
 def _convert_amount(amount: Decimal, source_dev: Devise, target_dev: Devise, entreprise):
@@ -2133,6 +2235,75 @@ class DeviseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
 
 
 
+@api_view(['GET', 'POST'])
+@permission_classes([StockIsAdminOrUser])
+def taux_change_collection(request):
+    tenant_id, _ = _get_tenant_ids(request)
+    if tenant_id is None:
+        raise PermissionDenied(_("Contexte entreprise manquant."))
+
+    entreprise = get_object_or_404(Entreprise, pk=tenant_id)
+
+    if request.method == 'GET':
+        latest_by_pair = {}
+        for entry in _get_entreprise_exchange_rates(entreprise):
+            if entry.get('is_active', True) is False:
+                continue
+            pair_key = (entry.get('source_devise_id'), entry.get('target_devise_id'))
+            current = latest_by_pair.get(pair_key)
+            if current is None or _exchange_rate_sort_key(entry) > _exchange_rate_sort_key(current):
+                latest_by_pair[pair_key] = entry
+        payload = [
+            _serialize_exchange_rate_entry(entry, entreprise)
+            for entry in sorted(
+                latest_by_pair.values(),
+                key=lambda item: (
+                    item.get('source_devise_id') or 0,
+                    item.get('target_devise_id') or 0,
+                ),
+            )
+        ]
+        return Response(payload)
+
+    source_id, target_id, rate_raw, effective_at, is_active = _extract_exchange_rate_payload(request.data)
+    if not source_id or not target_id:
+        raise serializers.ValidationError({
+            'detail': _("Les devises source et cible sont obligatoires."),
+        })
+
+    try:
+        source_devise = Devise.objects.get(pk=source_id, entreprise_id=tenant_id)
+    except Devise.DoesNotExist as exc:
+        raise NotFound(_("Devise source introuvable pour cette entreprise.")) from exc
+    try:
+        target_devise = Devise.objects.get(pk=target_id, entreprise_id=tenant_id)
+    except Devise.DoesNotExist as exc:
+        raise NotFound(_("Devise cible introuvable pour cette entreprise.")) from exc
+
+    try:
+        rate = Decimal(str(rate_raw).replace(',', '.'))
+    except (InvalidOperation, AttributeError):
+        raise serializers.ValidationError({'taux': _("Le taux de change est invalide.")})
+    if rate <= 0:
+        raise serializers.ValidationError({'taux': _("Le taux de change doit etre superieur a 0.")})
+
+    now_iso = timezone.now().isoformat()
+    current_rates = _get_entreprise_exchange_rates(entreprise)
+    new_entry = {
+        'id': max([int(item.get('id') or 0) for item in current_rates] + [0]) + 1,
+        'source_devise_id': source_devise.id,
+        'target_devise_id': target_devise.id,
+        'rate': str(rate),
+        'effective_at': effective_at or now_iso,
+        'is_active': bool(is_active),
+        'created_at': now_iso,
+        'created_by_user_id': getattr(request.user, 'id', None),
+    }
+    current_rates.append(new_entry)
+    _persist_exchange_rates(entreprise, current_rates, user_id=getattr(request.user, 'id', None))
+    return Response(_serialize_exchange_rate_entry(new_entry, entreprise), status=status.HTTP_201_CREATED)
+
+
 class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     """ViewSet pour gÃ©rer les entrÃ©es de stock avec support multi-devises (filtrÃ© par entreprise/succursale)."""
     queryset = Entree.objects.all()
@@ -3320,3 +3491,4 @@ class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
             return self.get_paginated_response(serializer.data)
         serializer = PaiementDetteReadSerializer(paiements_qs, many=True, context={'request': request})
         return Response(serializer.data)
+

@@ -24,5 +24,6 @@ router.register(r'inventaires', InventaireSessionViewSet, basename='inventaire')
 
 
 urlpatterns = [
+    path('taux-change/', taux_change_collection, name='taux-change-collection'),
     path('', include(router.urls)),
 ]
