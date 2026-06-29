@@ -8,6 +8,8 @@ from rest_framework.response import Response
 
 from django.utils.translation import gettext as _
 
+from django.db.models import Count
+
 from stock.models import Client, ClientEntreprise, DetteClient, Sortie, Succursale
 from stock.serializers import EntrepriseSerializer, SuccursaleSerializer
 
@@ -18,6 +20,7 @@ from .commande_serializers import CommandeListSerializer
 from .jwt_client import issue_client_tokens, refresh_client_access
 from .openapi_params import TAG_PORTAIL_CLIENT
 from .permissions import IsClientAuthenticated
+from .services.client_portal_achats import achats_recents_payload
 
 
 def _client_public_dict(c: Client):
@@ -315,28 +318,20 @@ def client_portal_dashboard(request):
     sorties = (
         Sortie.objects.filter(client=client, entreprise_id=m.entreprise_id)
         .filter(bq)
-        .prefetch_related("lignes__article", "lignes__devise")
-        .order_by("-date_creation")[:50]
+        .annotate(nombre_lignes=Count("lignes"))
+        .order_by("-date_creation")[:20]
     )
-    sorties_data = []
-    for s in sorties:
-        sorties_data.append(
-            {
-                "id": s.id,
-                "date_creation": s.date_creation,
-                "statut": s.statut,
-                "motif": s.motif,
-                "lignes": [
-                    {
-                        "article_id": l.article_id,
-                        "nom_scientifique": l.article.nom_scientifique if l.article else None,
-                        "quantite": l.quantite,
-                        "prix_unitaire": str(l.prix_unitaire),
-                    }
-                    for l in s.lignes.all()
-                ],
-            }
-        )
+    sorties_data = [
+        {
+            "id": s.id,
+            "date_creation": s.date_creation,
+            "statut": s.statut,
+            "motif": s.motif,
+            "nombre_lignes": s.nombre_lignes,
+        }
+        for s in sorties
+    ]
+    achats_recents = achats_recents_payload(client=client, membership=m, limit=8)
     commandes = (
         Commande.objects.filter(client=client, entreprise_id=m.entreprise_id)
         .filter(bq)
@@ -350,6 +345,7 @@ def client_portal_dashboard(request):
             "contexte": _contexte_dict(m),
             "dettes": dettes_data,
             "ventes": sorties_data,
+            "achats_recents": achats_recents,
             "commandes": commandes_data,
         }
     )

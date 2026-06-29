@@ -1270,30 +1270,13 @@ def import_sortie(request):
         sortie_id = response.data.get('id')
         sortie = SortieModel.objects.filter(pk=sortie_id).select_related('client').prefetch_related('lignes').first()
         if sortie and not DetteClient.objects.filter(sortie=sortie).exists():
-            total_dette = Decimal('0.00')
-            devise_dette = None
-            for ligne in sortie.lignes.all():
-                total_dette += Decimal(str(ligne.quantite)) * Decimal(str(ligne.prix_unitaire))
-                if ligne.devise_id and devise_dette is None:
-                    devise_dette = ligne.devise
-            if devise_dette is None:
-                devise_dette = Devise.objects.filter(entreprise_id=sortie.entreprise_id, est_principal=True).first()
-            client_obj = Client.objects.get(id=client_id_global)
-            snapshot_dette = build_conversion_snapshot(
-                entreprise_id=sortie.entreprise_id,
-                amount=total_dette.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
-                devise_source=devise_dette,
-            )
-            DetteClient.objects.create(
-                sortie=sortie,
-                client=client_obj,
-                montant_total=total_dette.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
-                devise=devise_dette,
-                devise_reference=snapshot_dette['devise_reference'],
-                taux_change=snapshot_dette['taux_change'],
-                montant_reference=snapshot_dette['montant_reference'],
-                entreprise_id=sortie.entreprise_id,
-                succursale_id=sortie.succursale_id,
-            )
+            from stock.services.credit_sale_debt import create_dette_for_credit_sortie
+            try:
+                create_dette_for_credit_sortie(sortie, raise_if_exists=False)
+            except ValueError as exc:
+                return JsonResponse(
+                    {'error': 'Création dette refusée.', 'details': str(exc)},
+                    status=400,
+                )
 
     return JsonResponse(response.data, status=201)

@@ -8,6 +8,7 @@ from .client_auth_views import (
     client_portal_select_context,
 )
 from .client_portal_articles import client_portal_articles_search
+from .client_portal_achats_views import ClientPortalAchatsViewSet
 from .client_portal_viewsets import ClientPortalDetteViewSet, ClientPortalSortieViewSet
 from .commande_views import CommandeViewSet
 from .views import FournisseurViewSet, LotViewSet, FraisLotViewSet, LotItemViewSet
@@ -20,6 +21,7 @@ router.register(r"lot-items", LotItemViewSet, basename="lot-item")
 router.register(r"commandes", CommandeViewSet, basename="commande")
 router.register(r"client-portal/dettes", ClientPortalDetteViewSet, basename="client-portal-dette")
 router.register(r"client-portal/ventes", ClientPortalSortieViewSet, basename="client-portal-vente")
+router.register(r"client-portal/achats", ClientPortalAchatsViewSet, basename="client-portal-achat")
 
 urlpatterns = [
     path("client-auth/login/", client_portal_login, name="client-portal-login"),

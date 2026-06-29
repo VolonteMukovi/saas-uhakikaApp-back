@@ -272,6 +272,7 @@ class Sortie(models.Model):
             models.Index(fields=['entreprise_id']),
             models.Index(fields=['succursale_id']),
             models.Index(fields=['entreprise_id', 'succursale_id']),
+            models.Index(fields=['client_id', 'entreprise_id', '-date_creation']),
         ]
 
     def __str__(self):

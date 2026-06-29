@@ -32,6 +32,14 @@ from caisse.services.caisse import creer_mouvement_caisse, mouvement_moyen_affic
 from caisse.services.caisse_defaut import MSG_CAISSE_REQUISE
 from caisse.services.operation_helpers import extract_type_caisse_id
 from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
+from stock.services.client_lifecycle import (
+    build_client_balance,
+    build_client_dashboard,
+    build_client_movements,
+    build_client_sales,
+    build_client_statistics,
+    parse_period_from_request,
+)
 from stock.services.currency import (
     CurrencyError,
     build_conversion_snapshot,
@@ -599,6 +607,12 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         tenant_id, branch_id = _get_tenant_ids(request)
         if not tenant_id:
             raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
+        statut_demande = serializer.validated_data.get('statut', 'PAYEE')
+        client = serializer.validated_data.get('client')
+        if statut_demande == 'EN_CREDIT' and not client:
+            raise serializers.ValidationError({
+                'client': _('Client obligatoire pour une vente à crédit.'),
+            })
         default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
         with transaction.atomic():
             # RÃ©cupÃ©rer le client si fourni
@@ -828,11 +842,27 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         sortie=sortie,
                         reference_piece=f'VENT-{sortie.pk}-{devise_key}',
                         motif='',
+                        utilisateur=user,
                         type_caisse_id=type_caisse_id,
                         devise_reference=snapshot_mouvement['devise_reference'],
                         taux_change=snapshot_mouvement['taux_change'],
                         montant_reference=snapshot_mouvement['montant_reference'],
                     )
+
+            if sortie.statut == 'EN_CREDIT':
+                from stock.services.credit_sale_debt import (
+                    create_dette_for_credit_sortie,
+                    resolve_sortie_primary_devise,
+                )
+
+                primary_dev = resolve_sortie_primary_devise(sortie, default_devise=default_dev)
+                if primary_dev and not sortie.devise_id:
+                    sortie.devise = primary_dev
+                    sortie.save(update_fields=['devise'])
+                try:
+                    create_dette_for_credit_sortie(sortie, default_devise=default_dev, raise_if_exists=True)
+                except ValueError as exc:
+                    raise serializers.ValidationError({'non_field_errors': str(exc)}) from exc
         return Response(self.get_serializer(sortie).data, status=status.HTTP_201_CREATED)
     
     @action(detail=False, methods=['get'], url_path='produits-plus-vendus')
@@ -3203,6 +3233,149 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         out = ClientEntrepriseSerializer(link, context={"request": request}).data
         return Response(out, status=status.HTTP_201_CREATED)
 
+    def _client_period_or_400(self, request):
+        try:
+            return parse_period_from_request(request), None
+        except ValueError as exc:
+            return None, Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['get'], url_path='dashboard')
+    def dashboard(self, request, pk=None):
+        client = self.get_object()
+        period, error_response = self._client_period_or_400(request)
+        if error_response is not None:
+            return error_response
+        tenant_id, branch_id = _get_tenant_ids(request)
+        payload = build_client_dashboard(
+            client=client,
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            period=period,
+        )
+        return Response(payload)
+
+    @action(detail=True, methods=['get'], url_path='statistiques')
+    def statistiques(self, request, pk=None):
+        client = self.get_object()
+        period, error_response = self._client_period_or_400(request)
+        if error_response is not None:
+            return error_response
+        tenant_id, branch_id = _get_tenant_ids(request)
+        payload = build_client_statistics(
+            client=client,
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            period=period,
+        )
+        return Response(payload)
+
+    @action(detail=True, methods=['get'], url_path='solde')
+    def solde(self, request, pk=None):
+        client = self.get_object()
+        period, error_response = self._client_period_or_400(request)
+        if error_response is not None:
+            return error_response
+        tenant_id, branch_id = _get_tenant_ids(request)
+        payload = build_client_balance(
+            client=client,
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            period=period,
+        )
+        return Response(payload)
+
+    @action(detail=True, methods=['get'], url_path='ventes')
+    def ventes(self, request, pk=None):
+        client = self.get_object()
+        period, error_response = self._client_period_or_400(request)
+        if error_response is not None:
+            return error_response
+        tenant_id, branch_id = _get_tenant_ids(request)
+        ventes = build_client_sales(
+            client=client,
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            period=period,
+        )
+        page = self.paginate_queryset(ventes)
+        if page is not None:
+            return self.get_paginated_response(page)
+        return Response(ventes)
+
+    @action(detail=True, methods=['get'], url_path='achats')
+    def achats(self, request, pk=None):
+        """Historique des achats article par article (lignes de sortie), paginé."""
+        from order.branch_scope import branch_q_for_staff_sortie
+        from order.services.client_portal_achats import (
+            achats_lignes_qs,
+            parse_achats_filters,
+            serialize_achat_ligne,
+        )
+
+        client = self.get_object()
+        tenant_id, branch_id = _get_tenant_ids(request)
+        if tenant_id is None:
+            return Response({'detail': 'Contexte entreprise manquant.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            filters = parse_achats_filters(request)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        qs = achats_lignes_qs(
+            client=client,
+            entreprise_id=tenant_id,
+            branch_q=branch_q_for_staff_sortie(branch_id),
+            filters=filters,
+        )
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response([serialize_achat_ligne(l) for l in page])
+        return Response([serialize_achat_ligne(l) for l in qs])
+
+    @action(detail=True, methods=['get'], url_path='achats/articles')
+    def achats_articles(self, request, pk=None):
+        """Synthèse des achats par article (agrégation SQL)."""
+        from order.branch_scope import branch_q_for_staff_sortie
+        from order.services.client_portal_achats import achats_par_article, parse_achats_filters
+
+        client = self.get_object()
+        tenant_id, branch_id = _get_tenant_ids(request)
+        if tenant_id is None:
+            return Response({'detail': 'Contexte entreprise manquant.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            filters = parse_achats_filters(request)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            limit = min(max(1, int(request.query_params.get('limit', 100))), 500)
+        except (TypeError, ValueError):
+            limit = 100
+        data = achats_par_article(
+            client=client,
+            entreprise_id=tenant_id,
+            branch_q=branch_q_for_staff_sortie(branch_id),
+            filters=filters,
+            limit=limit,
+        )
+        return Response({'count': len(data), 'results': data})
+
+    @action(detail=True, methods=['get'], url_path='mouvements')
+    def mouvements(self, request, pk=None):
+        client = self.get_object()
+        period, error_response = self._client_period_or_400(request)
+        if error_response is not None:
+            return error_response
+        tenant_id, branch_id = _get_tenant_ids(request)
+        movements = build_client_movements(
+            client=client,
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            period=period,
+        )
+        page = self.paginate_queryset(movements)
+        if page is not None:
+            return self.get_paginated_response(page)
+        return Response(movements)
+
     @action(detail=True, methods=['get'])
     def dettes(self, request, pk=None):
         """
@@ -3210,14 +3383,21 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         GET /api/clients/{id}/dettes/
         """
         client = self.get_object()
+        tenant_id, branch_id = _get_tenant_ids(request)
         dettes = DetteClient.objects.filter(client=client).select_related(
             'client', 'devise', 'sortie'
-        ).prefetch_related('paiements').order_by('-date_creation', '-id')
+        )
+        if tenant_id is not None:
+            dettes = dettes.filter(entreprise_id=tenant_id)
+        if branch_id is not None:
+            dettes = dettes.filter(succursale_id=branch_id)
+        dettes = dettes.order_by('-date_creation', '-id')
         page = self.paginate_queryset(dettes)
+        ctx = {'request': request, 'include_paiements': False}
         if page is not None:
-            serializer = DetteClientSerializer(page, many=True)
+            serializer = DetteClientSerializer(page, many=True, context=ctx)
             return self.get_paginated_response(serializer.data)
-        serializer = DetteClientSerializer(dettes, many=True)
+        serializer = DetteClientSerializer(dettes, many=True, context=ctx)
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'])
@@ -3226,25 +3406,36 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         Calcule le total des dettes d'un client.
         GET /api/clients/{id}/total_dettes/
         """
+        from stock.services.client_lifecycle import build_client_balance, parse_period_from_request
+
         client = self.get_object()
-        dettes = DetteClient.objects.filter(client=client)
-        
-        total_general = dettes.aggregate(
-            total=Sum('montant_total'),
-            paye=Sum('montant_paye'),
-            restant=Sum('solde_restant')
+        tenant_id, branch_id = _get_tenant_ids(request)
+        if not tenant_id:
+            return Response({'detail': 'Contexte entreprise manquant.'}, status=403)
+        try:
+            period = parse_period_from_request(request)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=400)
+        balance = build_client_balance(
+            client=client,
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            period=period,
         )
-        
+        dettes = DetteClient.objects.filter(client=client, entreprise_id=tenant_id)
+        if branch_id is not None:
+            dettes = dettes.filter(succursale_id=branch_id)
         return Response({
             'client_id': client.id,
             'client_nom': client.nom,
             'nombre_dettes': dettes.count(),
-            'montant_total_dettes': total_general['total'] or 0,
-            'montant_total_paye': total_general['paye'] or 0,
-            'solde_restant_total': total_general['restant'] or 0,
+            'montant_total_dettes': balance['solde']['total_du'],
+            'montant_total_paye': balance['solde']['total_paye'],
+            'solde_restant_total': balance['solde']['solde_restant'],
             'dettes_en_cours': dettes.filter(statut='EN_COURS').count(),
             'dettes_payees': dettes.filter(statut='PAYEE').count(),
             'dettes_en_retard': dettes.filter(statut='RETARD').count(),
+            'totaux_par_devise': balance['totaux_par_devise'],
         })
 
 

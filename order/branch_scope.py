@@ -16,6 +16,20 @@ def branch_q_for_membership(membership):
     return Q(succursale_id=membership.succursale_id) | Q(succursale__isnull=True)
 
 
+def branch_q_for_ligne_sortie(membership):
+    """Même périmètre que ``branch_q_for_membership``, via la FK ``sortie``."""
+    if membership.succursale_id is None:
+        return Q(sortie__succursale__isnull=True)
+    return Q(sortie__succursale_id=membership.succursale_id) | Q(sortie__succursale__isnull=True)
+
+
+def branch_q_for_staff_sortie(succursale_id):
+    """Périmètre staff : une succursale JWT ou toutes les agences de l'entreprise."""
+    if succursale_id is not None:
+        return Q(sortie__succursale_id=succursale_id)
+    return Q()
+
+
 def apply_admin_commande_branch_filter(qs, request, tenant_id, branch_id):
     """
     Filtre les commandes pour un **administrateur** connecté en JWT staff.

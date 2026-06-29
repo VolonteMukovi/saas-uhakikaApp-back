@@ -37,9 +37,10 @@ def _fmt_qty(v, max_decimals: int = 5) -> str:
         return str(v)
 
 
-def _fmt_money(v) -> str:
+def _fmt_money(v, decimals: int = 5) -> str:
     try:
-        return f"{Decimal(str(v or 0)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN):.5f}"
+        quantum = Decimal("1").scaleb(-decimals)
+        return f"{Decimal(str(v or 0)).quantize(quantum, rounding=ROUND_DOWN):.{decimals}f}"
     except Exception:
         return str(v or 0)
 
@@ -226,9 +227,9 @@ class MP2258Printer:
             line_devise = getattr(ligne, "devise", None) or devise_sortie
             line_currency = _currency_label(line_devise)
 
-            qte_s = _fmt_qty(qte_raw)
-            pu_s = _fmt_money(pu)
-            tot_s = _fmt_money(tot)
+            qte_s = _fmt_qty(qte_raw, max_decimals=3)
+            pu_s = _fmt_money(pu, decimals=3)
+            tot_s = _fmt_money(tot, decimals=3)
             if line_currency:
                 pu_s = f"{pu_s}{line_currency}"
                 tot_s = f"{tot_s}{line_currency}"
@@ -245,12 +246,12 @@ class MP2258Printer:
         if len(totals_by_currency) <= 1:
             only_currency = next(iter(totals_by_currency.keys()), currency)
             only_total = next(iter(totals_by_currency.values()), total_general)
-            total_s = _fmt_money(only_total) + (f" {only_currency}" if only_currency else "")
+            total_s = _fmt_money(only_total, decimals=3) + (f" {only_currency}" if only_currency else "")
             lines.append(f"TOTAL DU: {total_s}\n")
         else:
             lines.append("TOTALS PAR DEVISE:\n")
             for curr, amount in totals_by_currency.items():
-                line_total = _fmt_money(amount) + (f" {curr}" if curr else "")
+                line_total = _fmt_money(amount, decimals=3) + (f" {curr}" if curr else "")
                 lines.append(f"- {line_total}\n")
         lines.append("\n")
 
@@ -262,19 +263,204 @@ class MP2258Printer:
         lines.append("\n")
         return lines
 
-    def print_facture(self, sortie, entreprise, user) -> bool:
+    def _append_entreprise_header(self, lines: list[str], entreprise, title: str) -> None:
+        """En-tête entreprise + titre centré (même style que facture)."""
+        cpl = max(16, int(self.cfg.chars_per_line))
+        nom_entreprise = (getattr(entreprise, "nom", "") or "").strip()
+        if nom_entreprise:
+            lines.append(f"{_center_line(nom_entreprise, cpl)}\n")
+        tel = (getattr(entreprise, "telephone", None) or "").strip()
+        if tel:
+            lines.append(f"{_center_line(f'Tel: {tel}', cpl)}\n")
+        adr = (getattr(entreprise, "adresse", None) or "").strip()
+        if adr:
+            lines.append(f"{_center_line(adr, cpl)}\n")
+        email = (getattr(entreprise, "email", None) or "").strip()
+        if email:
+            lines.append(f"{_center_line(email, cpl)}\n")
+        lines.append(f"{_center_line('-' * cpl, cpl)}\n")
+        lines.append(f"{_center_line(title, cpl)}\n")
+        lines.append(f"{_center_line('-' * cpl, cpl)}\n")
+
+    def _print_ticket_lines(self, lines: list[str]) -> bool:
         p = self.printer
         p.set(align="left", bold=False, width=1, height=1)
-        for line in self.build_facture_ticket_lines(sortie, entreprise, user):
+        for line in lines:
             p.text(_safe_text(line))
-
         try:
             p.cut()
         except Exception:
-            # Certaines imprimantes/configs ne supportent pas le cut.
             p.text("\n\n")
-
         return True
+
+    def build_recu_paiement_dette_ticket_lines(
+        self,
+        paiement,
+        dette,
+        entreprise,
+        user,
+        *,
+        moyen: str | None = None,
+        ancien_solde=None,
+    ) -> list[str]:
+        """
+        Reçu paiement dette/crédit — même disposition monospace que la facture de vente.
+        """
+        cpl = max(16, int(self.cfg.chars_per_line))
+        lines: list[str] = []
+        self._append_entreprise_header(lines, entreprise, "RECU PAIEMENT DETTE")
+
+        client = getattr(dette, "client", None)
+        client_name = getattr(client, "nom", None) or "Client inconnu"
+        devise = getattr(paiement, "devise", None) or getattr(dette, "devise", None)
+        currency = _currency_label(devise)
+
+        pay_dt = getattr(paiement, "date", None) or timezone.now()
+        montant_paye = Decimal(str(getattr(paiement, "montant", 0) or 0))
+        nouveau_solde = Decimal(str(getattr(dette, "solde_restant", 0) or 0))
+        if ancien_solde is None:
+            ancien_solde = (montant_paye + nouveau_solde).quantize(Decimal("0.00001"), rounding=ROUND_DOWN)
+        else:
+            ancien_solde = Decimal(str(ancien_solde or 0))
+
+        montant_total_dette = Decimal(str(getattr(dette, "montant_total", 0) or 0))
+        ref = (getattr(paiement, "reference_piece", None) or "").strip()
+
+        lines.append(f"Ndeg: RECU-{int(paiement.pk):06d}\n")
+        lines.append(f"Date: {pay_dt.strftime('%d/%m/%Y %H:%M')}\n")
+        lines.append(f"Client: {client_name}\n")
+        lines.append(f"Dette #: {dette.pk}\n")
+        if ref:
+            lines.append(f"Ref: {ref}\n")
+        if currency:
+            lines.append(f"Devise: {currency}\n")
+        if moyen:
+            lines.append(f"Moyen: {moyen}\n")
+        lines.append("\n")
+
+        cur_suffix = f" {currency}" if currency else ""
+        lines.append(f"Montant dette: {_fmt_money(montant_total_dette)}{cur_suffix}\n")
+        lines.append(f"Montant paye: {_fmt_money(montant_paye)}{cur_suffix}\n")
+        lines.append(f"Ancien solde: {_fmt_money(ancien_solde)}{cur_suffix}\n")
+        lines.append(f"Nouveau solde: {_fmt_money(nouveau_solde)}{cur_suffix}\n")
+        lines.append("\n")
+        lines.append("Paiement dette / credit client\n")
+        lines.append("\n")
+
+        caissier = getattr(paiement, "utilisateur", None) or user
+        printed_by = (
+            (getattr(caissier, "get_full_name", lambda: "")() or getattr(caissier, "username", ""))
+            if caissier
+            else ""
+        ).strip()
+        printed_by = _name_with_initial_upper(printed_by)
+        if printed_by:
+            lines.append(f"Caissier: {printed_by}\n")
+        lines.append(timezone.now().strftime("%d/%m/%Y %H:%M") + "\n")
+        lines.append("\n")
+        return lines
+
+    def build_recu_paiement_groupe_ticket_lines(
+        self,
+        *,
+        client,
+        entreprise,
+        user,
+        reference: str,
+        lignes_dettes: list[dict],
+        montant_total_paye,
+        devise,
+        moyen: str | None = None,
+        pay_dt=None,
+    ) -> list[str]:
+        """Reçu unique pour un paiement groupé de plusieurs dettes."""
+        cpl = max(16, int(self.cfg.chars_per_line))
+        lines: list[str] = []
+        self._append_entreprise_header(lines, entreprise, "RECU PAIEMENT GROUPE")
+
+        client_name = getattr(client, "nom", None) or "Client inconnu"
+        currency = _currency_label(devise)
+        pay_dt = pay_dt or timezone.now()
+        total_paye = Decimal(str(montant_total_paye or 0))
+        solde_global = sum(
+            (Decimal(str(row.get("nouveau_solde", 0) or 0)) for row in lignes_dettes),
+            Decimal("0"),
+        ).quantize(Decimal("0.00001"), rounding=ROUND_DOWN)
+
+        lines.append(f"Ref: {reference}\n")
+        lines.append(f"Date: {pay_dt.strftime('%d/%m/%Y %H:%M')}\n")
+        lines.append(f"Client: {client_name}\n")
+        if currency:
+            lines.append(f"Devise: {currency}\n")
+        if moyen:
+            lines.append(f"Moyen: {moyen}\n")
+        lines.append("\n")
+        lines.append(self._hr())
+
+        cur_suffix = f" {currency}" if currency else ""
+        for row in lignes_dettes:
+            dette_id = row.get("dette_id")
+            montant = Decimal(str(row.get("montant_applique", 0) or 0))
+            nouveau = Decimal(str(row.get("nouveau_solde", 0) or 0))
+            lines.append(f"Dette #{dette_id}: {_fmt_money(montant)}{cur_suffix} paye\n")
+            lines.append(f"  Solde: {_fmt_money(nouveau)}{cur_suffix}\n")
+
+        lines.append(self._hr())
+        lines.append(f"Total paye: {_fmt_money(total_paye)}{cur_suffix}\n")
+        lines.append(f"Solde global restant: {_fmt_money(solde_global)}{cur_suffix}\n")
+        lines.append("\n")
+
+        printed_by = (getattr(user, "get_full_name", lambda: "")() or getattr(user, "username", "")).strip()
+        printed_by = _name_with_initial_upper(printed_by)
+        if printed_by:
+            lines.append(f"Caissier: {printed_by}\n")
+        lines.append(timezone.now().strftime("%d/%m/%Y %H:%M") + "\n")
+        lines.append("\n")
+        return lines
+
+    def print_recu_paiement_dette(
+        self,
+        paiement,
+        dette,
+        entreprise,
+        user,
+        *,
+        moyen: str | None = None,
+        ancien_solde=None,
+    ) -> bool:
+        lines = self.build_recu_paiement_dette_ticket_lines(
+            paiement, dette, entreprise, user, moyen=moyen, ancien_solde=ancien_solde,
+        )
+        return self._print_ticket_lines(lines)
+
+    def print_recu_paiement_groupe(
+        self,
+        *,
+        client,
+        entreprise,
+        user,
+        reference: str,
+        lignes_dettes: list[dict],
+        montant_total_paye,
+        devise,
+        moyen: str | None = None,
+        pay_dt=None,
+    ) -> bool:
+        lines = self.build_recu_paiement_groupe_ticket_lines(
+            client=client,
+            entreprise=entreprise,
+            user=user,
+            reference=reference,
+            lignes_dettes=lignes_dettes,
+            montant_total_paye=montant_total_paye,
+            devise=devise,
+            moyen=moyen,
+            pay_dt=pay_dt,
+        )
+        return self._print_ticket_lines(lines)
+
+    def print_facture(self, sortie, entreprise, user) -> bool:
+        return self._print_ticket_lines(self.build_facture_ticket_lines(sortie, entreprise, user))
 
     def print_recu(self, sortie, entreprise, user) -> bool:
         """

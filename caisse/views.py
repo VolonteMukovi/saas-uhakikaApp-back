@@ -26,6 +26,7 @@ from caisse.serializers import (
     PaiementDetteWriteSerializer,
     TypeCaisseSerializer,
 )
+from caisse.paiement_dette_recu_mixin import PaiementDetteRecuMixin
 from caisse.services.caisse import mouvement_moyen_affiche
 from caisse.services.caisse_defaut import caisse_necessite_session
 from caisse.services.errors import validation_error_message
@@ -865,7 +866,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
 
 
 
-class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+class PaiementDetteViewSet(PaiementDetteRecuMixin, TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     """Paiements de dettes via MouvementCaisse liÃ©s Ã  DetteClient (content_type / object_id). URLs inchangÃ©es."""
     queryset = MouvementCaisse.objects.filter(type='ENTREE')
     serializer_class = PaiementDetteReadSerializer
@@ -890,23 +891,29 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         return PaiementDetteReadSerializer
 
     def create(self, request, *args, **kwargs):
+        from caisse.services.recu_paiement_pos import recu_paiement_urls
+
         serializer = PaiementDetteWriteSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         mc = serializer.save()
-        return Response(
-            PaiementDetteReadSerializer(mc, context={'request': request}).data,
-            status=status.HTTP_201_CREATED,
-        )
+        data = PaiementDetteReadSerializer(mc, context={'request': request}).data
+        data['recu'] = recu_paiement_urls(request, mc.pk)
+        return Response(data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['post'], url_path='grouped')
     def grouped(self, request):
         """
-        Paiement group? de plusieurs dettes d'un m?me client.
+        Paiement groupé de plusieurs dettes d'un même client.
         POST /api/paiements-dettes/grouped/
         """
+        from caisse.services.recu_paiement_pos import recu_groupe_urls
+
         serializer = PaiementDetteGroupedWriteSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         result = serializer.save()
+        reference = (result.get('paiement') or {}).get('reference')
+        if reference:
+            result['recu_groupe'] = recu_groupe_urls(request, reference)
         return Response(result, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get'], url_path='recu-json', permission_classes=[IsAuthenticated])
@@ -943,14 +950,30 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         if dette.client and entreprise:
             lien = dette.client.liens_entreprise.filter(entreprise_id=entreprise.pk).first()
 
+        from caisse.services.recu_paiement_pos import recu_paiement_urls
+        from pos.printer_service import MP2258Printer
+
         paiement_data = PaiementDetteReadSerializer(
             paiement,
             context={'request': request, 'include_dette_details': True},
         ).data
+        montant_ce_recu = Decimal(str(paiement.montant or 0))
+        ancien_solde = (montant_ce_recu + Decimal(str(dette.solde_restant or 0))).quantize(
+            Decimal('0.00001'), rounding=ROUND_DOWN,
+        )
+        recu_urls = recu_paiement_urls(request, paiement.pk)
+        ticket_lines = MP2258Printer().build_recu_paiement_dette_ticket_lines(
+            paiement,
+            dette,
+            entreprise,
+            user,
+            moyen=mouvement_moyen_affiche(paiement),
+            ancien_solde=ancien_solde,
+        )
 
         return Response({
             'document': 'recu_paiement_dette',
-            'titre': _('REÃ‡U DE PAIEMENT'),
+            'titre': _('REÇU DE PAIEMENT DETTE'),
             'format': 'json',
             'entreprise': serialize_entreprise(entreprise, request),
             'agence': serialize_agence(branch_id, entreprise),
@@ -967,214 +990,15 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
                 'montant_total': str(dette.montant_total),
                 'montant_paye': str(dette.montant_paye),
                 'solde_restant': str(dette.solde_restant),
+                'ancien_solde': str(ancien_solde),
                 'statut': dette.statut,
                 'sortie_id': dette.sortie_id,
             },
             'paiement': paiement_data,
-            'pdf_url': request.build_absolute_uri(
-                f'/api/paiements-dettes/{paiement.pk}/recu-paiement/'
-            ),
+            'recu': recu_urls,
+            'pdf_url': recu_urls['pdf_url'],
+            'print_url': recu_urls['print_url'],
+            'ticket_lines': [line.rstrip('\n') for line in ticket_lines],
         })
 
-    @action(detail=True, methods=['get'], url_path='recu-paiement', permission_classes=[IsAuthenticated])
-    def recu_paiement_pdf(self, request, pk=None):
-        """
-        ReÃ§u de paiement dette en PDF (ticket POS / impression directe).
-        GET /api/paiements-dettes/{id}/recu-paiement/
-        Pour JSON structurÃ© : GET .../recu-json/
-        """
-        from django.contrib.contenttypes.models import ContentType as CTModel
-
-        user = request.user
-        paiement = self.get_object()
-        ct_dette = CTModel.objects.get_for_model(DetteClient)
-        if paiement.content_type_id != ct_dette.id or not paiement.object_id:
-            return Response({'error': _('Mouvement invalide pour un reÃ§u de paiement de dette.')}, status=400)
-        dette = DetteClient.objects.filter(pk=paiement.object_id).select_related('client').first()
-        if not dette:
-            return Response({'error': _('Dette introuvable.')}, status=404)
-        client = dette.client
-        entreprise = user.get_entreprise(request)
-
-        POS_WIDTH = 80 * mm
-        lm = rm = tm = bm = 4 * mm
-        content_width = POS_WIDTH - lm - rm
-        buffer = io.BytesIO()
-        styles = getSampleStyleSheet()
-
-        # Polices rÃ©duites, design compact (impression POS) â€” mÃªme comportement que facture
-        normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=7, leading=8, wordWrap='CJK')
-        article_cell_style = ParagraphStyle('ArticleCell', parent=normal, wordWrap='CJK', allowWidows=0, allowOrphans=0)
-        title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=10, leading=11, alignment=TA_CENTER, spaceAfter=1*mm)
-        header_style = ParagraphStyle('Header', fontName='Helvetica-Bold', fontSize=8, leading=9, alignment=TA_LEFT)
-        info_style = ParagraphStyle('Info', fontName='Helvetica', fontSize=6, leading=7, alignment=TA_CENTER)
-        footer_style = ParagraphStyle('Footer', fontName='Helvetica', fontSize=6, leading=7, alignment=TA_LEFT, textColor=colors.black)
-        right_style = ParagraphStyle('Right', fontName='Helvetica', fontSize=7, leading=8, alignment=TA_RIGHT)
-
-        elements = []
-
-        # En-tÃªte compact (nom + tÃ©l serrÃ©s, titre juste en dessous) â€” comme facture POS
-        from rapports.utils.entete import get_entete_entreprise
-        from rapports.utils.pdf_generator import PDFGenerator
-        entete = get_entete_entreprise(entreprise)
-        entete = {'entreprise': {**entete['entreprise'], 'slogan': ''}}
-        pdf_gen = PDFGenerator()
-        elements.extend(pdf_gen._create_entete(entete, compact=False, centered=True, logo_size_mm=12))
-
-        # Titre au dÃ©but : REÃ‡U DE PAIEMENT
-        elements.append(Paragraph(f"<b>{_('REÃ‡U DE PAIEMENT')}</b>", title_style))
-        devise_obj = paiement.devise or dette.devise or Devise.objects.filter(est_principal=True).first()
-        symbole = (devise_obj.symbole or devise_obj.sigle or '') if devise_obj else ''
-
-        elements.append(Paragraph(f"{_('NÂ° ReÃ§u')}: RECU-{paiement.pk:06d}", info_style))
-        elements.append(Paragraph(f"{_('Date et heure')}: {paiement.date.strftime('%d/%m/%Y %H:%M')}", info_style))
-        elements.append(Spacer(1, 1*mm))
-
-        # CLIENT (labels traduits)
-        elements.append(Paragraph(f"<b>{_('Client')}</b>", header_style))
-        elements.append(Paragraph(f"{_('Nom')}: {client.nom}", normal))
-        if getattr(client, 'adresse', None) and client.adresse:
-            elements.append(Paragraph(f"{_('Adresse')}: {client.adresse}", normal))
-        if getattr(client, 'telephone', None) and client.telephone:
-            elements.append(Paragraph(f"{_('TÃ©l')}: {client.telephone}", normal))
-        if getattr(client, 'email', None) and client.email:
-            elements.append(Paragraph(f"{_('Email')}: {client.email}", normal))
-        elements.append(Spacer(1, 1*mm))
-
-        # Montant dette (une ligne, sans dÃ©tail)
-        montant_total_dette = dette.montant_total
-        solde_apres = dette.solde_restant
-        elements.append(Paragraph(f"<b>{_('Montant dette')}</b>: {montant_total_dette:.5f} {symbole}", normal))
-        elements.append(Spacer(1, 1*mm))
-
-        # Produits concernÃ©s par la dette â€” mÃªme rÃ©partition que facture (Article 25 %, QtÃ© 10 %, P.U. 10 %, Total 55 %)
-        sortie = dette.sortie
-        if sortie and hasattr(sortie, 'lignes'):
-            lignes_sortie = sortie.lignes.select_related('article').all()
-            if lignes_sortie:
-                elements.append(Paragraph(f"<b>{_('Produits concernÃ©s par la dette')}</b>", header_style))
-                prod_data = [
-                    [Paragraph(f"<b>{_('Article')}</b>", article_cell_style), Paragraph(f"<b>{_('QtÃ©')}</b>", normal), Paragraph(f"<b>{_('P.U.')}</b>", normal), Paragraph(f"<b>{_('Total')}</b>", normal)],
-                ]
-                for ligne in lignes_sortie:
-                    article = ligne.article
-                    nom_article = _article_display_name(article)
-                    qte = ligne.quantite or 0
-                    pu = Decimal(str(ligne.prix_unitaire or 0))
-                    total_ligne = (Decimal(str(qte)) * pu).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-                    prod_data.append([
-                        Paragraph(nom_article, article_cell_style),
-                        Paragraph(str(qte), normal),
-                        Paragraph(f"{pu:.5f} {symbole}", normal),
-                        Paragraph(f"{total_ligne:.5f} {symbole}", normal),
-                    ])
-                prod_table = Table(prod_data, colWidths=[content_width*0.25, content_width*0.10, content_width*0.15, content_width*0.50])
-                prod_table.hAlign = 'CENTER'
-                prod_table.setStyle(TableStyle([
-                    ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-                    ('FONTSIZE', (0, 0), (-1, -1), 7),
-                    ('BACKGROUND', (0, 0), (-1, -1), colors.white),
-                    ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-                    ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-                    ('ALIGN', (0, 1), (0, -1), 'LEFT'),
-                    ('ALIGN', (1, 1), (-1, -1), 'RIGHT'),
-                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                    ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
-                    ('LEFTPADDING', (0, 0), (-1, -1), 2),
-                    ('RIGHTPADDING', (0, 0), (-1, -1), 2),
-                    ('TOPPADDING', (0, 0), (-1, -1), 2),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-                ]))
-                elements.append(prod_table)
-                elements.append(Spacer(1, 1.5*mm))
-
-        # DÃ©tail du paiement â€” LibellÃ© 25 %, Valeur et Reste en colonnes cÃ´te Ã  cÃ´te
-        elements.append(Paragraph(f"<b>{_('DÃ©tail du paiement')}</b>", header_style))
-        table_paiement_data = [
-            [Paragraph(f"<b>{_('LibellÃ©')}</b>", normal), Paragraph(f"<b>{_('Valeur')}</b>", normal), Paragraph(f"<b>{_('Reste')}</b>", normal)],
-            [Paragraph(_("Montant payÃ© (ce reÃ§u)"), normal), Paragraph(f"<b>{paiement.montant:.5f} {symbole}</b>", normal), Paragraph(f"<b>{solde_apres:.5f} {symbole}</b>", normal)],
-        ]
-        table_paiement = Table(table_paiement_data, colWidths=[content_width*0.25, content_width*0.25, content_width*0.50])
-        table_paiement.hAlign = 'CENTER'
-        table_paiement.setStyle(TableStyle([
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 0), (-1, -1), 7),
-            ('BACKGROUND', (0, 0), (-1, -1), colors.white),
-            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
-            ('LEFTPADDING', (0, 0), (-1, -1), 2),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 2),
-            ('TOPPADDING', (0, 0), (-1, -1), 2),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-        ]))
-        elements.append(table_paiement)
-        elements.append(Spacer(1, 1.5*mm))
-
-        # Historique des paiements (fond blanc, traduit)
-        autres_paiements = (
-            MouvementCaisse.objects.filter(
-                content_type=ct_dette,
-                object_id=dette.pk,
-                type='ENTREE',
-            )
-            .exclude(pk=paiement.pk)
-            .select_related('devise')
-            .prefetch_related('details__type_caisse')
-            .order_by('-date')[:5]
-        )
-        if autres_paiements.exists():
-            elements.append(Paragraph(f"<b>{_('Autres paiements sur cette dette')}</b>", header_style))
-            hist_data = [[Paragraph(f"<b>{_('Date')}</b>", normal), Paragraph(f"<b>{_('Montant')}</b>", normal), Paragraph(f"<b>{_('Moyen')}</b>", normal)]]
-            for p in autres_paiements:
-                moyen_h = mouvement_moyen_affiche(p) or '-'
-                hist_data.append([
-                    Paragraph(p.date.strftime('%d/%m/%Y %H:%M'), normal),
-                    Paragraph(f"{p.montant:.5f} {symbole}", normal),
-                    Paragraph(moyen_h or '-', normal),
-                ])
-            hist_table = Table(hist_data, colWidths=[content_width*0.35, content_width*0.30, content_width*0.35])
-            hist_table.hAlign = 'CENTER'
-            hist_table.setStyle(TableStyle([
-                ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-                ('FONTSIZE', (0, 0), (-1, -1), 7),
-                ('BACKGROUND', (0, 0), (-1, -1), colors.white),
-                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-                ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
-                ('LEFTPADDING', (0, 0), (-1, -1), 2),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 2),
-                ('TOPPADDING', (0, 0), (-1, -1), 2),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-            ]))
-            elements.append(hist_table)
-            elements.append(Spacer(1, 1*mm))
-
-        # Pied de page compact (sans "push bottom") pour Ã©viter les pages en trop.
-        avail_width = content_width
-        imprim_par = (paiement.utilisateur.get_full_name() or paiement.utilisateur.username) if paiement.utilisateur else (user.get_full_name() or user.username)
-        footer_parts = [
-            Paragraph(_("Merci pour votre confiance. Conservez ce reÃ§u comme justificatif de paiement."), normal),
-            Spacer(1, 0.5*mm),
-            Paragraph(_("ImprimÃ© par: %(user)s") % {'user': imprim_par}, footer_style),
-            Paragraph(_("Le %(date)s") % {'date': timezone.now().strftime('%d/%m/%Y Ã  %H:%M')}, footer_style),
-            Spacer(1, 0.5*mm),
-            Paragraph("â€”" * 30, footer_style),
-        ]
-        main_height = sum(flow.wrap(avail_width, 100000)[1] for flow in elements)
-        footer_height = sum(flow.wrap(avail_width, 100000)[1] for flow in footer_parts)
-        POS_HEIGHT = main_height + footer_height + tm + bm + 1.5*mm
-        elements.extend(footer_parts)
-
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=(POS_WIDTH, POS_HEIGHT),
-            leftMargin=lm,
-            rightMargin=rm,
-            topMargin=tm,
-            bottomMargin=bm,
-            allowSplitting=0
-        )
-        doc.build(elements)
-        buffer.seek(0)
-        filename = f"RECU_PAIEMENT_{paiement.pk}.pdf"
-        return HttpResponse(buffer, content_type='application/pdf', headers={'Content-Disposition': f'inline; filename="{filename}"'})
+    # recu-paiement, recu-paiement-print, recu-groupe* → PaiementDetteRecuMixin
