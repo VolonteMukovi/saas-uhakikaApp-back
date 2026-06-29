@@ -408,6 +408,8 @@ class UserViewSet(viewsets.ModelViewSet):
                     {'error': _("Vous devez être associé à une entreprise pour créer des utilisateurs.")},
                     status=status.HTTP_403_FORBIDDEN
                 )
+            from abonnements.services.limites import verifier_creation_utilisateur
+            verifier_creation_utilisateur(entreprise.id, request)
             data = request.data.copy()
             role = (data.get('role') or 'user').lower()
             data['role'] = 'user' if role not in ('admin', 'user') else role
@@ -828,12 +830,11 @@ class UserViewSet(viewsets.ModelViewSet):
         operation_summary="Mettre à jour le profil (PATCH partiel)",
         responses={200: openapi.Response('Profil mis à jour')},
     )
-    @action(detail=False, methods=['get', 'put', 'patch'], permission_classes=[IsSuperAdminOrAdmin])
+    @action(detail=False, methods=['get', 'put', 'patch'], permission_classes=[permissions.IsAuthenticated])
     def me(self, request):
         """
         Récupérer ou modifier les informations de l'utilisateur connecté (profil).
-        SuperAdmin et Admin : GET (voir profil + entreprise), PATCH/PUT (modifier profil).
-        Permission IsSuperAdminOrAdmin conservée pour que l'Admin garde l'accès à son entreprise et aux utilisateurs.
+        Tout utilisateur authentifié peut compléter son prénom / nom (flow onboarding).
         """
         user = request.user
         if request.method in ('GET', 'HEAD', 'OPTIONS'):

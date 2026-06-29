@@ -38,15 +38,22 @@ class IsAdminOrUser(permissions.BasePermission):
     """
     Admin ou User (Agent). Pour les vues métier : ventes, stock, rapports, etc.
     L'Admin a CRUD complet sur son entreprise, l'User (agent) idem sauf Entreprise et gestion users.
+    GET/HEAD/OPTIONS : superadmin plateforme autorisé (consultation).
     """
     message = "Accès réservé aux administrateurs ou aux agents."
 
     def has_permission(self, request, view):
-        return (
-            request.user
-            and request.user.is_authenticated
-            and (request.user.is_admin(request) or request.user.is_agent(request))
-        )
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superadmin() and request.method in permissions.SAFE_METHODS:
+            return True
+        if user.is_admin(request) or user.is_agent(request):
+            return True
+        # Membership actif mais rôle non résolu (token sans membership_id) — lecture seule
+        if request.method in permissions.SAFE_METHODS and user.get_current_membership(request):
+            return True
+        return False
 
 
 class IsSuperAdminOrAdmin(permissions.BasePermission):

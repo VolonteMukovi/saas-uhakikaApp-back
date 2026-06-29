@@ -23,6 +23,10 @@ class Entreprise(models.Model):
     logo = models.ImageField(upload_to='entreprises/logos/', blank=True, null=True)
     slogan = models.CharField(max_length=255, blank=True, null=True, help_text="Devise ou slogan de l'entreprise (affiché dans l'en-tête des rapports)")
     has_branches = models.BooleanField(default=False, help_text="Active la gestion par succursales (branches).")
+    configuration_complete = models.BooleanField(
+        default=False,
+        help_text="True lorsque les informations obligatoires de l'entreprise sont complétées (flow SaaS).",
+    )
     config = models.TextField(
         blank=True,
         default='',

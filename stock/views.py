@@ -374,7 +374,9 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
             )
             if not is_member:
                 raise PermissionDenied(_("Vous ne pouvez modifier que votre propre entreprise."))
-            serializer.save()
+            ent = serializer.save()
+            from inscription.services.entreprise_saas import evaluer_et_marquer_configuration
+            evaluer_et_marquer_configuration(ent)
 
     def perform_destroy(self, instance):
         from users.models import Membership
@@ -485,7 +487,11 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
             raise serializers.ValidationError({'detail': _('Le corps de la requÃªte doit Ãªtre un objet JSON.')})
         merged = entreprise.merge_config(request.data, user_id=request.user.pk)
         entreprise.save(update_fields=['config'])
-        return Response(merged)
+        response = Response(merged)
+        from config.http.etag import compute_resource_etag
+        entreprise.refresh_from_db()
+        response['ETag'] = compute_resource_etag(self, entreprise, request)
+        return response
 
     @action(
         detail=True,
@@ -565,6 +571,8 @@ class SuccursaleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         eid = getattr(self.request, 'tenant_id', None) or user.get_entreprise_id(self.request)
         if not eid:
             raise PermissionDenied(_("Aucune entreprise sÃ©lectionnÃ©e."))
+        from abonnements.services.limites import verifier_creation_succursale
+        verifier_creation_succursale(eid, self.request)
         entreprise = Entreprise.objects.get(id=eid)
         serializer.save(entreprise=entreprise)
 
@@ -613,6 +621,8 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             raise serializers.ValidationError({
                 'client': _('Client obligatoire pour une vente à crédit.'),
             })
+        from abonnements.services.limites import verifier_vente_sortie
+        verifier_vente_sortie(tenant_id, statut_demande, request)
         default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
         with transaction.atomic():
             # RÃ©cupÃ©rer le client si fourni

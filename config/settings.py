@@ -37,6 +37,8 @@ INSTALLED_APPS = [
     "import_excel",
     "rapports",  # Application pour la génération des rapports
     "order",  # Gestion des marchandises en cours de transport
+    "abonnements",  # SaaS : formules, licences, paiements
+    "inscription",  # SaaS : inscription et onboarding
 ]
 
 MIDDLEWARE = [
@@ -50,6 +52,10 @@ MIDDLEWARE = [
     "config.http.idempotency.IdempotencyMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "abonnements.middleware.LicenceEntrepriseMiddleware",
+    "abonnements.middleware.ControleLicenceEcritureMiddleware",
+    "abonnements.middleware.ControleFonctionnalitePlanMiddleware",
+    "inscription.middleware.ControleConfigurationMetierMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "config.http.etag.ETagMiddleware",
@@ -333,3 +339,31 @@ try:
 except (OSError, PermissionError):
     # En production ou si pas de permissions d'écriture, utiliser seulement la console
     pass
+
+# --- Connexion Google OAuth (SaaS / inscription) ---
+# Client ID(s) OAuth 2.0 depuis Google Cloud Console (type « Application Web »).
+# Plusieurs IDs séparés par des virgules (ex. web + Android).
+GOOGLE_OAUTH_CLIENT_IDS = [
+    x.strip()
+    for x in config('GOOGLE_OAUTH_CLIENT_ID', default='').split(',')
+    if x.strip()
+]
+# Tolérance horloge locale (secondes) pour exp/iat ; fallback tokeninfo si échec horloge.
+GOOGLE_OAUTH_CLOCK_SKEW_SECONDS = config('GOOGLE_OAUTH_CLOCK_SKEW_SECONDS', default=300, cast=int)
+
+# --- Contrôle licence SaaS (étape 3) ---
+LICENCE_CONTROLE_ACTIF = config('LICENCE_CONTROLE_ACTIF', default=True, cast=bool)
+
+# --- Paiements en ligne (étape 5) ---
+PAIEMENT_GATEWAY_SANDBOX = config('PAIEMENT_GATEWAY_SANDBOX', default=DEBUG, cast=bool)
+PAIEMENT_RETURN_BASE_URL = config('PAIEMENT_RETURN_BASE_URL', default='https://uhakikaapp.store')
+PAIEMENT_WEBHOOK_BASE_URL = config('PAIEMENT_WEBHOOK_BASE_URL', default='http://127.0.0.1:8000')
+
+MAISHA_PAY_API_KEY = config('MAISHA_PAY_API_KEY', default='')
+MAISHA_PAY_WEBHOOK_SECRET = config('MAISHA_PAY_WEBHOOK_SECRET', default='')
+
+FLEXPAY_API_KEY = config('FLEXPAY_API_KEY', default='')
+FLEXPAY_WEBHOOK_SECRET = config('FLEXPAY_WEBHOOK_SECRET', default='')
+
+SERDI_PAY_API_KEY = config('SERDI_PAY_API_KEY', default='')
+SERDI_PAY_WEBHOOK_SECRET = config('SERDI_PAY_WEBHOOK_SECRET', default='')

@@ -13,6 +13,28 @@ def compute_weak_etag(content: bytes) -> str:
     return f'W/"{digest}"'
 
 
+def compute_serialized_etag(data) -> str:
+    """ETag identique à celui produit par ETagMiddleware sur une réponse JSON DRF."""
+    from rest_framework.renderers import JSONRenderer
+
+    body = JSONRenderer().render(data)
+    return compute_weak_etag(body)
+
+
+def compute_resource_etag(view, instance, request=None) -> str:
+    """
+    ETag d'une ressource API — aligné sur le corps JSON GET (If-None-Match / If-Match).
+    """
+    get_serializer = getattr(view, 'get_serializer', None)
+    if get_serializer is not None:
+        try:
+            serializer = get_serializer(instance)
+            return compute_serialized_etag(serializer.data)
+        except Exception:
+            pass
+    return compute_instance_etag(instance)
+
+
 def normalize_etag(value: str) -> str:
     return (value or '').strip().strip('"').replace('W/', '').replace('w/', '')
 
@@ -81,12 +103,19 @@ class ETagMiddleware:
 
 
 def compute_instance_etag(instance) -> str:
-    """ETag faible pour If-Match (optimistic locking)."""
+    """ETag faible pour If-Match (optimistic locking) — repli si pas de serializer."""
     parts = [
         instance.__class__.__name__,
         str(getattr(instance, 'pk', '')),
     ]
-    for attr in ('updated_at', 'date_modification', 'date_creation', 'statut'):
+    for attr in (
+        'updated_at',
+        'date_modification',
+        'date_creation',
+        'statut',
+        'configuration_complete',
+        'config',
+    ):
         val = getattr(instance, attr, None)
         if val is not None:
             parts.append(str(val))

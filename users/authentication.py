@@ -29,7 +29,27 @@ class JWTAuthenticationWithContext(JWTAuthentication):
                 .select_related('entreprise', 'default_succursale')
                 .first()
             ) if mid else None
+            if request.current_membership is None and request.tenant_id:
+                request.current_membership = (
+                    Membership.objects.filter(
+                        user=user,
+                        entreprise_id=request.tenant_id,
+                        is_active=True,
+                    )
+                    .select_related('entreprise', 'default_succursale')
+                    .order_by('id')
+                    .first()
+                )
+                if request.current_membership:
+                    request.membership_id = request.current_membership.id
         else:
             request.tenant_id = request.branch_id = request.membership_id = None
             request.current_membership = None
+
+        if user.is_authenticated and not user.is_superuser:
+            eid = getattr(request, 'tenant_id', None) or user.get_entreprise_id(request)
+            if eid:
+                from abonnements.services.licence import build_etat_licence
+                request.etat_licence = build_etat_licence(eid)
+
         return result

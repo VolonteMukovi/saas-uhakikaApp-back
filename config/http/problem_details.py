@@ -72,6 +72,54 @@ def exception_handler(exc, context):
             type_uri='urn:uhakika:problem:caisse-error',
         )
 
+    from abonnements.exceptions import FonctionnaliteNonAutorisee, LicenceInactive, LimiteQuotaAtteinte
+
+    if isinstance(exc, LicenceInactive):
+        extra = {
+            'code': exc.default_code,
+            'etat_licence': getattr(exc, 'etat_licence', {}),
+            'action_recommandee': 'renouveler_abonnement',
+        }
+        return problem_response(
+            request=request,
+            status_code=exc.status_code,
+            title='Licence inactive',
+            detail=str(exc.detail),
+            type_uri='urn:uhakika:problem:licence-inactive',
+            extra=extra,
+        )
+
+    if isinstance(exc, FonctionnaliteNonAutorisee):
+        return problem_response(
+            request=request,
+            status_code=exc.status_code,
+            title='Fonctionnalité non autorisée',
+            detail=str(exc.detail),
+            type_uri='urn:uhakika:problem:fonctionnalite-non-autorisee',
+            extra={
+                'code': exc.default_code,
+                'action_recommandee': 'changer_formule',
+                'url_formules': '/api/abonnements/formules/',
+            },
+        )
+
+
+    if isinstance(exc, LimiteQuotaAtteinte):
+        return problem_response(
+            request=request,
+            status_code=exc.status_code,
+            title='Limite de formule atteinte',
+            detail=str(exc.detail),
+            type_uri='urn:uhakika:problem:limite-quota',
+            extra={
+                'code': exc.default_code,
+                'type_quota': getattr(exc, 'type_quota', None),
+                'maximum': getattr(exc, 'maximum', None),
+                'actuel': getattr(exc, 'actuel', None),
+                'action_recommandee': 'changer_formule',
+            },
+        )
+
     response = drf_exception_handler(exc, context)
     if response is None:
         return None

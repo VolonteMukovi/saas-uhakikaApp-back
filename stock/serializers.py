@@ -214,7 +214,7 @@ class EntrepriseSerializer(serializers.ModelSerializer):
         model = Entreprise
         fields = [
             'id', 'nom', 'secteur', 'pays', 'adresse', 'telephone', 'email', 'nif',
-            'responsable', 'logo', 'slogan', 'has_branches', 'config',
+            'responsable', 'logo', 'slogan', 'has_branches', 'configuration_complete', 'config',
         ]
 
 

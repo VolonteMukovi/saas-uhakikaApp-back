@@ -143,7 +143,22 @@ class SessionCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         """Session(s) ouverte(s) pour le contexte courant (format canonique ``is_open``)."""
         tenant_id, branch_id = self.get_tenant_ids()
         if not tenant_id:
-            return Response({'detail': _('Contexte entreprise manquant.')}, status=403)
+            membership = request.user.get_current_membership(request)
+            if membership:
+                tenant_id = membership.entreprise_id
+                branch_id = branch_id or membership.default_succursale_id
+            else:
+                return Response(
+                    {
+                        'detail': _('Contexte entreprise manquant. Sélectionnez votre entreprise.'),
+                        'code': 'NO_TENANT_CONTEXT',
+                        'is_open': False,
+                        'ouverte': False,
+                        'session': None,
+                        'sessions': [],
+                    },
+                    status=200,
+                )
         devise_id = request.query_params.get('devise_id')
         type_caisse_id = (
             request.query_params.get('type_caisse_id')
