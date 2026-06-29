@@ -20,6 +20,7 @@ DEBUG = config("DEBUG", default=True, cast=bool)
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="*").split(",")  # Dev uniquement, limiter en prod
 
 INSTALLED_APPS = [
+    "config.apps.ConfigConfig",
     "corsheaders",
     "django.contrib.admin",
     "django.contrib.auth",
@@ -40,17 +41,51 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
+    "config.http.correlation.CorrelationIdMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "config.middleware.AcceptLanguageMiddleware",
+    "config.http.versioning.ApiVersionMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "config.http.idempotency.IdempotencyMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "config.http.etag.ETagMiddleware",
 ]
 
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'uhakika-idempotency',
+    }
+}
+
+IDEMPOTENCY_TTL_SECONDS = config('IDEMPOTENCY_TTL_SECONDS', default=86400, cast=int)
+IDEMPOTENCY_LOCK_SECONDS = config('IDEMPOTENCY_LOCK_SECONDS', default=120, cast=int)
+
+# CORS — autoriser les en-têtes HTTP du manifeste CURSOR.md (sinon le navigateur
+# n'envoie que OPTIONS et jamais GET/POST : écran vide).
+from corsheaders.defaults import default_headers, default_methods
+
 CORS_ALLOW_ALL_ORIGINS = True  # Dev, à limiter en prod
+CORS_ALLOW_METHODS = list(default_methods)
+CORS_ALLOW_HEADERS = (
+    *default_headers,
+    'if-match',
+    'if-none-match',
+    'idempotency-key',
+    'x-correlation-id',
+    'accept-language',
+)
+CORS_EXPOSE_HEADERS = (
+    'etag',
+    'x-correlation-id',
+    'api-version',
+    'idempotency-replayed',
+    'content-language',
+)
 
 ROOT_URLCONF = "config.urls"
 
@@ -129,7 +164,7 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'users.authentication.JWTAuthenticationWithContext',
     ),
-    'DEFAULT_PAGINATION_CLASS': 'config.pagination.StandardResultsSetPagination',
+    'DEFAULT_PAGINATION_CLASS': 'config.pagination.UhakikaPagination',
     'PAGE_SIZE': 25,
     'EXCEPTION_HANDLER': 'config.exception_handlers.exception_handler',
     # 'DEFAULT_PERMISSION_CLASSES': (
@@ -248,13 +283,18 @@ LOG_FILE_PATH = LOGS_DIR / 'stock_suppressions.log'
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    'filters': {
+        'correlation_id': {
+            '()': 'config.http.correlation.CorrelationIdFilter',
+        },
+    },
     'formatters': {
         'verbose': {
-            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'format': '{levelname} {asctime} [{correlation_id}] {module} {process:d} {thread:d} {message}',
             'style': '{',
         },
         'simple': {
-            'format': '{levelname} {asctime} {message}',
+            'format': '{levelname} {asctime} [{correlation_id}] {message}',
             'style': '{',
         },
     },
@@ -263,6 +303,7 @@ LOGGING = {
             'level': 'INFO',
             'class': 'logging.StreamHandler',
             'formatter': 'simple',
+            'filters': ['correlation_id'],
         },
     },
     'loggers': {

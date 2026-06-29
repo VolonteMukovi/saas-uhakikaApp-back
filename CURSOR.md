@@ -97,3 +97,20 @@ Ce document définit les règles de développement absolues pour la conception d
 ### Frontend (React TS)
 - **Règle :** Assurer la traçabilité des incidents de l'action utilisateur jusqu'au cœur du serveur.
 - **Implémentation :** À chaque cycle de requête initié dans l'intercepteur Axios, générer un identifiant unique universel (`X-Correlation-ID`). En cas d'erreur HTTP majeure, capturer cet identifiant pour l'afficher explicitement à l'écran de l'utilisateur sous la forme d'un code de suivi de bug pour le support technique.
+
+---
+
+## Implémentation backend (état actuel)
+
+| # | Règle | Module / middleware |
+|---|--------|---------------------|
+| 1 | ETag / 304 | `config.http.etag.ETagMiddleware` |
+| 2 | If-Match / 412 / 428 | `config.http.preconditions` (patch global `ModelViewSet`) |
+| 3 | Idempotency-Key | `config.http.idempotency.IdempotencyMiddleware` + `CACHES` |
+| 4 | Range / 206 | `config.http.streaming` (+ ETag middleware sur PDF/CSV) |
+| 5 | RFC 9457 | `config.http.problem_details.exception_handler` |
+| 6 | Accept version | `config.http.versioning.ApiVersionMiddleware` → en-tête `API-Version` |
+| 7 | Curseur | `config.pagination.UhakikaCursorPagination` (défaut DRF) |
+| 8 | Correlation-ID | `config.http.correlation.CorrelationIdMiddleware` + logs |
+
+En-têtes client : `If-None-Match`, `If-Match`, `Idempotency-Key`, `Accept: application/json; version=1.0`, `X-Correlation-ID`, `Range`, paramètre `?cursor=`.
