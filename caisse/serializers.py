@@ -1,5 +1,8 @@
+from decimal import Decimal
+
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
+from django.utils import timezone
 from django.utils.translation import gettext as _
 from rest_framework import serializers
 
@@ -7,7 +10,7 @@ from caisse.constants import CODE_TYPE_CAISSE_CHOICES
 from caisse.models import DetailMouvementCaisse, MouvementCaisse, TypeCaisse
 from caisse.services.caisse import creer_mouvement_caisse, mouvement_moyen_affiche
 from caisse.services.caisse_defaut import CaisseError, caisse_necessite_session, parse_type_caisse_id_from_payload
-from stock.models import DetteClient, Devise
+from stock.models import Client, DetteClient, Devise
 from stock.services.currency import assert_caisse_devise_compatible, build_conversion_snapshot
 from stock.serializers import DeviseSerializer
 
@@ -375,6 +378,274 @@ class PaiementDetteWriteSerializer(serializers.Serializer):
             taux_change=snapshot['taux_change'],
             montant_reference=snapshot['montant_reference'],
         )
+
+
+class PaiementDetteGroupedWriteSerializer(serializers.Serializer):
+    MODE_ANCIENNES_DETTES_D_ABORD = 'ANCIENNES_DETTES_D_ABORD'
+    MODE_REPARTITION_CHOICES = [
+        (MODE_ANCIENNES_DETTES_D_ABORD, _('Anciennes dettes d\'abord')),
+    ]
+
+    client_id = serializers.SlugRelatedField(
+        slug_field='id', queryset=Client.objects.all(), source='client'
+    )
+    dettes = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        allow_empty=True,
+        write_only=True,
+    )
+    payer_toutes = serializers.BooleanField(required=False, default=False)
+    montant_paye = serializers.DecimalField(max_digits=12, decimal_places=5)
+    devise_id = serializers.PrimaryKeyRelatedField(
+        queryset=Devise.objects.all(), source='devise', required=False, allow_null=True
+    )
+    type_caisse_id = serializers.PrimaryKeyRelatedField(
+        queryset=TypeCaisse.objects.filter(is_active=True),
+        source='type_caisse',
+        required=True,
+    )
+    mode_repartition = serializers.ChoiceField(choices=MODE_REPARTITION_CHOICES, default=MODE_ANCIENNES_DETTES_D_ABORD)
+    commentaire = serializers.CharField(required=False, allow_blank=True, default='')
+    moyen = serializers.CharField(required=False, allow_blank=True, default='')
+    reference = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        req = self.context.get('request')
+        if req and getattr(req.user, 'is_authenticated', False):
+            eid = getattr(req, 'tenant_id', None) or (
+                req.user.get_entreprise_id(req) if hasattr(req.user, 'get_entreprise_id') else None
+            )
+            if eid:
+                self.fields['type_caisse_id'].queryset = TypeCaisse.objects.filter(
+                    entreprise_id=eid, is_active=True,
+                )
+                self.fields['devise_id'].queryset = Devise.objects.filter(entreprise_id=eid)
+
+    def to_internal_value(self, data):
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        else:
+            data = dict(data)
+        if 'caisse' in data and 'type_caisse_id' not in data:
+            data['type_caisse_id'] = data.pop('caisse')
+        if 'caisse_id' in data and 'type_caisse_id' not in data:
+            data['type_caisse_id'] = data.pop('caisse_id')
+        return super().to_internal_value(data)
+
+    def _context_ids(self):
+        req = self.context.get('request')
+        tenant_id = getattr(req, 'tenant_id', None) if req else None
+        branch_id = getattr(req, 'branch_id', None) if req else None
+        if not tenant_id and req and getattr(req.user, 'is_authenticated', False) and hasattr(req.user, 'get_entreprise_id'):
+            tenant_id = req.user.get_entreprise_id(req)
+        return tenant_id, branch_id
+
+    def _dettes_queryset(self, *, client, tenant_id, branch_id):
+        qs = DetteClient.objects.filter(
+            client=client,
+            entreprise_id=tenant_id,
+        )
+        if branch_id is not None:
+            qs = qs.filter(succursale_id=branch_id)
+        return qs
+
+    def _compute_status(self, dette, new_solde):
+        if new_solde <= 0:
+            return 'PAYEE'
+        today = timezone.now().date()
+        if dette.date_echeance and dette.date_echeance < today:
+            return 'RETARD'
+        return 'EN_COURS'
+
+    def validate(self, attrs):
+        client = attrs['client']
+        dette_ids = attrs.get('dettes') or []
+        payer_toutes = attrs.get('payer_toutes', False)
+        montant = attrs['montant_paye']
+        type_caisse = attrs.get('type_caisse')
+        devise = attrs.get('devise')
+        tenant_id, branch_id = self._context_ids()
+
+        if not tenant_id:
+            raise serializers.ValidationError({'client_id': _('Contexte entreprise manquant.')})
+        if montant <= 0:
+            raise serializers.ValidationError({'montant_paye': _('Le montant doit ?tre positif.')})
+        if not payer_toutes and not dette_ids:
+            raise serializers.ValidationError({
+                'dettes': _('S?lectionnez au moins une dette ou activez payer_toutes.')
+            })
+        if type_caisse is None:
+            raise serializers.ValidationError({
+                'type_caisse_id': _('Veuillez s?lectionner une caisse avant de valider cette op?ration.')
+            })
+        if not type_caisse.is_active:
+            raise serializers.ValidationError({
+                'type_caisse_id': _('Cette op?ration financi?re exige une caisse active.')
+            })
+
+        qs = self._dettes_queryset(client=client, tenant_id=tenant_id, branch_id=branch_id).exclude(statut='PAYEE')
+        if payer_toutes:
+            dettes = list(qs.order_by('date_creation', 'id'))
+        else:
+            dettes = list(qs.filter(pk__in=dette_ids).order_by('date_creation', 'id'))
+            found_ids = {d.pk for d in dettes}
+            missing_ids = [did for did in dette_ids if did not in found_ids]
+            if missing_ids:
+                raise serializers.ValidationError({
+                    'dettes': _('Certaines dettes sont introuvables, d?j? pay?es ou hors p?rim?tre: %(ids)s')
+                    % {'ids': ', '.join(str(x) for x in missing_ids)}
+                })
+
+        if not dettes:
+            raise serializers.ValidationError({'dettes': _('Aucune dette ouverte ? payer pour ce client.')})
+
+        effective_devise = devise or dettes[0].devise
+        if effective_devise is None:
+            raise serializers.ValidationError({'devise_id': _('Devise requise pour ce paiement group?.')})
+
+        total_selectionne = Decimal('0.00000')
+        for dette in dettes:
+            dette_devise = dette.devise or effective_devise
+            if dette_devise is None or dette_devise.pk != effective_devise.pk:
+                raise serializers.ValidationError({
+                    'dettes': _('Toutes les dettes s?lectionn?es doivent ?tre dans la m?me devise.')
+                })
+            total_selectionne += dette.solde_restant
+
+        if montant > total_selectionne:
+            raise serializers.ValidationError({
+                'montant_paye': _('Le montant (%(m)s) d?passe le total s?lectionn? (%(s)s).')
+                % {'m': montant, 's': total_selectionne}
+            })
+
+        assert_caisse_devise_compatible(type_caisse, effective_devise)
+        attrs['resolved_devise'] = effective_devise
+        attrs['total_selectionne'] = total_selectionne
+        attrs['selected_dette_ids'] = [d.pk for d in dettes]
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        client = validated_data['client']
+        dette_ids = validated_data['selected_dette_ids']
+        montant = validated_data['montant_paye']
+        devise = validated_data['resolved_devise']
+        type_caisse = validated_data['type_caisse']
+        commentaire = (validated_data.get('commentaire') or '').strip()
+        moyen = (validated_data.get('moyen') or '').strip()
+        mode_repartition = validated_data['mode_repartition']
+        tenant_id, branch_id = self._context_ids()
+        req = self.context.get('request')
+        user = req.user if req and getattr(req.user, 'is_authenticated', False) else None
+
+        dettes = list(
+            DetteClient.objects.select_for_update()
+            .filter(pk__in=dette_ids, client=client, entreprise_id=tenant_id)
+            .order_by('date_creation', 'id')
+        )
+        if branch_id is not None:
+            dettes = [d for d in dettes if d.succursale_id == branch_id]
+        if not dettes:
+            raise serializers.ValidationError({'dettes': _('Aucune dette ouverte ? payer pour ce client.')})
+
+        total_selectionne = Decimal('0.00000')
+        for dette in dettes:
+            if dette.statut == 'PAYEE' or dette.solde_restant <= 0:
+                raise serializers.ValidationError({
+                    "dettes": _("La dette #%(id)s n'est plus ouverte.") % {"id": dette.pk}
+                })
+            dette_devise = dette.devise or devise
+            if dette_devise is None or dette_devise.pk != devise.pk:
+                raise serializers.ValidationError({
+                    'dettes': _('Toutes les dettes s?lectionn?es doivent ?tre dans la m?me devise.')
+                })
+            total_selectionne += dette.solde_restant
+
+        if montant > total_selectionne:
+            raise serializers.ValidationError({
+                'montant_paye': _('Le montant (%(m)s) d?passe le total s?lectionn? (%(s)s).')
+                % {'m': montant, 's': total_selectionne}
+            })
+
+        reference = (validated_data.get('reference') or '').strip()
+        if not reference:
+            reference = f"PAY-GROUP-{tenant_id or 'NA'}-{client.pk}-{timezone.now().strftime('%Y%m%d%H%M%S')}"
+
+        remaining = montant
+        dettes_payees = []
+        mouvements = []
+
+        for dette in dettes:
+            if remaining <= 0:
+                break
+            ancien_solde = dette.solde_restant
+            montant_applique = min(ancien_solde, remaining)
+            if montant_applique <= 0:
+                continue
+
+            motif = commentaire or f"Paiement groupe des dettes - {client.nom} - Dette #{dette.pk}"
+            mc = creer_mouvement_caisse(
+                montant=montant_applique,
+                devise=devise,
+                type_mouvement='ENTREE',
+                entreprise_id=tenant_id,
+                succursale_id=branch_id,
+                content_object=dette,
+                utilisateur=user,
+                reference_piece=reference,
+                motif=motif,
+                moyen=moyen or None,
+                type_caisse=type_caisse,
+                categorie='PAIEMENT_DETTE',
+            )
+            mouvements.append(mc)
+
+            new_solde = ancien_solde - montant_applique
+            nouveau_statut = self._compute_status(dette, new_solde)
+            DetteClient.objects.filter(pk=dette.pk).update(statut=nouveau_statut)
+
+            dettes_payees.append({
+                'dette_id': dette.pk,
+                'sortie_id': dette.sortie_id,
+                'mouvement_caisse_id': mc.pk,
+                'montant_applique': str(montant_applique),
+                'ancien_solde': str(ancien_solde),
+                'nouveau_solde': str(new_solde),
+                'statut': nouveau_statut,
+            })
+            remaining -= montant_applique
+
+        return {
+            'success': True,
+            'message': _('Paiement group? enregistr? avec succ?s.'),
+            'client': {
+                'id': client.pk,
+                'nom': client.nom,
+            },
+            'paiement': {
+                'reference': reference,
+                'montant_total_paye': str(montant),
+                'devise': devise.sigle if devise else None,
+                'devise_id': devise.pk if devise else None,
+                'type_caisse_id': type_caisse.pk,
+                'mode_repartition': mode_repartition,
+                'nombre_dettes_selectionnees': len(dettes),
+                'total_selectionne': str(total_selectionne),
+                'montant_non_applique': str(remaining),
+            },
+            'dettes_payees': dettes_payees,
+            'paiements_crees': [
+                {
+                    'mouvement_caisse_id': mc.pk,
+                    'dette_id': mc.object_id,
+                    'reference': mc.reference_piece or '',
+                    'montant_paye': str(mc.montant),
+                }
+                for mc in mouvements
+            ],
+        }
 
 
 PaiementDetteSerializer = PaiementDetteReadSerializer

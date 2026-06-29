@@ -21,6 +21,7 @@ from rest_framework.response import Response
 from caisse.models import MouvementCaisse, TypeCaisse
 from caisse.serializers import (
     MouvementCaisseSerializer,
+    PaiementDetteGroupedWriteSerializer,
     PaiementDetteReadSerializer,
     PaiementDetteWriteSerializer,
     TypeCaisseSerializer,
@@ -884,6 +885,8 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
     def get_serializer_class(self):
         if self.action == 'create':
             return PaiementDetteWriteSerializer
+        if self.action == 'grouped':
+            return PaiementDetteGroupedWriteSerializer
         return PaiementDetteReadSerializer
 
     def create(self, request, *args, **kwargs):
@@ -894,6 +897,17 @@ class PaiementDetteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
             PaiementDetteReadSerializer(mc, context={'request': request}).data,
             status=status.HTTP_201_CREATED,
         )
+
+    @action(detail=False, methods=['post'], url_path='grouped')
+    def grouped(self, request):
+        """
+        Paiement group? de plusieurs dettes d'un m?me client.
+        POST /api/paiements-dettes/grouped/
+        """
+        serializer = PaiementDetteGroupedWriteSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        result = serializer.save()
+        return Response(result, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get'], url_path='recu-json', permission_classes=[IsAuthenticated])
     def recu_json(self, request, pk=None):

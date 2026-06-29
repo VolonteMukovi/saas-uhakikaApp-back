@@ -2381,59 +2381,31 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             totaux_par_devise[devise_sigle]['total'] += montant_ligne
         
         with transaction.atomic():
-            entree = serializer.save(entreprise_id=tenant_id, succursale_id=branch_id)
-
+            stock_states = {}
             for article_id, ligne_data in articles_groupes.items():
                 article_obj = Article.objects.get(article_id=article_id)
-                qte = ligne_data['quantite']
-                prix_unitaire = ligne_data['prix_unitaire']
-                prix_vente = ligne_data.get('prix_vente', Decimal('0.00'))
-                seuil_alerte = ligne_data['seuil_alerte']
-                date_expiration = ligne_data['date_expiration']
-                devise_id = ligne_data['devise']
-                devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=tenant_id) if devise_id else None
+                stock_obj = Stock.objects.filter(article=article_obj).first()
+                stock_states[article_id] = {
+                    'article_nom': article_obj.nom_commercial or article_obj.nom_scientifique,
+                    'previous_qte': stock_obj.Qte if stock_obj else Decimal('0'),
+                    'had_stock': stock_obj is not None,
+                    'quantite': ligne_data['quantite'],
+                }
 
-                # Cr?er la ligne d'entr?e (quantite_restante sera initialis?e automatiquement dans save())
-                montant_ligne = (prix_unitaire * Decimal(str(qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-                snapshot_ligne = build_conversion_snapshot(
-                    entreprise_id=entree.entreprise_id,
-                    amount=montant_ligne,
-                    devise_source=devise_obj,
-                )
-                LigneEntree.objects.create(
-                    entree=entree,
-                    article=article_obj,
-                    quantite=qte,
-                    quantite_restante=qte,
-                    prix_unitaire=prix_unitaire,
-                    prix_vente=prix_vente,
-                    date_expiration=date_expiration,
-                    devise=devise_obj,
-                    devise_reference=snapshot_ligne['devise_reference'],
-                    taux_change=snapshot_ligne['taux_change'],
-                    montant_reference=snapshot_ligne['montant_reference'],
-                    seuil_alerte=seuil_alerte
-                )
+            entree = serializer.save(entreprise_id=tenant_id, succursale_id=branch_id)
 
-                # Gestion intelligente du stock
-                stock_obj, created = Stock.objects.get_or_create(
-                    article=article_obj,
-                    defaults={'Qte': 0, 'seuilAlert': seuil_alerte}
-                )
-
-                # Utiliser nom_commercial si disponible, sinon nom_scientifique
-                article_nom = article_obj.nom_commercial or article_obj.nom_scientifique
-                if created:
-                    messages_reponse.append(f"Nouveau stock cr?? pour {article_nom}")
+            for article_id, state in stock_states.items():
+                article_nom = state['article_nom']
+                previous_qte = state['previous_qte']
+                qte = state['quantite']
+                if not state['had_stock']:
+                    messages_reponse.append(f"Nouveau stock cree pour {article_nom}")
+                elif previous_qte == 0:
+                    messages_reponse.append(f"Reapprovisionnement de {article_nom} (stock etait epuise)")
                 else:
-                    if stock_obj.Qte == 0:
-                        messages_reponse.append(f"R?approvisionnement de {article_nom} (stock ?tait ?puis?)")
-                    else:
-                        messages_reponse.append(f"Ajout au stock existant de {article_nom} (stock: {stock_obj.Qte} ? {stock_obj.Qte + qte})")
-
-                stock_obj.Qte += qte
-                stock_obj.seuilAlert = seuil_alerte
-                stock_obj.save()
+                    messages_reponse.append(
+                        f"Ajout au stock existant de {article_nom} (stock: {previous_qte} -> {previous_qte + qte})"
+                    )
                 
             # Cr?er les mouvements de caisse par devise (d?penses approvisionnement)
             type_caisse_id = extract_type_caisse_id(request.data)

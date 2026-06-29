@@ -868,122 +868,121 @@ class EntreeSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        lignes_data = validated_data.pop('lignes', [])
-        entreprise_id = validated_data.pop('entreprise_id', None)
-        succursale_id = validated_data.pop('succursale_id', None)
-        libele = validated_data.pop('libele', '')
-        description = validated_data.pop('description', '')
-        date_op = validated_data.pop('date_op', None)
+        with transaction.atomic():
+            lignes_data = validated_data.pop('lignes', [])
+            entreprise_id = validated_data.pop('entreprise_id', None)
+            succursale_id = validated_data.pop('succursale_id', None)
+            libele = validated_data.pop('libele', '')
+            description = validated_data.pop('description', '')
+            date_op = validated_data.pop('date_op', None)
 
-        # Création de l'Entree (entreprise / succursale : perform_create ou import Excel)
-        entree_kwargs = {
-            'libele': libele,
-            'description': description,
-            'entreprise_id': entreprise_id,
-            'succursale_id': succursale_id,
-        }
-        if date_op is not None:
-            entree_kwargs['date_op'] = date_op
-        entree = Entree.objects.create(**entree_kwargs)
+            entree_kwargs = {
+                'libele': libele,
+                'description': description,
+                'entreprise_id': entreprise_id,
+                'succursale_id': succursale_id,
+            }
+            if date_op is not None:
+                entree_kwargs['date_op'] = date_op
+            entree = Entree.objects.create(**entree_kwargs)
 
-        # Création des lignes et mise à jour du stock
-        # Fallback devise principale si devise_id absent ou None (par entreprise si connue)
-        devise_principale = None
-        if entreprise_id:
-            devise_principale = Devise.objects.filter(
-                entreprise_id=entreprise_id, est_principal=True
-            ).first()
-        if devise_principale is None:
-            devise_principale = Devise.objects.filter(est_principal=True).first()
-        for ligne in lignes_data:
-            article_obj = ligne['article']
-            quantite = ligne['quantite']
-            devise_id = ligne.get('devise_id')
-            devise_obj = None
-            if devise_id:
-                try:
-                    devise_obj = Devise.objects.get(pk=devise_id)
-                except Devise.DoesNotExist:
-                    devise_obj = devise_principale
-            else:
-                devise_obj = devise_principale
-            montant_ligne = (Decimal(str(ligne.get('prix_unitaire') or 0)) * Decimal(str(quantite))).quantize(Decimal('0.00001'))
-            snapshot_ligne = build_conversion_snapshot(
-                entreprise_id=entreprise_id,
-                amount=montant_ligne,
-                devise_source=devise_obj,
-                devise_reference=devise_principale,
-            )
-            LigneEntree.objects.create(
-                entree=entree,
-                article=article_obj,
-                quantite=quantite,
-                quantite_restante=quantite,  # Initialiser pour FIFO
-                prix_unitaire=ligne.get('prix_unitaire'),
-                prix_vente=ligne.get('prix_vente'),  # Prix de vente obligatoire
-                date_expiration=ligne.get('date_expiration'),
-                devise=devise_obj,
-                devise_reference=snapshot_ligne['devise_reference'],
-                taux_change=snapshot_ligne['taux_change'],
-                montant_reference=snapshot_ligne['montant_reference'],
-                seuil_alerte=ligne.get('seuil_alerte', 0)
-            )
-            Stock.objects.filter(article=article_obj).update(
-                Qte=models.F('Qte') + quantite
-            )
+            devise_principale = None
+            if entreprise_id:
+                devise_principale = Devise.objects.filter(
+                    entreprise_id=entreprise_id, est_principal=True
+                ).first()
+            if devise_principale is None:
+                devise_principale = Devise.objects.filter(est_principal=True).first()
 
-        return entree
+            for ligne in lignes_data:
+                article_obj = ligne['article']
+                quantite = ligne['quantite']
+                devise_obj = ligne.get('devise') or devise_principale
+                montant_ligne = (Decimal(str(ligne.get('prix_unitaire') or 0)) * Decimal(str(quantite))).quantize(Decimal('0.00001'))
+                snapshot_ligne = build_conversion_snapshot(
+                    entreprise_id=entreprise_id,
+                    amount=montant_ligne,
+                    devise_source=devise_obj,
+                    devise_reference=devise_principale,
+                )
+                LigneEntree.objects.create(
+                    entree=entree,
+                    article=article_obj,
+                    quantite=quantite,
+                    quantite_restante=quantite,
+                    prix_unitaire=ligne.get('prix_unitaire'),
+                    prix_vente=ligne.get('prix_vente'),
+                    date_expiration=ligne.get('date_expiration'),
+                    devise=devise_obj,
+                    devise_reference=snapshot_ligne['devise_reference'],
+                    taux_change=snapshot_ligne['taux_change'],
+                    montant_reference=snapshot_ligne['montant_reference'],
+                    seuil_alerte=ligne.get('seuil_alerte', 0)
+                )
+                stock_obj, _ = Stock.objects.get_or_create(
+                    article=article_obj,
+                    defaults={'Qte': 0, 'seuilAlert': ligne.get('seuil_alerte', 0)},
+                )
+                stock_obj.Qte += quantite
+                stock_obj.seuilAlert = ligne.get('seuil_alerte', 0)
+                stock_obj.save(update_fields=['Qte', 'seuilAlert'])
+
+            return entree
 
     def update(self, instance, validated_data):
-        lignes_data = validated_data.pop('lignes', [])
-        user = self.context['request'].user
+        with transaction.atomic():
+            lignes_data = validated_data.pop('lignes', [])
 
-        # Mise à jour de l'entree
-        instance.libele = validated_data.get('libele', instance.libele)
-        instance.description = validated_data.get('description', instance.description)
-        instance.save()
+            instance.libele = validated_data.get('libele', instance.libele)
+            instance.description = validated_data.get('description', instance.description)
+            instance.save()
 
-        # Rollback stock des anciennes lignes
-        for old_ligne in instance.lignes.all():
-            Stock.objects.filter(article=old_ligne.article).update(
-                Qte=models.F('Qte') - old_ligne.quantite
-            )
+            for old_ligne in instance.lignes.all():
+                stock_obj, _ = Stock.objects.get_or_create(
+                    article=old_ligne.article,
+                    defaults={'Qte': 0, 'seuilAlert': old_ligne.seuil_alerte},
+                )
+                stock_obj.Qte -= old_ligne.quantite
+                stock_obj.save(update_fields=['Qte'])
 
-        # Suppression anciennes lignes
-        instance.lignes.all().delete()
+            instance.lignes.all().delete()
 
-        # Création nouvelles lignes
-        for ligne in lignes_data:
-            article_obj = ligne['article']
-            quantite = ligne['quantite']
-            devise_id = ligne.get('devise')
-            devise_obj = Devise.objects.get(pk=devise_id) if devise_id else None
-            montant_ligne = (Decimal(str(ligne.get('prix_unitaire') or 0)) * Decimal(str(quantite))).quantize(Decimal('0.00001'))
-            snapshot_ligne = build_conversion_snapshot(
-                entreprise_id=getattr(instance, 'entreprise_id', None),
-                amount=montant_ligne,
-                devise_source=devise_obj,
-                devise_reference=get_principal_devise(getattr(instance, 'entreprise_id', None)),
-            )
-            LigneEntree.objects.create(
-                entree=instance,
-                article=article_obj,
-                quantite=quantite,
-                quantite_restante=quantite,  # Initialiser pour FIFO
-                prix_unitaire=ligne.get('prix_unitaire'),
-                prix_vente=ligne.get('prix_vente'),  # Prix de vente obligatoire
-                date_expiration=ligne.get('date_expiration'),
-                devise=devise_obj,
-                devise_reference=snapshot_ligne['devise_reference'],
-                taux_change=snapshot_ligne['taux_change'],
-                montant_reference=snapshot_ligne['montant_reference'],
-                seuil_alerte=ligne.get('seuil_alerte', 0)
-            )
-            Stock.objects.filter(article=article_obj).update(
-                Qte=models.F('Qte') + quantite
-            )
+            devise_principale = get_principal_devise(getattr(instance, 'entreprise_id', None))
 
-        return instance
+            for ligne in lignes_data:
+                article_obj = ligne['article']
+                quantite = ligne['quantite']
+                devise_obj = ligne.get('devise') or devise_principale
+                montant_ligne = (Decimal(str(ligne.get('prix_unitaire') or 0)) * Decimal(str(quantite))).quantize(Decimal('0.00001'))
+                snapshot_ligne = build_conversion_snapshot(
+                    entreprise_id=getattr(instance, 'entreprise_id', None),
+                    amount=montant_ligne,
+                    devise_source=devise_obj,
+                    devise_reference=devise_principale,
+                )
+                LigneEntree.objects.create(
+                    entree=instance,
+                    article=article_obj,
+                    quantite=quantite,
+                    quantite_restante=quantite,
+                    prix_unitaire=ligne.get('prix_unitaire'),
+                    prix_vente=ligne.get('prix_vente'),
+                    date_expiration=ligne.get('date_expiration'),
+                    devise=devise_obj,
+                    devise_reference=snapshot_ligne['devise_reference'],
+                    taux_change=snapshot_ligne['taux_change'],
+                    montant_reference=snapshot_ligne['montant_reference'],
+                    seuil_alerte=ligne.get('seuil_alerte', 0)
+                )
+                stock_obj, _ = Stock.objects.get_or_create(
+                    article=article_obj,
+                    defaults={'Qte': 0, 'seuilAlert': ligne.get('seuil_alerte', 0)},
+                )
+                stock_obj.Qte += quantite
+                stock_obj.seuilAlert = ligne.get('seuil_alerte', 0)
+                stock_obj.save(update_fields=['Qte', 'seuilAlert'])
+
+            return instance
 
 
 
