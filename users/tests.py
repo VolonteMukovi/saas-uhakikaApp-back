@@ -55,3 +55,18 @@ class AgentEntrepriseBrandingTests(APITestCase):
         ent = body.get("user", {}).get("entreprise") or {}
         self.assertEqual(ent.get("slogan"), "Notre slogan test")
         self.assertIn("logo", ent)
+
+    def test_agent_can_read_and_patch_me_profile(self):
+        self.client.force_authenticate(user=self.agent)
+        r_get = self.client.get("/api/users/me/")
+        self.assertEqual(r_get.status_code, 200, r_get.content)
+
+        r_patch = self.client.patch(
+            "/api/users/me/",
+            {"first_name": "Jean", "last_name": "Agent"},
+            format="json",
+        )
+        self.assertEqual(r_patch.status_code, 200, r_patch.content)
+        self.agent.refresh_from_db()
+        self.assertEqual(self.agent.first_name, "Jean")
+        self.assertEqual(self.agent.last_name, "Agent")

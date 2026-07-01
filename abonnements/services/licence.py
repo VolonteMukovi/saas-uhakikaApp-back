@@ -42,6 +42,9 @@ def _fonctionnalites_essai_complet():
         'impression_pos': True,
         'multi_succursales': True,
         'assistance_prioritaire': True,
+        'portail_client_autonome': True,
+        'chatbot': True,
+        'accompagnement_personnalisation': True,
     }
 
 
@@ -49,12 +52,15 @@ def get_formule_essai() -> FormuleAbonnement:
     formule, _ = FormuleAbonnement.objects.get_or_create(
         code=FormuleAbonnement.CODE_ESSAI,
         defaults={
-            'nom': 'Essai gratuit',
-            'description': 'Accès complet pendant 2 mois pour découvrir UHAKIKAAPP.',
+            'nom': 'Découverte Pro',
+            'description': (
+                'Testez toute la puissance de UHAKIKAAPP gratuitement pendant 2 mois, '
+                'sans restriction fonctionnelle.'
+            ),
             'duree_essai_jours': DUREE_ESSAI_JOURS,
             'fonctionnalites': _fonctionnalites_essai_complet(),
             'limites': {'utilisateurs_max': None, 'succursales_max': None},
-            'est_visible_catalogue': False,
+            'est_visible_catalogue': True,
             'ordre_affichage': 0,
         },
     )
@@ -211,7 +217,7 @@ def demander_abonnement(entreprise, formule_code: str, periode: str, user=None) 
     except FormuleAbonnement.DoesNotExist as exc:
         raise ValueError(_('Formule d\'abonnement introuvable.')) from exc
 
-    if formule.code == FormuleAbonnement.CODE_ESSAI:
+    if formule.code in (FormuleAbonnement.CODE_ESSAI, 'essai_gratuit'):
         raise ValueError(_('La formule essai ne peut pas être souscrite manuellement.'))
 
     if periode not in (

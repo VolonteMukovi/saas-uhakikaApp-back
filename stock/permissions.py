@@ -104,6 +104,13 @@ class IsAdminOrUser(permissions.BasePermission):
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
             raise PermissionDenied(_("Vous devez être connecté pour accéder à cette ressource."))
+        if request.user.is_superadmin() and request.method in permissions.SAFE_METHODS:
+            return True
+        if request.user.is_admin(request) or request.user.is_agent(request):
+            return True
+        if request.method in permissions.SAFE_METHODS and request.user.get_current_membership(request):
+            # Tolérance au premier chargement UI quand le contexte rôle n'est pas encore hydraté.
+            return True
         if not (request.user.is_admin(request) or request.user.is_agent(request)):
             raise PermissionDenied(_("Accès réservé aux administrateurs ou aux agents de l'entreprise."))
         return True

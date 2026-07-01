@@ -353,6 +353,8 @@ class UserViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action == 'create':
             return [permissions.AllowAny()]
+        if self.action == 'me':
+            return [permissions.IsAuthenticated()]
         if self.action in ('remove_entreprise', 'without_entreprise'):
             return [IsSuperAdmin()]
         # assign_entreprise : auto-association par l'utilisateur lui-même (ou par superadmin)

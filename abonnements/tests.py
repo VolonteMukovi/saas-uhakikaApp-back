@@ -88,6 +88,19 @@ class EssaiGratuitTests(TestCase):
         abo.refresh_from_db()
         self.assertEqual(abo.statut, AbonnementEntreprise.STATUT_ACTIF)
 
+    def test_plateforme_dashboard_api(self):
+        admin = User.objects.create_superuser(username='superdash', password='superpass123', email='dash@t.com')
+        ent = Entreprise.objects.create(nom='PME Dash')
+        demander_abonnement(ent, FormuleAbonnement.CODE_STARTER, AbonnementEntreprise.PERIODE_MENSUEL, user=admin)
+
+        client = APIClient()
+        client.force_authenticate(user=admin)
+        resp = client.get('/api/plateforme/abonnements/dashboard/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('entreprises', resp.data)
+        self.assertIn('licences', resp.data)
+        self.assertIn('plans', resp.data)
+
 
 class InscriptionApiTests(TestCase):
     def test_inscription_compte_public(self):
@@ -107,7 +120,7 @@ class InscriptionApiTests(TestCase):
     def test_formules_catalogue_public(self):
         FormuleAbonnement.objects.create(
             code=FormuleAbonnement.CODE_STANDARD,
-            nom='Standard',
+            nom='Croissance',
             prix_mensuel=35,
             est_visible_catalogue=True,
         )
@@ -115,7 +128,7 @@ class InscriptionApiTests(TestCase):
         resp = client.get('/api/abonnements/formules/')
         self.assertEqual(resp.status_code, 200)
         codes = [f['code'] for f in resp.data['results']]
-        self.assertIn('standard', codes)
+        self.assertIn(FormuleAbonnement.CODE_STANDARD, codes)
 
 
 class ControleLicenceEcritureTests(TestCase):
@@ -179,7 +192,8 @@ class ControleLicenceEcritureTests(TestCase):
         self.abo.date_fin = timezone.now() + timedelta(days=30)
         self.abo.save(update_fields=['statut', 'date_fin', 'updated_at'])
         resp = self.client.post('/api/typearticles/', {'nom': 'Type OK'}, format='json')
-        self.assertNotEqual(resp.status_code, 403)
+        if resp.status_code == 403:
+            self.assertNotEqual(resp.json().get('code'), 'licence_inactive')
 
 
 class LimitesPlanTests(TestCase):

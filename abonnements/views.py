@@ -1,4 +1,5 @@
 from django.utils.translation import gettext as _
+from django.db.models import Count, Sum
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import status, viewsets
@@ -157,6 +158,63 @@ class PlateformeAbonnementViewSet(viewsets.ReadOnlyModelViewSet):
         if entreprise_id:
             qs = qs.filter(entreprise_id=entreprise_id)
         return qs
+
+    @swagger_auto_schema(
+        responses={200: openapi.Response('Statistiques globales SuperAdmin')},
+    )
+    @action(detail=False, methods=['get'], url_path='dashboard')
+    def dashboard(self, request):
+        """KPIs globaux superadmin (entreprises, licences, demandes, revenus estimés)."""
+        from stock.models import Entreprise
+
+        entreprises_total = Entreprise.objects.count()
+        entreprises_avec_abonnement = AbonnementEntreprise.objects.values('entreprise_id').distinct().count()
+        entreprises_sans_abonnement = max(0, entreprises_total - entreprises_avec_abonnement)
+
+        courants = AbonnementEntreprise.objects.filter(est_courant=True)
+        repartition_statut = list(
+            courants.values('statut')
+            .annotate(total=Count('id'))
+            .order_by('statut')
+        )
+        repartition_plans = list(
+            courants.values('formule__code', 'formule__nom')
+            .annotate(total=Count('id'))
+            .order_by('formule__code')
+        )
+        demandes_en_attente = courants.filter(statut=AbonnementEntreprise.STATUT_EN_ATTENTE).count()
+        licences_actives = courants.filter(statut__in=[
+            AbonnementEntreprise.STATUT_ACTIF,
+            AbonnementEntreprise.STATUT_ESSAI,
+        ]).count()
+        licences_expirees = courants.filter(statut=AbonnementEntreprise.STATUT_EXPIRE).count()
+        licences_suspendues = courants.filter(statut=AbonnementEntreprise.STATUT_SUSPENDU).count()
+
+        revenus_estimes = (
+            courants.filter(statut__in=[AbonnementEntreprise.STATUT_ACTIF, AbonnementEntreprise.STATUT_ESSAI])
+            .aggregate(total=Sum('formule__prix_mensuel'))
+            .get('total')
+            or 0
+        )
+
+        return Response({
+            'entreprises': {
+                'total': entreprises_total,
+                'avec_abonnement_courant': entreprises_avec_abonnement,
+                'sans_abonnement_courant': entreprises_sans_abonnement,
+            },
+            'licences': {
+                'actives': licences_actives,
+                'expirees': licences_expirees,
+                'suspendues': licences_suspendues,
+                'demandes_en_attente': demandes_en_attente,
+                'repartition_statut': repartition_statut,
+            },
+            'plans': {
+                'repartition': repartition_plans,
+                'revenu_mensuel_estime': str(revenus_estimes),
+            },
+        })
 
     @swagger_auto_schema(responses={200: PlateformeAbonnementSerializer(many=True)})
     @action(detail=False, methods=['get'], url_path='en-attente')

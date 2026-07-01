@@ -16,11 +16,18 @@ def _generer_reference_paiement():
 class FormuleAbonnement(models.Model):
     """Catalogue des formules (Essai, Starter, Standard, Professionnelle, Entreprise)."""
 
-    CODE_ESSAI = 'essai_gratuit'
-    CODE_STARTER = 'starter'
-    CODE_STANDARD = 'standard'
-    CODE_PROFESSIONNEL = 'professionnel'
-    CODE_ENTREPRISE = 'entreprise'
+    # Codes officiels (affichage frontend via nom commercial)
+    CODE_DECOUVERTE_PRO = 'decouverte_pro'
+    CODE_ESSENTIEL = 'essentiel'
+    CODE_CROISSANCE = 'croissance'
+    CODE_PREMIUM_ENTREPRISE = 'premium_entreprise'
+
+    # Alias legacy pour compatibilité rétroactive
+    CODE_ESSAI = CODE_DECOUVERTE_PRO
+    CODE_STARTER = CODE_ESSENTIEL
+    CODE_STANDARD = CODE_CROISSANCE
+    CODE_PROFESSIONNEL = CODE_PREMIUM_ENTREPRISE
+    CODE_ENTREPRISE = CODE_PREMIUM_ENTREPRISE
 
     code = models.SlugField(max_length=40, unique=True)
     nom = models.CharField(max_length=120)

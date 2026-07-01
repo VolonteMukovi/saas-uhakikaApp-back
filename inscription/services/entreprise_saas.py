@@ -93,12 +93,12 @@ def creer_entreprise_minimale(
         abo = get_abonnement_courant(entreprise.id) or demarrer_essai_gratuit(entreprise, user=user)
         result['abonnement_id'] = abo.id
         result['statut_licence'] = abo.statut
-        result['message'] = _('Essai gratuit de 2 mois activé. Accès complet au dashboard.')
+        result['message'] = _('Découverte Pro activé pour 2 mois. Accès complet au dashboard.')
         return result
 
     # Plan payant : remplacer l'essai auto (signal) par demande / paiement
     if source_activation == 'paiement_en_ligne' and fournisseur_paiement:
-        code_formule = formule_code if formule_code != 'essai_gratuit' else FormuleAbonnement.CODE_STARTER
+        code_formule = formule_code if formule_code != 'essai_gratuit' else FormuleAbonnement.CODE_ESSENTIEL
         try:
             session = initier_paiement_en_ligne(
                 entreprise,
@@ -116,7 +116,7 @@ def creer_entreprise_minimale(
 
     # Activation manuelle
     from abonnements.services.licence import demander_abonnement
-    code_formule = formule_code if formule_code not in ('essai', 'essai_gratuit') else FormuleAbonnement.CODE_STARTER
+    code_formule = formule_code if formule_code not in ('essai', 'essai_gratuit') else FormuleAbonnement.CODE_ESSENTIEL
     periode_payante = periode if periode in (
         AbonnementEntreprise.PERIODE_MENSUEL,
         AbonnementEntreprise.PERIODE_ANNUEL,
