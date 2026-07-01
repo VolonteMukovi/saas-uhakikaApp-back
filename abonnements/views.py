@@ -35,6 +35,7 @@ from abonnements.services.licence import (
     get_abonnement_courant,
 )
 from abonnements.services.limites import build_resume_limites
+from inscription.services.bootstrap_saas import assurer_contexte_initial_utilisateur
 
 MESSAGE_INSTALLATION_PRIVEE = (
     'UHAKIKAAPP fonctionne principalement comme une solution SaaS accessible en ligne. '
@@ -59,15 +60,16 @@ class FormuleAbonnementViewSet(viewsets.ReadOnlyModelViewSet):
 
 class MonAbonnementView(APIView):
     """État de l'abonnement / licence de l'entreprise courante."""
-    permission_classes = [IsAuthenticated, AEntrepriseContexte]
+    permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(responses={200: EtatLicenceSerializer()})
     def get(self, request):
+        assurer_contexte_initial_utilisateur(request.user)
         eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id(request)
         if not eid:
             return Response(
-                {'detail': _('Aucune entreprise associée. Créez votre entreprise pour démarrer l\'essai.')},
-                status=status.HTTP_400_BAD_REQUEST,
+                {'detail': _('Préparation de votre espace en cours. Réessayez dans quelques secondes.')},
+                status=status.HTTP_409_CONFLICT,
             )
         etat = build_etat_licence(eid)
         return Response(EtatLicenceSerializer(etat).data)
@@ -75,15 +77,16 @@ class MonAbonnementView(APIView):
 
 class MesLimitesView(APIView):
     """Quotas et fonctionnalités du plan courant (pour le frontend)."""
-    permission_classes = [IsAuthenticated, AEntrepriseContexte]
+    permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(responses={200: ResumeLimitesSerializer()})
     def get(self, request):
+        assurer_contexte_initial_utilisateur(request.user)
         eid = getattr(request, 'tenant_id', None) or request.user.get_entreprise_id(request)
         if not eid:
             return Response(
-                {'detail': _('Aucune entreprise associée.')},
-                status=status.HTTP_400_BAD_REQUEST,
+                {'detail': _('Préparation de votre espace en cours. Réessayez dans quelques secondes.')},
+                status=status.HTTP_409_CONFLICT,
             )
         resume = build_resume_limites(eid, request)
         return Response(ResumeLimitesSerializer(resume).data)

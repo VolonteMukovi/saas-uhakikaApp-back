@@ -117,6 +117,11 @@ class CreerEntrepriseMinimaleSerializer(serializers.Serializer):
         return attrs
 
 
+class BootstrapSaasSerializer(serializers.Serializer):
+    nom = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    pays = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+
+
 class EtatFlowSaasSerializer(serializers.Serializer):
     authentifie = serializers.BooleanField()
     a_entreprise = serializers.BooleanField()

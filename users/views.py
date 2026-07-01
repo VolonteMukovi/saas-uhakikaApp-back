@@ -16,6 +16,7 @@ from drf_yasg.utils import swagger_auto_schema
 
 from .serializers import UserSerializer, UserRegistrationSerializer, SuperAdminUserSerializer, AdminUserSerializer
 from .permissions import IsSuperAdmin, IsSuperAdminOrAdmin, IsAdminFullEnterpriseAndUsers
+from inscription.services.bootstrap_saas import assurer_contexte_initial_utilisateur
 from stock.models import Entreprise, Succursale
 from stock.serializers import entreprise_public_read_dict
 from .models import Membership, UserBranch
@@ -95,6 +96,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
         super(TokenObtainPairSerializer, self).validate(attrs)
+        assurer_contexte_initial_utilisateur(self.user)
         refresh = self.get_token(self.user)
         refresh["session_start"] = int(time.time())
 
@@ -840,8 +842,19 @@ class UserViewSet(viewsets.ModelViewSet):
         """
         user = request.user
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            bootstrap = assurer_contexte_initial_utilisateur(user)
             serializer = self.get_serializer(user)
-            return Response(serializer.data)
+            data = serializer.data
+            if bootstrap.get('bootstrap_effectue'):
+                from inscription.services.auth_response import build_jwt_login_response
+                tokens = build_jwt_login_response(user, request, bootstrap=False)
+                data['bootstrap'] = bootstrap
+                data['tokens'] = {
+                    'refresh': tokens['refresh'],
+                    'access': tokens['access'],
+                }
+                data['user_context'] = tokens['user']
+            return Response(data)
         # PUT / PATCH : mise à jour du profil
         serializer_class = AdminUserSerializer if user.is_admin(request) else UserSerializer
         serializer = serializer_class(user, data=request.data, partial=(request.method == 'PATCH'))

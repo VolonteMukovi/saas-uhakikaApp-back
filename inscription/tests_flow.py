@@ -22,12 +22,14 @@ class FlowSaasTests(TestCase):
             email='flow@test.com',
         )
 
-    def test_flow_sans_entreprise(self):
+    def test_flow_sans_entreprise_bootstrap_auto(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.get('/api/inscription/flow/')
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data['statut_flow'], 'creer_entreprise_minimale')
-        self.assertFalse(resp.data['acces_dashboard'])
+        self.assertTrue(resp.data['a_entreprise'])
+        self.assertTrue(resp.data['acces_dashboard'])
+        self.assertTrue(resp.data['licence_active'])
+        self.assertIn('tokens', resp.data)
 
     def test_creer_entreprise_minimale_essai(self):
         self.client.force_authenticate(user=self.user)

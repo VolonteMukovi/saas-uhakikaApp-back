@@ -141,11 +141,28 @@ def build_etat_licence(entreprise_id: int) -> dict:
     """État licence pour API / middleware."""
     abonnement = get_abonnement_courant(entreprise_id)
     if not abonnement:
+        a_jamais_eu = AbonnementEntreprise.objects.filter(entreprise_id=entreprise_id).exists()
+        if not a_jamais_eu:
+            return {
+                'a_licence': False,
+                'statut': 'sans_abonnement',
+                'est_actif': False,
+                'est_essai': False,
+                'a_jamais_eu_abonnement': True,
+                'formule_code': None,
+                'formule_nom': None,
+                'date_fin': None,
+                'jours_restants': 0,
+                'fonctionnalites': {},
+                'limites': {},
+                'message': _('Aucun abonnement initialisé pour cette entreprise.'),
+            }
         return {
             'a_licence': False,
             'statut': 'aucun',
             'est_actif': False,
             'est_essai': False,
+            'a_jamais_eu_abonnement': False,
             'formule_code': None,
             'formule_nom': None,
             'date_fin': None,
@@ -182,6 +199,7 @@ def build_etat_licence(entreprise_id: int) -> dict:
         'statut': abonnement.statut,
         'est_actif': est_actif,
         'est_essai': est_essai,
+        'a_jamais_eu_abonnement': False,
         'formule_code': abonnement.formule.code,
         'formule_nom': abonnement.formule.nom,
         'periode': abonnement.periode,

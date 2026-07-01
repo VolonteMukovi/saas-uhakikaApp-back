@@ -25,6 +25,8 @@ def _statut_licence_frontend(etat_licence: dict | None) -> str | None:
     if not etat_licence:
         return None
     statut = etat_licence.get('statut')
+    if statut == 'sans_abonnement':
+        return 'sans_abonnement'
     if statut == AbonnementEntreprise.STATUT_EN_ATTENTE:
         return 'pending_manual_activation'
     if statut == AbonnementEntreprise.STATUT_EXPIRE:
@@ -58,7 +60,11 @@ def build_etat_flow_saas(user, request=None) -> dict:
         etat_licence and etat_licence.get('statut') == AbonnementEntreprise.STATUT_EN_ATTENTE
     )
     licence_expiree = (
-        etat_licence and etat_licence.get('statut') == AbonnementEntreprise.STATUT_EXPIRE
+        etat_licence
+        and etat_licence.get('statut') == AbonnementEntreprise.STATUT_EXPIRE
+    )
+    sans_abonnement = bool(
+        etat_licence and etat_licence.get('statut') == 'sans_abonnement'
     )
 
     if not user or not user.is_authenticated:
@@ -101,6 +107,11 @@ def build_etat_flow_saas(user, request=None) -> dict:
             'L\'équipe UHAKIKAAPP activera votre licence après vérification du paiement.'
         ))
         actions.append({'code': 'voir_statut_abonnement', 'url': '/subscription/manual-pending'})
+    elif sans_abonnement:
+        messages.append(_(
+            'Votre essai gratuit est en cours de préparation. Patientez quelques instants.'
+        ))
+        actions.append({'code': 'preparer_espace', 'url': '/onboarding/bootstrap'})
     elif licence_expiree:
         messages.append(_(
             'Votre licence a expiré. Veuillez renouveler votre abonnement.'
@@ -136,7 +147,7 @@ def build_etat_flow_saas(user, request=None) -> dict:
             'message': messages[-1] if messages else '',
             'action': {'code': 'voir_statut_abonnement', 'url': '/subscription/manual-pending'},
         })
-    elif a_entreprise and (licence_expiree or (not licence_active and not en_attente_manuelle)):
+    elif a_entreprise and (licence_expiree or (not licence_active and not en_attente_manuelle and not sans_abonnement)):
         bannieres.append({
             'code': 'licence_expiree',
             'niveau': 'warning',

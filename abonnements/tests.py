@@ -115,7 +115,8 @@ class InscriptionApiTests(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, 201)
         self.assertIn('tokens', resp.data)
-        self.assertEqual(resp.data['prochaine_etape'], 'creer_entreprise')
+        self.assertTrue(resp.data['a_entreprise'])
+        self.assertEqual(resp.data['prochaine_etape'], 'utiliser_application')
 
     def test_formules_catalogue_public(self):
         FormuleAbonnement.objects.create(

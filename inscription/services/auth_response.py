@@ -5,16 +5,20 @@ from django.contrib.auth.models import update_last_login
 from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from inscription.services.bootstrap_saas import assurer_contexte_initial_utilisateur
 from stock.serializers import entreprise_public_read_dict
 from users.models import Membership
 from users.views import _add_context_to_token, _succursales_for_membership
 
 
-def build_jwt_login_response(user, request=None):
+def build_jwt_login_response(user, request=None, *, bootstrap=True):
     """
     Tokens + profil utilisateur + contexte tenant (premier membership actif).
     Même structure que CustomTokenObtainPairSerializer.
     """
+    bootstrap_info = None
+    if bootstrap:
+        bootstrap_info = assurer_contexte_initial_utilisateur(user)
     refresh = RefreshToken.for_user(user)
     refresh['session_start'] = int(time.time())
 
@@ -60,4 +64,5 @@ def build_jwt_login_response(user, request=None):
         'refresh': str(refresh),
         'access': str(refresh.access_token),
         'user': user_data,
+        'bootstrap': bootstrap_info,
     }

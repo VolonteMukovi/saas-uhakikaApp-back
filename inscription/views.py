@@ -28,6 +28,8 @@ from inscription.serializers import (
 
 from inscription.services.auth_response import build_jwt_login_response
 
+from inscription.services.bootstrap_saas import assurer_contexte_initial_utilisateur
+
 from inscription.services.google_oauth import (
 
     ErreurConnexionGoogle,
@@ -112,31 +114,25 @@ def _build_statut_onboarding(user, request=None):
 
 def _reponse_auth_inscription(user, request, est_nouveau_compte=False, message=None):
 
-    tokens = build_jwt_login_response(user, request)
+    tokens_payload = build_jwt_login_response(user, request)
+    bootstrap = tokens_payload.pop('bootstrap', None)
 
     statut = _build_statut_onboarding(user, request)
 
-    return {
-
+    body = {
         **StatutOnboardingSerializer(statut).data,
-
         'est_nouveau_compte': est_nouveau_compte,
-
         'connexion_google': True,
-
         'tokens': {
-
-            'refresh': tokens['refresh'],
-
-            'access': tokens['access'],
-
+            'refresh': tokens_payload['refresh'],
+            'access': tokens_payload['access'],
         },
-
-        'user': tokens['user'],
-
+        'user': tokens_payload['user'],
         'message': message or '',
-
     }
+    if bootstrap:
+        body['bootstrap'] = bootstrap
+    return body
 
 
 
@@ -166,41 +162,28 @@ class InscriptionCompteView(APIView):
 
         user = serializer.save()
 
-        tokens = build_jwt_login_response(user, request)
+        tokens_payload = build_jwt_login_response(user, request)
+        bootstrap = tokens_payload.pop('bootstrap', None)
 
         statut = _build_statut_onboarding(user, request)
 
-        return Response(
-
-            {
-
-                **StatutOnboardingSerializer(statut).data,
-
-                'est_nouveau_compte': True,
-
-                'connexion_google': False,
-
-                'tokens': {
-
-                    'refresh': tokens['refresh'],
-
-                    'access': tokens['access'],
-
-                },
-
-                'user': tokens['user'],
-
-                'message': _(
-
-                    'Compte créé. Créez votre entreprise pour bénéficier de 2 mois d\'essai gratuit avec accès complet.'
-
-                ),
-
+        body = {
+            **StatutOnboardingSerializer(statut).data,
+            'est_nouveau_compte': True,
+            'connexion_google': False,
+            'tokens': {
+                'refresh': tokens_payload['refresh'],
+                'access': tokens_payload['access'],
             },
+            'user': tokens_payload['user'],
+            'message': _(
+                'Compte créé. Votre essai gratuit Découverte Pro de 60 jours est activé.'
+            ),
+        }
+        if bootstrap and bootstrap.get('bootstrap_effectue'):
+            body['bootstrap'] = bootstrap
 
-            status=status.HTTP_201_CREATED,
-
-        )
+        return Response(body, status=status.HTTP_201_CREATED)
 
 
 
@@ -249,7 +232,7 @@ class ConnexionGoogleView(APIView):
 
             message = _(
 
-                'Compte créé via Google. Créez votre entreprise pour bénéficier de 2 mois d\'essai gratuit avec accès complet.'
+                'Compte créé via Google. Essai gratuit Découverte Pro activé pour 60 jours.'
 
             )
 
@@ -315,6 +298,7 @@ class StatutOnboardingView(APIView):
 
     def get(self, request):
 
+        assurer_contexte_initial_utilisateur(request.user)
         statut = _build_statut_onboarding(request.user, request)
 
         return Response(StatutOnboardingSerializer(statut).data)

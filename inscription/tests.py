@@ -9,6 +9,8 @@ from inscription.models import ProfilConnexionGoogle
 
 User = get_user_model()
 
+FAKE_GOOGLE_JWT = 'aaa.bbb.ccc'
+
 PAYLOAD_GOOGLE = {
     'sub': 'google-sub-12345',
     'email': 'test@gmail.com',
@@ -29,13 +31,14 @@ class ConnexionGoogleTests(TestCase):
     def test_inscription_google_nouveau_compte(self, mock_verify):
         mock_verify.return_value = PAYLOAD_GOOGLE
         resp = self.client.post('/api/inscription/google/', {
-            'credential': 'fake-jwt-token',
+            'credential': FAKE_GOOGLE_JWT,
         }, format='json')
         self.assertEqual(resp.status_code, 201)
         self.assertTrue(resp.data['est_nouveau_compte'])
         self.assertTrue(resp.data['connexion_google'])
         self.assertIn('tokens', resp.data)
-        self.assertEqual(resp.data['prochaine_etape'], 'creer_entreprise')
+        self.assertTrue(resp.data['a_entreprise'])
+        self.assertEqual(resp.data['prochaine_etape'], 'utiliser_application')
         user = User.objects.get(email='test@gmail.com')
         self.assertFalse(user.has_usable_password())
         self.assertTrue(ProfilConnexionGoogle.objects.filter(utilisateur=user).exists())
@@ -50,7 +53,7 @@ class ConnexionGoogleTests(TestCase):
             email_google='test@gmail.com',
         )
         resp = self.client.post('/api/inscription/google/', {
-            'id_token': 'fake-jwt-token',
+            'id_token': FAKE_GOOGLE_JWT,
         }, format='json')
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data['est_nouveau_compte'])
@@ -60,7 +63,7 @@ class ConnexionGoogleTests(TestCase):
         mock_verify.return_value = PAYLOAD_GOOGLE
         User.objects.create_user(username='jean', email='test@gmail.com', password='motdepasse1', role='admin')
         resp = self.client.post('/api/inscription/google/', {
-            'credential': 'fake-jwt-token',
+            'credential': FAKE_GOOGLE_JWT,
         }, format='json')
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data['est_nouveau_compte'])
@@ -104,5 +107,5 @@ class ConnexionGoogleTests(TestCase):
     def test_google_non_configure(self, mock_verify):
         from inscription.services.google_oauth import ErreurConnexionGoogle
         mock_verify.side_effect = ErreurConnexionGoogle('Non configuré', code='google_not_configured')
-        resp = self.client.post('/api/inscription/google/', {'credential': 'x'}, format='json')
+        resp = self.client.post('/api/inscription/google/', {'credential': FAKE_GOOGLE_JWT}, format='json')
         self.assertEqual(resp.status_code, 503)
