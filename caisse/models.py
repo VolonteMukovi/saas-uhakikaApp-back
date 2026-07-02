@@ -153,6 +153,15 @@ class MouvementCaisse(models.Model):
     devise = models.ForeignKey(
         'stock.Devise', on_delete=models.CASCADE, related_name='mouvements_caisse', null=True, blank=True,
     )
+    devise_reference = models.ForeignKey(
+        'stock.Devise',
+        on_delete=models.PROTECT,
+        related_name='mouvements_caisse_reference',
+        null=True,
+        blank=True,
+    )
+    taux_change = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    montant_reference = models.DecimalField(max_digits=14, decimal_places=5, default=Decimal('0'))
     type = models.CharField(max_length=10, choices=TYPE_CHOICES)
     motif = models.TextField(blank=True, default='', help_text='Libellé / motif du mouvement.')
     moyen = models.CharField(

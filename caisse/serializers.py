@@ -9,6 +9,7 @@ from caisse.services.caisse import creer_mouvement_caisse, mouvement_moyen_affic
 from caisse.services.caisse_defaut import CaisseError, caisse_necessite_session, parse_type_caisse_id_from_payload
 from stock.models import DetteClient, Devise
 from stock.serializers import DeviseSerializer
+from stock.services.currency import assert_caisse_devise_compatible
 
 
 class TypeCaisseSerializer(serializers.ModelSerializer):
@@ -103,12 +104,14 @@ class MouvementCaisseSerializer(serializers.ModelSerializer):
     class Meta:
         model = MouvementCaisse
         fields = [
-            'id', 'date', 'montant', 'devise', 'devise_id', 'type', 'motif', 'moyen', 'resume',
+            'id', 'date', 'montant', 'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference',
+            'type', 'motif', 'moyen', 'resume',
             'content_type_modele', 'object_id', 'utilisateur', 'reference_piece', 'sortie', 'entree',
             'session_caisse', 'type_caisse', 'type_caisse_id', 'type_caisse_detail', 'categorie', 'details',
         ]
         read_only_fields = [
-            'id', 'date', 'object_id', 'utilisateur', 'session_caisse', 'type_caisse', 'categorie',
+            'id', 'date', 'devise_reference', 'taux_change', 'montant_reference',
+            'object_id', 'utilisateur', 'session_caisse', 'type_caisse', 'categorie',
         ]
 
     def get_resume(self, obj):
@@ -249,6 +252,7 @@ class PaiementDetteWriteSerializer(serializers.Serializer):
     devise_id = serializers.PrimaryKeyRelatedField(
         queryset=Devise.objects.all(), source='devise', required=False, allow_null=True
     )
+    taux_change = serializers.DecimalField(max_digits=20, decimal_places=8, required=False, allow_null=True)
     type_caisse_id = serializers.PrimaryKeyRelatedField(
         queryset=TypeCaisse.objects.filter(is_active=True),
         source='type_caisse',
@@ -295,6 +299,9 @@ class PaiementDetteWriteSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {'type_caisse_id': _('Cette opération financière exige une caisse active.')}
             )
+        devise = attrs.get('devise') or dette.devise
+        if devise:
+            assert_caisse_devise_compatible(tc, devise)
         return attrs
 
     def to_internal_value(self, data):
@@ -313,6 +320,7 @@ class PaiementDetteWriteSerializer(serializers.Serializer):
         dette = validated_data['dette']
         montant = validated_data['montant_paye']
         devise = validated_data.get('devise') or dette.devise
+        explicit_rate = validated_data.get('taux_change')
         type_caisse = validated_data['type_caisse']
         moyen = validated_data.get('moyen') or ''
         reference = validated_data.get('reference') or ''
@@ -341,6 +349,7 @@ class PaiementDetteWriteSerializer(serializers.Serializer):
             motif=motif,
             moyen=moyen.strip() or None,
             type_caisse=type_caisse,
+            taux_change=explicit_rate,
         )
 
 

@@ -200,6 +200,15 @@ class LigneEntree(models.Model):
     entree = models.ForeignKey(Entree, related_name='lignes', on_delete=models.CASCADE)
     # Devise de la ligne (nullable)
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='ligneentrees', null=True, blank=True)
+    devise_reference = models.ForeignKey(
+        'Devise',
+        on_delete=models.PROTECT,
+        related_name='ligneentrees_reference',
+        null=True,
+        blank=True,
+    )
+    taux_change = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    montant_reference = models.DecimalField(max_digits=14, decimal_places=5, default=Decimal('0'))
     # Seuil d'alerte obligatoire pour chaque ligne d'entrée
     seuil_alerte = models.DecimalField(max_digits=12, decimal_places=5, help_text="Seuil d'alerte pour cet article",default=0)
 
@@ -239,6 +248,13 @@ class Sortie(models.Model):
     )
     client = models.ForeignKey('Client', on_delete=models.SET_NULL, related_name='sorties', null=True, blank=True, help_text="Client associé à cette sortie (optionnel)")
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='sorties', null=True, blank=True)
+    devise_reference = models.ForeignKey(
+        'Devise',
+        on_delete=models.PROTECT,
+        related_name='sorties_reference',
+        null=True,
+        blank=True,
+    )
     statut = models.CharField(
         max_length=20,
         choices=[
@@ -370,6 +386,15 @@ class DetteClient(models.Model):
     sortie = models.OneToOneField('Sortie', on_delete=models.CASCADE, related_name='dette')
     montant_total = models.DecimalField(max_digits=12, decimal_places=5)
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='dettes', null=True, blank=True)
+    devise_reference = models.ForeignKey(
+        'Devise',
+        on_delete=models.PROTECT,
+        related_name='dettes_reference',
+        null=True,
+        blank=True,
+    )
+    taux_change = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    montant_reference = models.DecimalField(max_digits=14, decimal_places=5, default=Decimal('0'))
     date_creation = models.DateTimeField(auto_now_add=True)
     date_echeance = models.DateField(blank=True, null=True, help_text="Date limite de paiement")
     statut = models.CharField(
@@ -434,6 +459,15 @@ class LigneSortie(models.Model):
     date_sortie = models.DateTimeField(auto_now_add=True)
     # Devise de la ligne de sortie (nullable)
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='lignesorties', null=True, blank=True)
+    devise_reference = models.ForeignKey(
+        'Devise',
+        on_delete=models.PROTECT,
+        related_name='lignesorties_reference',
+        null=True,
+        blank=True,
+    )
+    taux_change = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    montant_reference = models.DecimalField(max_digits=14, decimal_places=5, default=Decimal('0'))
 
     def __str__(self):
         return f"{self.quantite}×{self.article.nom_scientifique}"
@@ -575,6 +609,60 @@ class Devise(models.Model):
     def __str__(self):
         principal_str = " [PRINCIPALE]" if self.est_principal else ""
         return f"{self.nom} ({self.sigle}){principal_str} - {self.entreprise.nom}"
+
+
+class TauxChange(models.Model):
+    devise_source = models.ForeignKey(
+        Devise,
+        on_delete=models.CASCADE,
+        related_name='taux_sortants',
+    )
+    devise_cible = models.ForeignKey(
+        Devise,
+        on_delete=models.CASCADE,
+        related_name='taux_entrants',
+    )
+    taux = models.DecimalField(max_digits=20, decimal_places=8)
+    date_application = models.DateTimeField(default=timezone.now)
+    is_active = models.BooleanField(default=True)
+    cree_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='taux_change_crees',
+    )
+    entreprise = models.ForeignKey(
+        Entreprise,
+        on_delete=models.CASCADE,
+        related_name='taux_change',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-date_application', '-id']
+        indexes = [
+            models.Index(fields=['entreprise_id', 'is_active']),
+            models.Index(fields=['entreprise_id', 'devise_source_id', 'devise_cible_id']),
+            models.Index(fields=['entreprise_id', 'date_application']),
+        ]
+        verbose_name = 'Taux de change'
+        verbose_name_plural = 'Taux de change'
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        if self.devise_source_id == self.devise_cible_id:
+            raise ValidationError('Les devises source et cible doivent etre differentes.')
+        if self.devise_source and self.devise_source.entreprise_id != self.entreprise_id:
+            raise ValidationError('La devise source doit appartenir a la meme entreprise.')
+        if self.devise_cible and self.devise_cible.entreprise_id != self.entreprise_id:
+            raise ValidationError('La devise cible doit appartenir a la meme entreprise.')
+        if self.taux is None or self.taux <= 0:
+            raise ValidationError('Le taux de change doit etre strictement positif.')
+
+    def __str__(self):
+        return f"1 {self.devise_source.sigle} = {self.taux} {self.devise_cible.sigle}"
 
 
 class InventaireSession(models.Model):

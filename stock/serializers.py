@@ -906,6 +906,7 @@ class DetteClientSerializer(serializers.ModelSerializer):
     client = ClientSerializer(read_only=True)
     client_id = serializers.SlugRelatedField(slug_field='id', queryset=Client.objects.all(), source='client', write_only=True)
     devise = DeviseSerializer(read_only=True)
+    devise_reference = DeviseSerializer(read_only=True)
     devise_id = serializers.PrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise', write_only=True, required=False, allow_null=True)
     sortie = serializers.PrimaryKeyRelatedField(read_only=True)
     sortie_id = serializers.PrimaryKeyRelatedField(queryset=Sortie.objects.all(), source='sortie', write_only=True)
@@ -916,7 +917,8 @@ class DetteClientSerializer(serializers.ModelSerializer):
         model = DetteClient
         fields = [
             'id', 'client', 'client_id', 'sortie', 'sortie_id', 'montant_total', 'montant_paye', 'solde_restant',
-            'devise', 'devise_id', 'date_creation', 'date_echeance', 'statut', 'commentaire', 'paiements'
+            'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference',
+            'date_creation', 'date_echeance', 'statut', 'commentaire', 'paiements'
         ]
         read_only_fields = ['montant_paye', 'solde_restant', 'statut', 'date_creation']
 

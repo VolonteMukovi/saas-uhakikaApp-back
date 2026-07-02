@@ -1,5 +1,7 @@
 # Gestion multi-caisse — spécification frontend
 
+Complète `FRONTEND_GUIDE_MULTI_DEVISE.md` (devises, taux de change, snapshots de conversion).
+
 ## Principe
 
 Toute opération financière doit envoyer une **caisse** (`type_caisse_id`, alias `caisse_id` ou `caisse`) et une **session ouverte** pour cette caisse (résolue côté backend).
