@@ -181,6 +181,30 @@ class EntreeCreationNoDuplicateTests(APITestCase):
         self.assertEqual(stocks[self.articles[1].pk], Decimal('1'))
         self.assertEqual(stocks[self.articles[2].pk], Decimal('3'))
 
+    def test_create_entree_ne_cree_pas_mouvement_caisse(self):
+        """Un approvisionnement ne doit plus impacter la caisse automatiquement."""
+        payload = {
+            'libele': 'Appro cash decouple',
+            'description': 'Test sans caisse',
+            'lignes': [
+                {
+                    'article_id': self.articles[0].pk,
+                    'quantite': '10',
+                    'prix_unitaire': '25.5',
+                    'prix_vente': '30',
+                    'devise_id': self.devise.pk,
+                    'seuil_alerte': '0',
+                },
+            ],
+        }
+        response = self.client.post('/api/entrees/', payload, format='json')
+        self.assertEqual(response.status_code, 201, response.content)
+        entree_id = response.json()['id']
+        self.assertEqual(
+            MouvementCaisse.objects.filter(entree_id=entree_id).count(),
+            0,
+        )
+
 
 
 
@@ -567,4 +591,95 @@ class CreditSaleDebtTests(APITestCase):
         self.assertEqual(payload['resume']['total_paye'], '47.93000')
         self.assertEqual(payload['totaux_par_devise'][0]['total_paye'], '47.93000')
         self.assertEqual(payload['totaux_par_devise'][0]['solde'], '0.00000')
+
+    def test_delete_specific_dette_also_deletes_related_payments(self):
+        response = self.client.post('/api/sorties/', self._credit_sortie_payload(montant='10.00000'), format='json')
+        self.assertEqual(response.status_code, 201, response.content)
+        sortie = Sortie.objects.get(pk=response.json()['id'])
+        dette = DetteClient.objects.get(sortie=sortie)
+        ct_dette = ContentType.objects.get_for_model(DetteClient)
+        paiement = MouvementCaisse.objects.create(
+            montant=Decimal('5.00000'),
+            devise=self.devise,
+            type='ENTREE',
+            motif='Paiement test suppression',
+            content_type=ct_dette,
+            object_id=dette.pk,
+            utilisateur=self.user,
+            reference_piece='PAY-DEL-1',
+            entreprise=self.entreprise,
+            categorie='PAIEMENT_DETTE',
+        )
+        delete_resp = self.client.delete(
+            f'/api/dettes/{dette.pk}/',
+            {'confirm': True, 'reason': 'Correction ancienne dette'},
+            format='json',
+        )
+        self.assertEqual(delete_resp.status_code, 200, delete_resp.content)
+        self.assertFalse(DetteClient.objects.filter(pk=dette.pk).exists())
+        self.assertFalse(MouvementCaisse.objects.filter(pk=paiement.pk).exists())
+
+    def test_cleanup_client_deletes_all_dettes_and_related_payments(self):
+        for idx, montant in enumerate(['10.00000', '15.00000'], start=1):
+            response = self.client.post('/api/sorties/', self._credit_sortie_payload(montant=montant), format='json')
+            self.assertEqual(response.status_code, 201, response.content)
+            sortie = Sortie.objects.get(pk=response.json()['id'])
+            dette = DetteClient.objects.get(sortie=sortie)
+            ct_dette = ContentType.objects.get_for_model(DetteClient)
+            MouvementCaisse.objects.create(
+                montant=Decimal('1.00000'),
+                devise=self.devise,
+                type='ENTREE',
+                motif='Paiement test nettoyage',
+                content_type=ct_dette,
+                object_id=dette.pk,
+                utilisateur=self.user,
+                reference_piece=f'PAY-CLEAN-{idx}',
+                entreprise=self.entreprise,
+                categorie='PAIEMENT_DETTE',
+            )
+
+        cleanup_resp = self.client.post(
+            '/api/dettes/cleanup-client/',
+            {
+                'client_id': self.client_fiche.pk,
+                'confirm': True,
+                'reason': 'Nettoyage dettes incoherentes',
+            },
+            format='json',
+        )
+        self.assertEqual(cleanup_resp.status_code, 200, cleanup_resp.content)
+        self.assertEqual(
+            DetteClient.objects.filter(client=self.client_fiche, entreprise=self.entreprise).count(),
+            0,
+        )
+        ct_dette = ContentType.objects.get_for_model(DetteClient)
+        self.assertEqual(
+            MouvementCaisse.objects.filter(content_type=ct_dette, categorie='PAIEMENT_DETTE').count(),
+            0,
+        )
+
+    def test_manual_create_dette_does_not_touch_stock_and_sets_partial_paid(self):
+        stock_before = Stock.objects.get(article=self.article).Qte
+        resp = self.client.post(
+            '/api/dettes/manual-create/',
+            {
+                'client_id': self.client_fiche.pk,
+                'montant_total': '100.00000',
+                'montant_deja_paye': '40.00000',
+                'devise_id': self.devise.pk,
+                'commentaire': 'Reprise cahier physique',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        dette_id = resp.json()['dette']['id']
+        dette = DetteClient.objects.get(pk=dette_id)
+        self.assertEqual(dette.montant_total, Decimal('100.00000'))
+        self.assertEqual(dette.montant_paye, Decimal('40.00000'))
+        self.assertEqual(dette.solde_restant, Decimal('60.00000'))
+        self.assertEqual(dette.statut, 'EN_COURS')
+        self.assertEqual(dette.sortie.lignes.count(), 0)
+        stock_after = Stock.objects.get(article=self.article).Qte
+        self.assertEqual(stock_before, stock_after)
 

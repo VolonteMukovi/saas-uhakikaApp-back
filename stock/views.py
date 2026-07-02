@@ -51,6 +51,7 @@ from django.db.models import Prefetch, Q, Sum
 from django.contrib.contenttypes.models import ContentType
 from rest_framework.exceptions import PermissionDenied, NotFound
 from django.utils.translation import gettext as _, pgettext
+from django.contrib.admin.models import LogEntry, ADDITION, DELETION, CHANGE
 from .serializers import *
 from users.permissions import IsSuperAdmin, IsAdmin, IsSuperAdminOrAdmin, IsSuperAdminOrReadOnlyAdmin, IsOwnerOrSuperAdmin, IsAdminOrUser
 from users.serializers import UserSerializer
@@ -2400,26 +2401,6 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     'date_expiration': date_expiration
                 }
         
-        # Calcul du coÃ»t total par devise
-        totaux_par_devise = {}
-        
-        for article_id, ligne_data in articles_groupes.items():
-            q = Decimal(str(ligne_data['quantite']))
-            pu = ligne_data['prix_unitaire']
-            devise_id = ligne_data['devise']
-            devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=tenant_id) if devise_id else default_dev
-            devise_sigle = devise_obj.sigle if devise_obj else 'N/A'
-            
-            montant_ligne = (q * pu).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-            
-            if devise_sigle not in totaux_par_devise:
-                totaux_par_devise[devise_sigle] = {
-                    'devise_obj': devise_obj,
-                    'total': Decimal('0.00')
-                }
-            
-            totaux_par_devise[devise_sigle]['total'] += montant_ligne
-        
         with transaction.atomic():
             stock_states = {}
             for article_id, ligne_data in articles_groupes.items():
@@ -2446,39 +2427,8 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     messages_reponse.append(
                         f"Ajout au stock existant de {article_nom} (stock: {previous_qte} -> {previous_qte + qte})"
                     )
-                
-            # Cr?er les mouvements de caisse par devise (d?penses approvisionnement)
-            type_caisse_id = extract_type_caisse_id(request.data)
-            if any(d['total'] > 0 for d in totaux_par_devise.values()) and not type_caisse_id:
-                raise serializers.ValidationError({'type_caisse_id': str(MSG_CAISSE_REQUISE)})
-            for devise_sigle, devise_data in totaux_par_devise.items():
-                devise_obj = devise_data['devise_obj']
-                total_devise = devise_data['total']
-                
-                if total_devise > 0:
-                    devise_mouvement = devise_obj or default_dev
-                    snapshot_mouvement = build_conversion_snapshot(
-                        entreprise_id=entree.entreprise_id,
-                        amount=total_devise,
-                        devise_source=devise_mouvement,
-                    )
-                    creer_mouvement_caisse(
-                        montant=total_devise,
-                        devise=devise_mouvement,
-                        type_mouvement='SORTIE',
-                        entreprise_id=entree.entreprise_id,
-                        succursale_id=entree.succursale_id,
-                        content_object=entree,
-                        entree=entree,
-                        reference_piece=f'APPRO-{entree.pk}-{devise_sigle}',
-                        motif='',
-                        type_caisse_id=type_caisse_id,
-                        devise_reference=snapshot_mouvement['devise_reference'],
-                        taux_change=snapshot_mouvement['taux_change'],
-                        montant_reference=snapshot_mouvement['montant_reference'],
-                    )
-        
-        # Retourner la rÃ©ponse avec les messages informatifs
+
+        # Retourner la réponse avec les messages informatifs
         response_data = self.get_serializer(entree).data
         response_data['messages'] = messages_reponse
         response_data['articles_traites'] = len(articles_groupes)
@@ -2708,11 +2658,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         if not lignes_data:
             raise serializers.ValidationError("Au moins une ligne d'entrÃ©e est requise.")
         
-        old_total = self._total_entree(entree)
         default_dev = Devise.objects.filter(est_principal=True).first()
-        
-        # Calcul du nouveau total et validation
-        new_total = Decimal('0.00')
         articles_groupes = {}
         
         for ligne in lignes_data:
@@ -2758,8 +2704,6 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=entree.entreprise_id) if devise_id else default_dev
             date_expiration = ligne.get('date_expiration')
             
-            new_total += (Decimal(str(qte)) * prix_unitaire)
-            
             # Regrouper par article (fusionner les doublons)
             if article_id in articles_groupes:
                 articles_groupes[article_id]['quantite'] += qte
@@ -2773,15 +2717,6 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     'devise_obj': devise_obj,
                     'date_expiration': date_expiration
                 }
-        
-        new_total = new_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-        
-        # Si augmentation de dÃ©pense: vÃ©rifier solde
-        diff = (new_total - old_total).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-        if diff > 0:
-            solde = self._solde_caisse(entree.entreprise_id, entree.succursale_id)
-            if diff >= solde:
-                raise serializers.ValidationError("Solde de la caisse insuffisant pour augmenter le coÃ»t de cette entrÃ©e.")
         
         with transaction.atomic():
             # Rollback anciennes lignes (restaurer quantite_restante et stock)
@@ -2846,35 +2781,6 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 stock_obj.Qte += qte
                 stock_obj.seuilAlert = seuil_alerte
                 stock_obj.save()
-            
-            # Ajustement caisse (si diff != 0)
-            if diff != 0:
-                mouvement_type = 'SORTIE' if diff > 0 else 'ENTREE'
-                type_caisse_id = extract_type_caisse_id(request.data)
-                if not type_caisse_id:
-                    raise serializers.ValidationError({'type_caisse_id': str(MSG_CAISSE_REQUISE)})
-                tenant_id = entree.entreprise_id
-                default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first() if tenant_id else Devise.objects.filter(est_principal=True).first()
-                snapshot_mouvement = build_conversion_snapshot(
-                    entreprise_id=entree.entreprise_id,
-                    amount=abs(diff),
-                    devise_source=default_dev,
-                )
-                creer_mouvement_caisse(
-                    montant=abs(diff),
-                    devise=default_dev,
-                    type_mouvement=mouvement_type,
-                    entreprise_id=entree.entreprise_id,
-                    succursale_id=entree.succursale_id,
-                    content_object=entree,
-                    entree=entree,
-                    reference_piece=f'AJ-ENT-{entree.pk}',
-                    motif='Ajustement entrÃ©e',
-                    type_caisse_id=type_caisse_id,
-                    devise_reference=snapshot_mouvement['devise_reference'],
-                    taux_change=snapshot_mouvement['taux_change'],
-                    montant_reference=snapshot_mouvement['montant_reference'],
-                )
         
         return Response(self.get_serializer(entree).data, status=status.HTTP_200_OK)
     
@@ -2884,8 +2790,6 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
 
     def destroy(self, request, *args, **kwargs):
         entree = self.get_object()
-        user = request.user
-        total = self._total_entree(entree)
         
         with transaction.atomic():
             for ligne in entree.lignes.all():
@@ -2896,77 +2800,9 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 stock_obj.Qte -= ligne.quantite
                 stock_obj.save()
             
-            if total > 0:
-                type_caisse_id = extract_type_caisse_id(request.data)
-                if not type_caisse_id:
-                    raise serializers.ValidationError({'type_caisse_id': str(MSG_CAISSE_REQUISE)})
-                tenant_id = entree.entreprise_id
-                default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first() if tenant_id else Devise.objects.filter(est_principal=True).first()
-                ligne_dev = entree.lignes.first()
-                devise_annul = ligne_dev.devise if ligne_dev and ligne_dev.devise else default_dev
-                snapshot_mouvement = build_conversion_snapshot(
-                    entreprise_id=entree.entreprise_id,
-                    amount=total,
-                    devise_source=devise_annul,
-                )
-                creer_mouvement_caisse(
-                    montant=total,
-                    devise=devise_annul,
-                    type_mouvement='ENTREE',
-                    entreprise_id=entree.entreprise_id,
-                    succursale_id=entree.succursale_id,
-                    content_object=entree,
-                    entree=entree,
-                    reference_piece=f'ANN-ENT-{entree.pk}',
-                    motif='Annulation entrÃ©e',
-                    type_caisse_id=type_caisse_id,
-                )
-            
             entree.delete()
         
         return Response(status=status.HTTP_204_NO_CONTENT)
-
-    def _total_entree(self, entree: Entree) -> Decimal:
-        """Calcule le total d'une entrÃ©e."""
-        total = Decimal('0.00')
-        for l in entree.lignes.all():
-            pu = l.prix_unitaire or Decimal('0')
-            total += pu * Decimal(str(l.quantite))
-        return total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-
-    def _solde_caisse(self, tenant_id=None, succursale_id=None):
-        """Calcule le solde global de caisse (tenant + Ã©ventuellement succursale)."""
-        from django.db.models import Sum
-        qs = MouvementCaisse.objects.all()
-        if tenant_id is not None:
-            qs = qs.filter(entreprise_id=tenant_id)
-        if succursale_id is not None:
-            qs = qs.filter(succursale_id=succursale_id)
-        entree_total = qs.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        sortie_total = qs.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        return entree_total - sortie_total
-
-    def _solde_caisse_par_devise(self, tenant_id, succursale_id, devise_obj):
-        """Calcule le solde de caisse (tenant + Ã©ventuellement succursale) pour une devise spÃ©cifique."""
-        from django.db.models import Sum
-
-        if not tenant_id:
-            return Decimal('0.00')
-        if not devise_obj:
-            devise_obj = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
-            if not devise_obj:
-                return Decimal('0.00')
-
-        qs = MouvementCaisse.objects.filter(
-            entreprise_id=tenant_id,
-            devise=devise_obj,
-        )
-        if succursale_id is not None:
-            qs = qs.filter(succursale_id=succursale_id)
-
-        entrees = qs.filter(type='ENTREE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        sorties = qs.filter(type='SORTIE').aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        return (entrees - sorties).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     @action(detail=True, methods=['get'], url_path='bon-pos')
     def bon_entree_pos(self, request, pk=None):
@@ -3536,6 +3372,61 @@ class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
     def get_queryset(self):
         return super().get_queryset().select_related('client', 'devise', 'sortie').order_by('-date_creation', '-id')
 
+    def _assert_correction_permission(self, request):
+        if not (request.user.is_superadmin() or request.user.is_admin(request)):
+            raise PermissionDenied(
+                _("Accès réservé aux administrateurs pour les corrections de dettes.")
+            )
+
+    def _log_correction(self, *, request, dette, action: str, reason: str, payload: dict):
+        try:
+            LogEntry.objects.log_action(
+                user_id=request.user.pk if request.user and request.user.is_authenticated else None,
+                content_type_id=ContentType.objects.get_for_model(DetteClient).pk,
+                object_id=str(dette.pk),
+                object_repr=f"DetteClient#{dette.pk} client={dette.client_id}",
+                action_flag=action,
+                change_message=json.dumps({
+                    'module': 'dette_correction',
+                    'reason': reason or '',
+                    **payload,
+                }, ensure_ascii=False),
+            )
+        except Exception:
+            logger.exception("Journal correction dette: échec log_action (dette_id=%s)", getattr(dette, 'pk', None))
+
+    def _delete_dette_and_related_payments(self, *, request, dette, reason: str):
+        ct_dette = ContentType.objects.get_for_model(DetteClient)
+        paiements_qs = MouvementCaisse.objects.filter(
+            content_type=ct_dette,
+            object_id=dette.pk,
+        )
+        paiements_count = paiements_qs.count()
+        paiements_total = paiements_qs.aggregate(s=Sum('montant'))['s'] or Decimal('0')
+        paiement_ids = list(paiements_qs.values_list('id', flat=True))
+
+        dette_snapshot = {
+            'dette_id': dette.pk,
+            'client_id': dette.client_id,
+            'sortie_id': dette.sortie_id,
+            'montant_total': str(dette.montant_total),
+            'montant_paye': str(dette.montant_paye),
+            'solde_restant': str(dette.solde_restant),
+            'paiements_count': paiements_count,
+            'paiements_total': str(paiements_total),
+            'paiement_ids': paiement_ids,
+        }
+        paiements_qs.delete()
+        dette.delete()
+        self._log_correction(
+            request=request,
+            dette=dette,
+            action=DELETION,
+            reason=reason,
+            payload=dette_snapshot,
+        )
+        return dette_snapshot
+
     def perform_create(self, serializer):
         sortie = serializer.validated_data.get('sortie')
         if sortie and sortie.statut != 'EN_CREDIT':
@@ -3629,3 +3520,173 @@ class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
             return self.get_paginated_response(serializer.data)
         serializer = PaiementDetteReadSerializer(paiements_qs, many=True, context={'request': request})
         return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        self._assert_correction_permission(request)
+        raw_confirm = request.data.get('confirm', request.query_params.get('confirm', False))
+        raw_reason = request.data.get('reason', request.query_params.get('reason', ''))
+        confirm = raw_confirm if isinstance(raw_confirm, bool) else str(raw_confirm).strip().lower() in ('1', 'true', 'yes', 'oui')
+        ser = DetteCorrectionDeleteSerializer(data={'confirm': confirm, 'reason': raw_reason})
+        ser.is_valid(raise_exception=True)
+        reason = (ser.validated_data.get('reason') or '').strip()
+        dette = self.get_object()
+        with transaction.atomic():
+            snapshot = self._delete_dette_and_related_payments(
+                request=request,
+                dette=dette,
+                reason=reason,
+            )
+        return Response(
+            {
+                'success': True,
+                'message': _("Dette supprimée avec tous les paiements liés."),
+                **snapshot,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=['post'], url_path='cleanup-client')
+    def cleanup_client(self, request):
+        self._assert_correction_permission(request)
+        serializer = DetteClientCleanupSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        client = serializer.validated_data['client']
+        reason = (serializer.validated_data.get('reason') or '').strip()
+
+        dettes = self.get_queryset().filter(client=client).order_by('id')
+        if not dettes.exists():
+            return Response(
+                {'detail': _("Aucune dette trouvée pour ce client dans ce périmètre.")},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        deleted = []
+        with transaction.atomic():
+            for dette in dettes:
+                deleted.append(
+                    self._delete_dette_and_related_payments(
+                        request=request,
+                        dette=dette,
+                        reason=reason,
+                    )
+                )
+
+        total_montant = sum(Decimal(x['montant_total']) for x in deleted)
+        total_paiements = sum(Decimal(x['paiements_total']) for x in deleted)
+        total_paiements_count = sum(int(x['paiements_count']) for x in deleted)
+        return Response(
+            {
+                'success': True,
+                'message': _("Nettoyage des dettes du client terminé."),
+                'client_id': client.id,
+                'client_nom': client.nom,
+                'dettes_supprimees': len(deleted),
+                'montant_total_dettes_supprimees': str(total_montant),
+                'paiements_supprimes_count': total_paiements_count,
+                'paiements_supprimes_total': str(total_paiements),
+                'details': deleted,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=['post'], url_path='manual-create')
+    def manual_create(self, request):
+        self._assert_correction_permission(request)
+        serializer = DetteManuelleCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        v = serializer.validated_data
+        client = v['client']
+        montant_total = v['montant_total']
+        montant_deja_paye = v.get('montant_deja_paye') or Decimal('0')
+        commentaire = (v.get('commentaire') or '').strip()
+        tenant_id, branch_id = self.get_tenant_ids()
+        if not tenant_id:
+            return Response({'detail': _('Contexte entreprise manquant.')}, status=status.HTTP_403_FORBIDDEN)
+
+        devise = v.get('devise') or _get_principal_devise(tenant_id)
+        if not devise:
+            return Response({'detail': _('Aucune devise disponible pour créer cette dette.')}, status=status.HTTP_400_BAD_REQUEST)
+
+        date_dette = v.get('date_dette')
+        date_echeance = v.get('date_echeance')
+        statut = 'PAYEE' if montant_deja_paye == montant_total else 'EN_COURS'
+        sortie_statut = 'PAYEE' if statut == 'PAYEE' else 'EN_CREDIT'
+
+        with transaction.atomic():
+            sortie = Sortie.objects.create(
+                motif=commentaire or _('Dette manuelle de correction'),
+                client=client,
+                devise=devise,
+                statut=sortie_statut,
+                entreprise_id=tenant_id,
+                succursale_id=branch_id,
+            )
+            snapshot = build_conversion_snapshot(
+                entreprise_id=tenant_id,
+                amount=montant_total,
+                devise_source=devise,
+            )
+            dette = DetteClient.objects.create(
+                client=client,
+                sortie=sortie,
+                montant_total=montant_total,
+                devise=devise,
+                devise_reference=snapshot['devise_reference'],
+                taux_change=snapshot['taux_change'],
+                montant_reference=snapshot['montant_reference'],
+                date_echeance=date_echeance,
+                statut=statut,
+                commentaire=commentaire or _('Création manuelle pour correction historique.'),
+                entreprise_id=tenant_id,
+                succursale_id=branch_id,
+            )
+            if date_dette:
+                DetteClient.objects.filter(pk=dette.pk).update(date_creation=date_dette)
+                dette.refresh_from_db()
+
+            paiement_reprise = None
+            if montant_deja_paye > 0:
+                paiement_reprise = creer_mouvement_caisse(
+                    montant=montant_deja_paye,
+                    devise=devise,
+                    type_mouvement='ENTREE',
+                    entreprise_id=tenant_id,
+                    succursale_id=branch_id,
+                    content_object=dette,
+                    utilisateur=request.user if request.user.is_authenticated else None,
+                    reference_piece=f'REG-DETTE-{dette.pk}',
+                    motif=_('Régularisation historique de dette'),
+                    moyen='REGULARISATION',
+                    categorie='PAIEMENT_DETTE',
+                    skip_session_check=True,
+                    date_operation=date_dette,
+                )
+
+            self._log_correction(
+                request=request,
+                dette=dette,
+                action=ADDITION,
+                reason=commentaire,
+                payload={
+                    'manual_create': True,
+                    'sortie_id': sortie.pk,
+                    'montant_total': str(montant_total),
+                    'montant_deja_paye': str(montant_deja_paye),
+                    'solde_restant': str(dette.solde_restant),
+                    'date_dette': date_dette.isoformat() if date_dette else None,
+                    'date_echeance': date_echeance.isoformat() if date_echeance else None,
+                    'paiement_reprise_id': paiement_reprise.pk if paiement_reprise else None,
+                },
+            )
+
+        data = DetteClientSerializer(dette, context={'request': request}).data
+        return Response(
+            {
+                'success': True,
+                'message': _('Dette manuelle créée avec succès.'),
+                'dette': data,
+                'montant_deja_paye_enregistre': str(montant_deja_paye),
+                'solde_restant': str(dette.solde_restant),
+            },
+            status=status.HTTP_201_CREATED,
+        )

@@ -1049,6 +1049,70 @@ class DetteClientSerializer(serializers.ModelSerializer):
             return []
 
 
+class DetteCorrectionDeleteSerializer(serializers.Serializer):
+    confirm = serializers.BooleanField(required=True)
+    reason = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        if not attrs.get('confirm'):
+            raise serializers.ValidationError(
+                {'confirm': _("Confirmation requise pour cette opération irréversible.")}
+            )
+        return attrs
+
+
+class DetteClientCleanupSerializer(serializers.Serializer):
+    client_id = serializers.SlugRelatedField(
+        slug_field='id',
+        queryset=Client.objects.all(),
+        source='client',
+    )
+    confirm = serializers.BooleanField(required=True)
+    reason = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        if not attrs.get('confirm'):
+            raise serializers.ValidationError(
+                {'confirm': _("Confirmation requise pour cette opération irréversible.")}
+            )
+        return attrs
+
+
+class DetteManuelleCreateSerializer(serializers.Serializer):
+    client_id = serializers.SlugRelatedField(
+        slug_field='id',
+        queryset=Client.objects.all(),
+        source='client',
+    )
+    montant_total = serializers.DecimalField(max_digits=12, decimal_places=5)
+    montant_deja_paye = serializers.DecimalField(
+        max_digits=12, decimal_places=5, required=False, default=Decimal('0.00000')
+    )
+    devise_id = serializers.PrimaryKeyRelatedField(
+        queryset=Devise.objects.all(), source='devise', required=False, allow_null=True
+    )
+    date_dette = serializers.DateTimeField(required=False, allow_null=True)
+    date_echeance = serializers.DateField(required=False, allow_null=True)
+    commentaire = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        montant_total = attrs.get('montant_total') or Decimal('0')
+        montant_deja_paye = attrs.get('montant_deja_paye') or Decimal('0')
+        if montant_total <= 0:
+            raise serializers.ValidationError(
+                {'montant_total': _("Le montant total doit être strictement positif.")}
+            )
+        if montant_deja_paye < 0:
+            raise serializers.ValidationError(
+                {'montant_deja_paye': _("Le montant déjà payé ne peut pas être négatif.")}
+            )
+        if montant_deja_paye > montant_total:
+            raise serializers.ValidationError(
+                {'montant_deja_paye': _("Le montant déjà payé ne peut pas dépasser le montant total.")}
+            )
+        return attrs
+
+
 # Réexport serializers caisse (compatibilité imports ``stock.serializers``).
 from caisse.serializers import (  # noqa: E402, F401
     DetailMouvementCaisseSerializer,

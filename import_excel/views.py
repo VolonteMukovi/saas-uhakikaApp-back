@@ -619,22 +619,6 @@ def import_approvisionnement(request):
                 devise_id_val = devise_principale.id if devise_principale else None
         ligne['devise_id'] = devise_id_val
 
-    # Calcul des totaux par devise pour g?n?rer les mouvements de caisse d'approvisionnement
-    totaux_par_devise = {}
-    for ligne in lignes:
-        devise_id = ligne.get('devise_id')
-        quantite = Decimal(str(ligne.get('quantite') or 0))
-        prix_unitaire = Decimal(str(ligne.get('prix_unitaire') or 0))
-        montant = (quantite * prix_unitaire).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-        if not devise_id:
-            devise_id = devise_principale.id if devise_principale else None
-        if not devise_id:
-            continue
-        if devise_id not in totaux_par_devise:
-            totaux_par_devise[devise_id] = Decimal('0.00')
-        totaux_par_devise[devise_id] += montant
-
-
     data = {
         'libele': request.POST.get('libele', 'Import Excel'),
         'description': request.POST.get('description', ''),
@@ -643,32 +627,6 @@ def import_approvisionnement(request):
     serializer = EntreeSerializer(data=data, context={'request': request})
     if serializer.is_valid():
         entree = serializer.save(entreprise_id=final_ent, succursale_id=final_succ)
-        from caisse.services.caisse import creer_mouvement_caisse
-        from caisse.services.caisse_defaut import MSG_CAISSE_REQUISE
-        from caisse.services.operation_helpers import extract_type_caisse_id
-        type_caisse_id = extract_type_caisse_id(request.POST)
-        if any(t > 0 for t in totaux_par_devise.values()) and not type_caisse_id:
-            return JsonResponse({'type_caisse_id': str(MSG_CAISSE_REQUISE)}, status=400)
-        for devise_id, total in totaux_par_devise.items():
-            if total <= 0:
-                continue
-            devise_obj = Devise.objects.filter(pk=devise_id).first()
-            if not devise_obj:
-                continue
-            creer_mouvement_caisse(
-                montant=total,
-                devise=devise_obj,
-                type_mouvement='SORTIE',
-                entreprise_id=final_ent,
-                succursale_id=final_succ,
-                entree=entree,
-                content_object=None,
-                utilisateur=request.user if request.user.is_authenticated else None,
-                reference_piece='',
-                details=None,
-                motif='',
-                type_caisse_id=type_caisse_id,
-            )
         return JsonResponse(serializer.data, status=201)
     else:
         return JsonResponse(serializer.errors, status=400)
