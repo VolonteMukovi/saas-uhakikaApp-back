@@ -1002,7 +1002,8 @@ class DetteClientSerializer(serializers.ModelSerializer):
         model = DetteClient
         fields = [
             'id', 'client', 'client_id', 'sortie', 'sortie_id', 'montant_total', 'montant_paye', 'solde_restant',
-            'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference', 'date_creation', 'date_echeance', 'statut', 'commentaire', 'paiements'
+            'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference',
+            'date_creation', 'date_echeance', 'statut', 'commentaire', 'paiements',
         ]
         read_only_fields = ['montant_paye', 'solde_restant', 'statut', 'date_creation']
 

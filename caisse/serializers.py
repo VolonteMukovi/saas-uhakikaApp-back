@@ -109,12 +109,14 @@ class MouvementCaisseSerializer(serializers.ModelSerializer):
     class Meta:
         model = MouvementCaisse
         fields = [
-            'id', 'date', 'montant', 'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference', 'type', 'motif', 'moyen', 'resume',
+            'id', 'date', 'montant', 'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference',
+            'type', 'motif', 'moyen', 'resume',
             'content_type_modele', 'object_id', 'utilisateur', 'reference_piece', 'sortie', 'entree',
             'session_caisse', 'type_caisse', 'type_caisse_id', 'type_caisse_detail', 'categorie', 'details',
         ]
         read_only_fields = [
-            'id', 'date', 'object_id', 'utilisateur', 'session_caisse', 'type_caisse', 'categorie',
+            'id', 'date', 'devise_reference', 'taux_change', 'montant_reference',
+            'object_id', 'utilisateur', 'session_caisse', 'type_caisse', 'categorie',
         ]
 
     def get_resume(self, obj):

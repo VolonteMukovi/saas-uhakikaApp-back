@@ -1,5 +1,5 @@
-"""
-Tests isolation multi-tenant (endpoints métier).
+﻿"""
+Tests isolation multi-tenant (endpoints m├⌐tier).
 """
 from decimal import Decimal
 from django.contrib.auth import get_user_model
@@ -10,6 +10,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
 
 from caisse.models import MouvementCaisse, TypeCaisse
+from caisse.services.caisse import creer_mouvement_caisse
 from stock.models import (
     Article,
     Client,
@@ -31,7 +32,7 @@ from users.models import Membership
 
 @override_settings(ALLOWED_HOSTS=['testserver', 'localhost', '127.0.0.1'])
 class BeneficesTotauxTenantTests(APITestCase):
-    """GET /api/entrees/benefices-totaux/ est borné à l'entreprise du membership."""
+    """GET /api/entrees/benefices-totaux/ est born├⌐ ├á l'entreprise du membership."""
 
     def test_benefices_totaux_details_entreprise_id_du_membership(self):
         ent = Entreprise.objects.create(
@@ -58,7 +59,7 @@ class BeneficesTotauxTenantTests(APITestCase):
         self.assertEqual(response.status_code, 200, response.content)
         data = response.json()
         self.assertEqual(data['details']['entreprise_id'], ent.id)
-        # Pas de succursale dans le JWT → filtre entreprise seule
+        # Pas de succursale dans le JWT ΓåÆ filtre entreprise seule
         self.assertIsNone(data['details']['succursale_id'])
 
 
@@ -412,7 +413,7 @@ class ClientLifecycleApiTests(APITestCase):
 
 @override_settings(ALLOWED_HOSTS=['testserver', 'localhost', '127.0.0.1'])
 class CreditSaleDebtTests(APITestCase):
-    """Vente EN_CREDIT → dette obligatoire ; cohérence dashboard."""
+    """Vente EN_CREDIT ΓåÆ dette obligatoire ; coh├⌐rence dashboard."""
 
     def setUp(self):
         self.entreprise = Entreprise.objects.create(
@@ -682,4 +683,117 @@ class CreditSaleDebtTests(APITestCase):
         self.assertEqual(dette.sortie.lignes.count(), 0)
         stock_after = Stock.objects.get(article=self.article).Qte
         self.assertEqual(stock_before, stock_after)
+
+
+@override_settings(ALLOWED_HOSTS=['testserver', 'localhost', '127.0.0.1'])
+class TauxChangeApiTests(APITestCase):
+    def setUp(self):
+        self.ent = Entreprise.objects.create(
+            nom='E-FX',
+            secteur='s',
+            pays='CD',
+            adresse='a',
+            telephone='t',
+            email='fx@e.com',
+            nif='nfx',
+            responsable='r',
+        )
+        self.usd = Devise.objects.create(
+            sigle='USD',
+            nom='Dollar americain',
+            symbole='$',
+            est_principal=True,
+            entreprise=self.ent,
+        )
+        self.cdf = Devise.objects.create(
+            sigle='CDF',
+            nom='Franc congolais',
+            symbole='FC',
+            entreprise=self.ent,
+        )
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='admin_fx',
+            email='fx@example.com',
+            password='secretpass123',
+        )
+        Membership.objects.create(
+            user=self.user, entreprise=self.ent, role='admin', is_active=True,
+        )
+        self.client.force_authenticate(user=self.user)
+        self.client.post('/api/taux-change/', {
+            'source_devise_id': self.usd.id,
+            'target_devise_id': self.cdf.id,
+            'taux': '2800',
+            'date_application': '2026-06-01T08:00:00Z',
+        }, format='json')
+
+    def test_create_taux_change_endpoint(self):
+        response = self.client.post('/api/taux-change/', {
+            'source_devise_id': self.usd.id,
+            'target_devise_id': self.cdf.id,
+            'taux': '2800',
+            'date_application': '2026-06-28T08:14:00Z',
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.content)
+        data = response.json()
+        self.assertEqual(data['source_devise']['sigle'], 'USD')
+        self.assertEqual(data['target_devise']['sigle'], 'CDF')
+        self.assertEqual(data['taux'], '2800')
+
+    def test_list_taux_change_endpoint_returns_latest_active_rate_by_pair(self):
+        self.client.post('/api/taux-change/', {
+            'source_devise_id': self.usd.id,
+            'target_devise_id': self.cdf.id,
+            'taux': '2800',
+            'date_application': '2026-06-22T08:00:00Z',
+        }, format='json')
+        self.client.post('/api/taux-change/', {
+            'source_devise_id': self.usd.id,
+            'target_devise_id': self.cdf.id,
+            'taux': '2850',
+            'date_application': '2026-06-25T08:00:00Z',
+        }, format='json')
+
+        response = self.client.get('/api/taux-change/')
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]['taux'], '2850')
+
+    def test_creer_mouvement_caisse_stores_snapshot_reference(self):
+        mouvement = creer_mouvement_caisse(
+            montant='28000.00000',
+            devise=self.cdf,
+            type_mouvement='ENTREE',
+            entreprise_id=self.ent.id,
+            succursale_id=None,
+            motif='Test snapshot devise',
+            skip_session_check=True,
+        )
+        self.assertIsNotNone(mouvement.devise_reference_id)
+        self.assertIsNotNone(mouvement.taux_change)
+        self.assertGreater(mouvement.montant_reference, 0)
+        self.assertEqual(mouvement.devise_reference_id, self.usd.id)
+
+    def test_create_dette_endpoint_sets_currency_snapshot(self):
+        client = Client.objects.create(id='CLI-FX-1', nom='Client FX')
+        sortie = Sortie.objects.create(
+            client=client,
+            devise=self.cdf,
+            statut='EN_CREDIT',
+            entreprise=self.ent,
+        )
+        resp = self.client.post('/api/dettes/', {
+            'client_id': client.id,
+            'sortie_id': sortie.id,
+            'montant_total': '28000.00000',
+            'devise_id': self.cdf.id,
+        }, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        dette = DetteClient.objects.get(sortie=sortie)
+        self.assertEqual(dette.devise_id, self.cdf.id)
+        self.assertEqual(dette.devise_reference_id, self.usd.id)
+        self.assertIsNotNone(dette.taux_change)
+        self.assertGreater(dette.montant_reference, 0)
 

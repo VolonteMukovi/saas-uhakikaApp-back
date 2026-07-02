@@ -5,7 +5,7 @@ from decimal import Decimal, ROUND_DOWN
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from stock.models import Devise, TauxChange
+from stock.models import Devise, Entreprise, TauxChange
 
 AMOUNT_QUANTIZER = Decimal('0.00001')
 RATE_QUANTIZER = Decimal('0.00000001')
@@ -27,6 +27,75 @@ def get_principal_devise(entreprise_id: int | None) -> Devise | None:
     if not entreprise_id:
         return None
     return Devise.objects.filter(entreprise_id=entreprise_id, est_principal=True).first()
+
+
+def _config_exchange_rate_sort_key(entry: dict) -> tuple:
+    return (
+        str(entry.get('effective_at') or ''),
+        str(entry.get('created_at') or ''),
+        int(entry.get('id') or 0),
+    )
+
+
+def _get_config_exchange_rates(entreprise_id: int | None) -> list[dict]:
+    if not entreprise_id:
+        return []
+    try:
+        entreprise = Entreprise.objects.get(pk=entreprise_id)
+    except Entreprise.DoesNotExist:
+        return []
+    try:
+        config_data = entreprise.get_config_dict()
+    except Exception:
+        return []
+    integrations = config_data.get('integrations') or {}
+    rates = integrations.get('exchange_rates') or []
+    return rates if isinstance(rates, list) else []
+
+
+def _get_config_exchange_rate(
+    source_devise: Devise,
+    target_devise: Devise,
+    *,
+    entreprise_id: int | None,
+    date_operation=None,
+) -> Decimal | None:
+    ref_date = date_operation or timezone.now()
+    ref_key = _config_exchange_rate_sort_key({
+        'effective_at': ref_date.isoformat() if hasattr(ref_date, 'isoformat') else str(ref_date),
+    })
+    latest_direct = None
+    latest_inverse = None
+
+    for entry in _get_config_exchange_rates(entreprise_id):
+        if entry.get('is_active', True) is False:
+            continue
+        entry_key = _config_exchange_rate_sort_key(entry)
+        if entry_key > ref_key:
+            continue
+        source_id = entry.get('source_devise_id')
+        target_id = entry.get('target_devise_id')
+        try:
+            rate = quantize_rate(entry.get('rate'))
+        except Exception:
+            continue
+        if rate <= 0:
+            continue
+        if source_id == source_devise.pk and target_id == target_devise.pk:
+            if latest_direct is None or entry_key > _config_exchange_rate_sort_key(latest_direct):
+                latest_direct = entry
+        elif source_id == target_devise.pk and target_id == source_devise.pk:
+            if latest_inverse is None or entry_key > _config_exchange_rate_sort_key(latest_inverse):
+                latest_inverse = entry
+
+    if latest_direct is not None:
+        return quantize_rate(latest_direct.get('rate'))
+    if latest_inverse is not None:
+        inverse_rate = quantize_rate(latest_inverse.get('rate'))
+        if inverse_rate <= 0:
+            return None
+        return quantize_rate(Decimal('1') / inverse_rate)
+    return None
 
 
 def get_exchange_rate(
@@ -75,6 +144,15 @@ def get_exchange_rate(
     )
     if inverse and inverse.taux:
         return quantize_rate(Decimal('1') / Decimal(str(inverse.taux)))
+
+    config_rate = _get_config_exchange_rate(
+        source_devise,
+        target_devise,
+        entreprise_id=entreprise_id,
+        date_operation=date_operation,
+    )
+    if config_rate is not None:
+        return config_rate
 
     raise CurrencyError('Aucun taux de change actif n est defini pour cette devise.')
 
