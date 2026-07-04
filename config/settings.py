@@ -19,6 +19,9 @@ DEBUG = config("DEBUG", default=True, cast=bool)
 
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="*").split(",")  # Dev uniquement, limiter en prod
 
+if os.environ.get("COOLIFY_URL"):
+    ALLOWED_HOSTS.append("*")
+
 INSTALLED_APPS = [
     "config.apps.ConfigConfig",
     "corsheaders",
@@ -367,3 +370,10 @@ FLEXPAY_WEBHOOK_SECRET = config('FLEXPAY_WEBHOOK_SECRET', default='')
 
 SERDI_PAY_API_KEY = config('SERDI_PAY_API_KEY', default='')
 SERDI_PAY_WEBHOOK_SECRET = config('SERDI_PAY_WEBHOOK_SECRET', default='')
+
+
+
+# Configuration indispensable pour les serveurs derrière le proxy Coolify
+USE_X_FORWARDED_HOST = True
+USE_X_FORWARDED_PORT = True
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
