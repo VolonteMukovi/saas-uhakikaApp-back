@@ -191,7 +191,5 @@ def build_conversion_snapshot(
 
 
 def assert_caisse_devise_compatible(type_caisse, devise: Devise | None) -> None:
-    if type_caisse is None or devise is None:
-        return
-    if type_caisse.devise_id and type_caisse.devise_id != devise.id:
-        raise CurrencyError('La caisse selectionnee n accepte pas cette devise.')
+    """Conservé pour compatibilité : la conversion inter-devises est gérée dans creer_mouvement_caisse."""
+    return

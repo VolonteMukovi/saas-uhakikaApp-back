@@ -162,6 +162,33 @@ class MouvementCaisse(models.Model):
     )
     taux_change = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     montant_reference = models.DecimalField(max_digits=14, decimal_places=5, default=Decimal('0'))
+    montant_origine = models.DecimalField(
+        max_digits=14, decimal_places=5, null=True, blank=True,
+        help_text='Montant d\'origine avant conversion vers la devise de la caisse.',
+    )
+    devise_origine = models.ForeignKey(
+        'stock.Devise',
+        on_delete=models.PROTECT,
+        related_name='mouvements_caisse_origine',
+        null=True,
+        blank=True,
+    )
+    taux_conversion = models.DecimalField(
+        max_digits=20, decimal_places=8, null=True, blank=True,
+        help_text='Taux appliqué : 1 unité devise_origine = taux_conversion unités devise caisse.',
+    )
+    date_taux = models.DateTimeField(null=True, blank=True, help_text='Date du taux utilisé pour la conversion caisse.')
+    montant_applique = models.DecimalField(
+        max_digits=14, decimal_places=5, null=True, blank=True,
+        help_text='Montant imputé sur l\'objet lié (ex. dette) dans la devise métier de cet objet.',
+    )
+    devise_applique = models.ForeignKey(
+        'stock.Devise',
+        on_delete=models.PROTECT,
+        related_name='mouvements_caisse_applique',
+        null=True,
+        blank=True,
+    )
     type = models.CharField(max_length=10, choices=TYPE_CHOICES)
     motif = models.TextField(blank=True, default='', help_text='Libellé / motif du mouvement.')
     moyen = models.CharField(

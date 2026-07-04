@@ -6,10 +6,10 @@ from decimal import Decimal, ROUND_DOWN
 from django.db import transaction
 from rest_framework import serializers
 
-from caisse.models import MouvementCaisse
+from caisse.models import MouvementCaisse, TypeCaisse
 from caisse.services.caisse import creer_mouvement_caisse
+from caisse.services.currency_conversion import prepare_caisse_movement
 from stock.models import Devise, Sortie
-from stock.services.currency import build_conversion_snapshot
 
 
 def _quantize(amount) -> Decimal:
@@ -18,6 +18,53 @@ def _quantize(amount) -> Decimal:
 
 def _vent_reference(sortie_id: int, devise_key: str) -> str:
     return f'VENT-{sortie_id}-{devise_key}'
+
+
+def _apply_conversion_to_movement(
+    mv: MouvementCaisse,
+    *,
+    montant_operation: Decimal,
+    devise_operation: Devise,
+    type_caisse: TypeCaisse | None,
+    entreprise_id: int,
+) -> None:
+    if type_caisse is None:
+        mv.montant = montant_operation
+        mv.devise = devise_operation
+        mv.montant_origine = None
+        mv.devise_origine = None
+        mv.taux_conversion = None
+        mv.date_taux = None
+        snapshot_amount = montant_operation
+        snapshot_devise = devise_operation
+    else:
+        conversion = prepare_caisse_movement(
+            montant_operation=montant_operation,
+            devise_operation=devise_operation,
+            type_caisse=type_caisse,
+            entreprise_id=entreprise_id,
+        )
+        mv.montant = conversion.montant_caisse
+        mv.devise = conversion.devise_caisse
+        mv.montant_origine = conversion.montant_origine
+        mv.devise_origine = conversion.devise_origine
+        mv.taux_conversion = conversion.taux_conversion
+        mv.date_taux = conversion.date_taux
+        mv.devise_reference = conversion.devise_reference
+        mv.taux_change = conversion.taux_reference
+        mv.montant_reference = conversion.montant_reference
+        return
+
+    from stock.services.currency import build_conversion_snapshot
+
+    snapshot = build_conversion_snapshot(
+        entreprise_id=entreprise_id,
+        amount=snapshot_amount,
+        devise_source=snapshot_devise,
+    )
+    mv.devise_reference = snapshot['devise_reference']
+    mv.taux_change = snapshot['taux_change']
+    mv.montant_reference = snapshot['montant_reference']
 
 
 @transaction.atomic
@@ -65,6 +112,12 @@ def sync_sortie_cash_movements(
         if encaissement_requis and not type_caisse_id:
             raise serializers.ValidationError({'type_caisse_id': 'Type de caisse requis pour encaisser la vente.'})
 
+    type_caisse = None
+    if type_caisse_id:
+        type_caisse = TypeCaisse.objects.filter(
+            pk=type_caisse_id, entreprise_id=sortie.entreprise_id,
+        ).select_related('devise').first()
+
     for devise_key, devise_data in totaux_par_devise.items():
         devise_obj = devise_data['devise_obj']
         total_devise = _quantize(devise_data['total'])
@@ -83,20 +136,17 @@ def sync_sortie_cash_movements(
                 mv.save(update_fields=['montant', 'montant_reference'])
             continue
 
-        snapshot = build_conversion_snapshot(
-            entreprise_id=sortie.entreprise_id,
-            amount=total_devise,
-            devise_source=devise_obj,
-        )
-
         if mv:
-            mv.montant = total_devise
-            mv.devise = devise_obj
-            mv.devise_reference = snapshot['devise_reference']
-            mv.taux_change = snapshot['taux_change']
-            mv.montant_reference = snapshot['montant_reference']
             if type_caisse_id and not mv.type_caisse_id:
                 mv.type_caisse_id = type_caisse_id
+                type_caisse = type_caisse or TypeCaisse.objects.filter(pk=type_caisse_id).select_related('devise').first()
+            _apply_conversion_to_movement(
+                mv,
+                montant_operation=total_devise,
+                devise_operation=devise_obj,
+                type_caisse=type_caisse or mv.type_caisse,
+                entreprise_id=sortie.entreprise_id,
+            )
             mv.save()
         else:
             if not type_caisse_id:
@@ -113,8 +163,5 @@ def sync_sortie_cash_movements(
                 motif='',
                 utilisateur=utilisateur,
                 type_caisse_id=type_caisse_id,
-                devise_reference=snapshot['devise_reference'],
-                taux_change=snapshot['taux_change'],
-                montant_reference=snapshot['montant_reference'],
                 skip_session_check=True,
             )

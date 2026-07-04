@@ -11,7 +11,7 @@ from caisse.models import DetailMouvementCaisse, MouvementCaisse, TypeCaisse
 from caisse.services.caisse import creer_mouvement_caisse, mouvement_moyen_affiche
 from caisse.services.caisse_defaut import CaisseError, caisse_necessite_session, parse_type_caisse_id_from_payload
 from stock.models import Client, DetteClient, Devise
-from stock.services.currency import assert_caisse_devise_compatible, build_conversion_snapshot
+from caisse.services.currency_conversion import payment_equivalent_in_dette_currency, prepare_caisse_movement
 from stock.serializers import DeviseSerializer
 
 
@@ -110,12 +110,16 @@ class MouvementCaisseSerializer(serializers.ModelSerializer):
         model = MouvementCaisse
         fields = [
             'id', 'date', 'montant', 'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference',
+            'montant_origine', 'devise_origine', 'taux_conversion', 'date_taux',
+            'montant_applique', 'devise_applique',
             'type', 'motif', 'moyen', 'resume',
             'content_type_modele', 'object_id', 'utilisateur', 'reference_piece', 'sortie', 'entree',
             'session_caisse', 'type_caisse', 'type_caisse_id', 'type_caisse_detail', 'categorie', 'details',
         ]
         read_only_fields = [
             'id', 'date', 'devise_reference', 'taux_change', 'montant_reference',
+            'montant_origine', 'devise_origine', 'taux_conversion', 'date_taux',
+            'montant_applique', 'devise_applique',
             'object_id', 'utilisateur', 'session_caisse', 'type_caisse', 'categorie',
         ]
 
@@ -154,8 +158,6 @@ class MouvementCaisseSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {'type_caisse_id': _('Cette operation financiere exige une caisse active.')}
             )
-        if tc and devise:
-            assert_caisse_devise_compatible(tc, devise)
         return attrs
 
     def to_internal_value(self, data):
@@ -184,7 +186,6 @@ class MouvementCaisseSerializer(serializers.ModelSerializer):
         if moyen is not None:
             moyen = (moyen or '').strip() or None
         ref = (validated_data.pop('reference_piece', None) or '') or ''
-        explicit_rate = validated_data.pop('taux_change', None)
 
         req = self.context.get('request')
         if tenant_id is None and req and req.user.is_authenticated and hasattr(req.user, 'get_entreprise_id'):
@@ -192,14 +193,6 @@ class MouvementCaisseSerializer(serializers.ModelSerializer):
         if branch_id is None and req:
             branch_id = getattr(req, 'branch_id', None)
         user = req.user if req and req.user.is_authenticated else None
-
-        snapshot = build_conversion_snapshot(
-            entreprise_id=tenant_id,
-            amount=montant,
-            devise_source=devise,
-            date_operation=None,
-            explicit_rate=explicit_rate,
-        )
 
         return creer_mouvement_caisse(
             montant=montant,
@@ -213,9 +206,6 @@ class MouvementCaisseSerializer(serializers.ModelSerializer):
             motif=motif,
             moyen=moyen,
             type_caisse=type_caisse,
-            devise_reference=snapshot['devise_reference'],
-            taux_change=snapshot['taux_change'],
-            montant_reference=snapshot['montant_reference'],
         )
 
 
@@ -255,6 +245,11 @@ class PaiementDetteReadSerializer(serializers.Serializer):
             'id': mc.id,
             'dette': dette_payload,
             'montant_paye': str(mc.montant),
+            'montant_applique_dette': str(mc.montant_applique) if mc.montant_applique is not None else None,
+            'montant_origine': str(mc.montant_origine) if mc.montant_origine is not None else None,
+            'devise_origine': DeviseSerializer(mc.devise_origine).data if mc.devise_origine_id else None,
+            'taux_conversion': str(mc.taux_conversion) if mc.taux_conversion is not None else None,
+            'date_taux': mc.date_taux.isoformat() if mc.date_taux else None,
             'date_paiement': mc.date.isoformat() if mc.date else None,
             'moyen': moyen,
             'reference': mc.reference_piece or '',
@@ -299,19 +294,8 @@ class PaiementDetteWriteSerializer(serializers.Serializer):
         if dette.statut == 'PAYEE':
             raise serializers.ValidationError({'dette': _('Cette dette est déjà entièrement payée.')})
         montant = attrs['montant_paye']
-        if montant > dette.solde_restant:
-            raise serializers.ValidationError(
-                {
-                    'montant_paye': _(
-                        'Le montant (%(m)s) dépasse le solde restant (%(s)s).'
-                    )
-                    % {'m': montant, 's': dette.solde_restant}
-                }
-            )
-        if montant <= 0:
-            raise serializers.ValidationError({'montant_paye': _('Le montant doit être positif.')})
         tc = attrs.get('type_caisse')
-        devise = attrs.get('devise') or dette.devise
+        devise_paiement = attrs.get('devise') or dette.devise
         if not tc:
             raise serializers.ValidationError(
                 {'type_caisse_id': _('Veuillez sélectionner une caisse avant de valider cette opération.')}
@@ -320,8 +304,50 @@ class PaiementDetteWriteSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {'type_caisse_id': _('Cette opération financière exige une caisse active.')}
             )
-        if devise:
-            assert_caisse_devise_compatible(tc, devise)
+        if not devise_paiement:
+            raise serializers.ValidationError({'devise_id': _('Devise requise (dette sans devise).')})
+        if montant <= 0:
+            raise serializers.ValidationError({'montant_paye': _('Le montant doit être positif.')})
+
+        dette_devise = dette.devise
+        if not dette_devise:
+            raise serializers.ValidationError({'dette': _('La dette n\'a pas de devise configurée.')})
+
+        req = self.context.get('request')
+        tenant_id = getattr(req, 'tenant_id', None) if req else None
+        if not tenant_id and req and getattr(req.user, 'is_authenticated', False):
+            tenant_id = req.user.get_entreprise_id(req)
+
+        if devise_paiement.pk == dette_devise.pk:
+            montant_applique_dette = montant
+        else:
+            try:
+                montant_applique_dette, _ = payment_equivalent_in_dette_currency(
+                    montant,
+                    devise_paiement,
+                    dette_devise,
+                    entreprise_id=tenant_id,
+                    explicit_rate=attrs.get('taux_change'),
+                )
+            except Exception as exc:
+                raise serializers.ValidationError({'devise_id': str(exc)}) from exc
+
+        if montant_applique_dette > dette.solde_restant:
+            raise serializers.ValidationError(
+                {
+                    'montant_paye': _(
+                        'Le montant (%(m)s %(dp)s) dépasse le solde restant (%(s)s %(dd)s) après conversion.'
+                    )
+                    % {
+                        'm': montant,
+                        'dp': devise_paiement.sigle,
+                        's': dette.solde_restant,
+                        'dd': dette_devise.sigle,
+                    }
+                }
+            )
+        attrs['devise_paiement'] = devise_paiement
+        attrs['montant_applique_dette'] = montant_applique_dette
         return attrs
 
     def to_internal_value(self, data):
@@ -339,8 +365,7 @@ class PaiementDetteWriteSerializer(serializers.Serializer):
     def create(self, validated_data):
         dette = validated_data['dette']
         montant = validated_data['montant_paye']
-        devise = validated_data.get('devise') or dette.devise
-        explicit_rate = validated_data.get('taux_change')
+        devise = validated_data['devise_paiement']
         type_caisse = validated_data['type_caisse']
         moyen = validated_data.get('moyen') or ''
         reference = validated_data.get('reference') or ''
@@ -350,15 +375,6 @@ class PaiementDetteWriteSerializer(serializers.Serializer):
         if not tenant_id and req and req.user.is_authenticated and hasattr(req.user, 'get_entreprise_id'):
             tenant_id = req.user.get_entreprise_id(req)
         user = req.user if req and req.user.is_authenticated else None
-        if not devise:
-            raise serializers.ValidationError({'devise_id': _('Devise requise (dette sans devise).')})
-
-        snapshot = build_conversion_snapshot(
-            entreprise_id=tenant_id,
-            amount=montant,
-            devise_source=devise,
-            explicit_rate=explicit_rate,
-        )
 
         motif = moyen.strip() or (
             f"Paiement dette - {dette.client.nom if dette.client else ''} - {montant}"
@@ -376,9 +392,9 @@ class PaiementDetteWriteSerializer(serializers.Serializer):
             motif=motif,
             moyen=moyen.strip() or None,
             type_caisse=type_caisse,
-            devise_reference=snapshot['devise_reference'],
-            taux_change=snapshot['taux_change'],
-            montant_reference=snapshot['montant_reference'],
+            taux_conversion_explicite=validated_data.get('taux_change'),
+            montant_applique=validated_data['montant_applique_dette'],
+            devise_applique=dette.devise,
         )
 
 
@@ -503,27 +519,42 @@ class PaiementDetteGroupedWriteSerializer(serializers.Serializer):
         if not dettes:
             raise serializers.ValidationError({'dettes': _('Aucune dette ouverte ? payer pour ce client.')})
 
-        effective_devise = devise or dettes[0].devise
-        if effective_devise is None:
-            raise serializers.ValidationError({'devise_id': _('Devise requise pour ce paiement group?.')})
+        payment_devise = devise or dettes[0].devise
+        dette_devise = dettes[0].devise
+        if payment_devise is None or dette_devise is None:
+            raise serializers.ValidationError({'devise_id': _('Devise requise pour ce paiement groupé.')})
 
         total_selectionne = Decimal('0.00000')
         for dette in dettes:
-            dette_devise = dette.devise or effective_devise
-            if dette_devise is None or dette_devise.pk != effective_devise.pk:
+            dette_row_devise = dette.devise or dette_devise
+            if dette_row_devise is None or dette_row_devise.pk != dette_devise.pk:
                 raise serializers.ValidationError({
-                    'dettes': _('Toutes les dettes s?lectionn?es doivent ?tre dans la m?me devise.')
+                    'dettes': _('Toutes les dettes sélectionnées doivent être dans la même devise.')
                 })
             total_selectionne += dette.solde_restant
 
-        if montant > total_selectionne:
+        if payment_devise.pk == dette_devise.pk:
+            montant_equivalent_dette = montant
+        else:
+            try:
+                montant_equivalent_dette, _ = payment_equivalent_in_dette_currency(
+                    montant,
+                    payment_devise,
+                    dette_devise,
+                    entreprise_id=tenant_id,
+                )
+            except Exception as exc:
+                raise serializers.ValidationError({'devise_id': str(exc)}) from exc
+
+        if montant_equivalent_dette > total_selectionne:
             raise serializers.ValidationError({
-                'montant_paye': _('Le montant (%(m)s) d?passe le total s?lectionn? (%(s)s).')
+                'montant_paye': _('Le montant (%(m)s) dépasse le total sélectionné (%(s)s) après conversion.')
                 % {'m': montant, 's': total_selectionne}
             })
 
-        assert_caisse_devise_compatible(type_caisse, effective_devise)
-        attrs['resolved_devise'] = effective_devise
+        attrs['payment_devise'] = payment_devise
+        attrs['dette_devise'] = dette_devise
+        attrs['montant_equivalent_dette'] = montant_equivalent_dette
         attrs['total_selectionne'] = total_selectionne
         attrs['selected_dette_ids'] = [d.pk for d in dettes]
         return attrs
@@ -533,7 +564,9 @@ class PaiementDetteGroupedWriteSerializer(serializers.Serializer):
         client = validated_data['client']
         dette_ids = validated_data['selected_dette_ids']
         montant = validated_data['montant_paye']
-        devise = validated_data['resolved_devise']
+        payment_devise = validated_data['payment_devise']
+        dette_devise = validated_data['dette_devise']
+        montant_equivalent_dette = validated_data['montant_equivalent_dette']
         type_caisse = validated_data['type_caisse']
         commentaire = (validated_data.get('commentaire') or '').strip()
         moyen = (validated_data.get('moyen') or '').strip()
@@ -558,16 +591,16 @@ class PaiementDetteGroupedWriteSerializer(serializers.Serializer):
                 raise serializers.ValidationError({
                     "dettes": _("La dette #%(id)s n'est plus ouverte.") % {"id": dette.pk}
                 })
-            dette_devise = dette.devise or devise
-            if dette_devise is None or dette_devise.pk != devise.pk:
+            row_devise = dette.devise or dette_devise
+            if row_devise is None or row_devise.pk != dette_devise.pk:
                 raise serializers.ValidationError({
-                    'dettes': _('Toutes les dettes s?lectionn?es doivent ?tre dans la m?me devise.')
+                    'dettes': _('Toutes les dettes sélectionnées doivent être dans la même devise.')
                 })
             total_selectionne += dette.solde_restant
 
-        if montant > total_selectionne:
+        if montant_equivalent_dette > total_selectionne:
             raise serializers.ValidationError({
-                'montant_paye': _('Le montant (%(m)s) d?passe le total s?lectionn? (%(s)s).')
+                'montant_paye': _('Le montant (%(m)s) dépasse le total sélectionné (%(s)s).')
                 % {'m': montant, 's': total_selectionne}
             })
 
@@ -575,22 +608,33 @@ class PaiementDetteGroupedWriteSerializer(serializers.Serializer):
         if not reference:
             reference = f"PAY-GROUP-{tenant_id or 'NA'}-{client.pk}-{timezone.now().strftime('%Y%m%d%H%M%S')}"
 
-        remaining = montant
+        remaining_dette = montant_equivalent_dette
+        remaining_payment = montant
         dettes_payees = []
         mouvements = []
 
         for dette in dettes:
-            if remaining <= 0:
+            if remaining_dette <= 0 or remaining_payment <= 0:
                 break
             ancien_solde = dette.solde_restant
-            montant_applique = min(ancien_solde, remaining)
-            if montant_applique <= 0:
+            montant_applique_dette = min(ancien_solde, remaining_dette)
+            if montant_applique_dette <= 0:
                 continue
+
+            if payment_devise.pk == dette_devise.pk:
+                montant_applique_paiement = montant_applique_dette
+            else:
+                from stock.services.currency import convert_amount, get_exchange_rate
+                rate_dette_to_payment = get_exchange_rate(
+                    dette_devise, payment_devise, entreprise_id=tenant_id,
+                )
+                montant_applique_paiement = convert_amount(montant_applique_dette, rate_dette_to_payment)
+                montant_applique_paiement = min(montant_applique_paiement, remaining_payment)
 
             motif = commentaire or f"Paiement groupe des dettes - {client.nom} - Dette #{dette.pk}"
             mc = creer_mouvement_caisse(
-                montant=montant_applique,
-                devise=devise,
+                montant=montant_applique_paiement,
+                devise=payment_devise,
                 type_mouvement='ENTREE',
                 entreprise_id=tenant_id,
                 succursale_id=branch_id,
@@ -601,10 +645,12 @@ class PaiementDetteGroupedWriteSerializer(serializers.Serializer):
                 moyen=moyen or None,
                 type_caisse=type_caisse,
                 categorie='PAIEMENT_DETTE',
+                montant_applique=montant_applique_dette,
+                devise_applique=dette_devise,
             )
             mouvements.append(mc)
 
-            new_solde = ancien_solde - montant_applique
+            new_solde = ancien_solde - montant_applique_dette
             nouveau_statut = self._compute_status(dette, new_solde)
             DetteClient.objects.filter(pk=dette.pk).update(statut=nouveau_statut)
 
@@ -612,16 +658,18 @@ class PaiementDetteGroupedWriteSerializer(serializers.Serializer):
                 'dette_id': dette.pk,
                 'sortie_id': dette.sortie_id,
                 'mouvement_caisse_id': mc.pk,
-                'montant_applique': str(montant_applique),
+                'montant_applique': str(montant_applique_dette),
+                'montant_paiement': str(montant_applique_paiement),
                 'ancien_solde': str(ancien_solde),
                 'nouveau_solde': str(new_solde),
                 'statut': nouveau_statut,
             })
-            remaining -= montant_applique
+            remaining_dette -= montant_applique_dette
+            remaining_payment -= montant_applique_paiement
 
         return {
             'success': True,
-            'message': _('Paiement group? enregistr? avec succ?s.'),
+            'message': _('Paiement groupé enregistré avec succès.'),
             'client': {
                 'id': client.pk,
                 'nom': client.nom,
@@ -629,13 +677,13 @@ class PaiementDetteGroupedWriteSerializer(serializers.Serializer):
             'paiement': {
                 'reference': reference,
                 'montant_total_paye': str(montant),
-                'devise': devise.sigle if devise else None,
-                'devise_id': devise.pk if devise else None,
+                'devise': payment_devise.sigle if payment_devise else None,
+                'devise_id': payment_devise.pk if payment_devise else None,
                 'type_caisse_id': type_caisse.pk,
                 'mode_repartition': mode_repartition,
                 'nombre_dettes_selectionnees': len(dettes),
                 'total_selectionne': str(total_selectionne),
-                'montant_non_applique': str(remaining),
+                'montant_non_applique': str(remaining_payment),
             },
             'dettes_payees': dettes_payees,
             'paiements_crees': [
@@ -651,3 +699,178 @@ class PaiementDetteGroupedWriteSerializer(serializers.Serializer):
 
 
 PaiementDetteSerializer = PaiementDetteReadSerializer
+
+
+class ConversionPreviewSerializer(serializers.Serializer):
+    """Prévisualisation conversion opération → devise caisse (source de vérité backend)."""
+
+    montant = serializers.DecimalField(max_digits=14, decimal_places=5)
+    devise_id = serializers.PrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise')
+    type_caisse_id = serializers.PrimaryKeyRelatedField(
+        queryset=TypeCaisse.objects.filter(is_active=True),
+        source='type_caisse',
+    )
+    date_operation = serializers.DateTimeField(required=False, allow_null=True)
+    taux_change = serializers.DecimalField(max_digits=20, decimal_places=8, required=False, allow_null=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        req = self.context.get('request')
+        if req and getattr(req.user, 'is_authenticated', False):
+            eid = getattr(req, 'tenant_id', None) or (
+                req.user.get_entreprise_id(req) if hasattr(req.user, 'get_entreprise_id') else None
+            )
+            if eid:
+                self.fields['devise_id'].queryset = Devise.objects.filter(entreprise_id=eid)
+                self.fields['type_caisse_id'].queryset = TypeCaisse.objects.filter(
+                    entreprise_id=eid, is_active=True,
+                )
+
+    def validate(self, attrs):
+        montant = attrs['montant']
+        if montant <= 0:
+            raise serializers.ValidationError({'montant': _('Le montant doit être positif.')})
+        tc = attrs['type_caisse']
+        if not tc.is_active:
+            raise serializers.ValidationError({'type_caisse_id': _('Caisse inactive.')})
+        if not tc.devise_id:
+            raise serializers.ValidationError({'type_caisse_id': _('La caisse n\'a pas de devise configurée.')})
+        return attrs
+
+    def build_preview(self) -> dict:
+        attrs = self.validated_data
+        req = self.context.get('request')
+        tenant_id = getattr(req, 'tenant_id', None) if req else None
+        if not tenant_id and req and getattr(req.user, 'is_authenticated', False):
+            tenant_id = req.user.get_entreprise_id(req)
+        try:
+            conversion = prepare_caisse_movement(
+                montant_operation=attrs['montant'],
+                devise_operation=attrs['devise'],
+                type_caisse=attrs['type_caisse'],
+                entreprise_id=tenant_id,
+                date_operation=attrs.get('date_operation'),
+                explicit_conversion_rate=attrs.get('taux_change'),
+            )
+        except CaisseError as exc:
+            raise serializers.ValidationError({'detail': str(exc)}) from exc
+        payload = conversion.to_dict()
+        payload['type_caisse'] = {
+            'id': attrs['type_caisse'].pk,
+            'nom': attrs['type_caisse'].nom,
+            'libelle': attrs['type_caisse'].libelle_affiche,
+        }
+        return payload
+
+
+class PaiementDettePreviewSerializer(serializers.Serializer):
+    """Prévisualisation paiement dette avec conversion éventuelle."""
+
+    dette_id = serializers.PrimaryKeyRelatedField(queryset=DetteClient.objects.all(), source='dette')
+    montant_paye = serializers.DecimalField(max_digits=12, decimal_places=5)
+    devise_id = serializers.PrimaryKeyRelatedField(
+        queryset=Devise.objects.all(), source='devise', required=False, allow_null=True,
+    )
+    type_caisse_id = serializers.PrimaryKeyRelatedField(
+        queryset=TypeCaisse.objects.filter(is_active=True),
+        source='type_caisse',
+    )
+    taux_change = serializers.DecimalField(max_digits=20, decimal_places=8, required=False, allow_null=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        req = self.context.get('request')
+        if req and getattr(req.user, 'is_authenticated', False):
+            eid = getattr(req, 'tenant_id', None) or (
+                req.user.get_entreprise_id(req) if hasattr(req.user, 'get_entreprise_id') else None
+            )
+            if eid:
+                self.fields['type_caisse_id'].queryset = TypeCaisse.objects.filter(
+                    entreprise_id=eid, is_active=True,
+                )
+                self.fields['devise_id'].queryset = Devise.objects.filter(entreprise_id=eid)
+
+    def validate(self, attrs):
+        dette = attrs['dette']
+        montant = attrs['montant_paye']
+        devise_paiement = attrs.get('devise') or dette.devise
+        dette_devise = dette.devise
+        if montant <= 0:
+            raise serializers.ValidationError({'montant_paye': _('Le montant doit être positif.')})
+        if not devise_paiement or not dette_devise:
+            raise serializers.ValidationError({'devise_id': _('Devise requise.')})
+
+        req = self.context.get('request')
+        tenant_id = getattr(req, 'tenant_id', None) if req else None
+        if not tenant_id and req and getattr(req.user, 'is_authenticated', False):
+            tenant_id = req.user.get_entreprise_id(req)
+
+        if devise_paiement.pk == dette_devise.pk:
+            equivalent_dette = montant
+            taux_paiement_dette = None
+        else:
+            try:
+                equivalent_dette, taux_paiement_dette = payment_equivalent_in_dette_currency(
+                    montant,
+                    devise_paiement,
+                    dette_devise,
+                    entreprise_id=tenant_id,
+                    explicit_rate=attrs.get('taux_change'),
+                )
+            except Exception as exc:
+                raise serializers.ValidationError({'devise_id': str(exc)}) from exc
+
+        attrs['devise_paiement'] = devise_paiement
+        attrs['equivalent_dette'] = equivalent_dette
+        attrs['taux_paiement_dette'] = taux_paiement_dette
+        attrs['tenant_id'] = tenant_id
+        return attrs
+
+    def build_preview(self) -> dict:
+        attrs = self.validated_data
+        dette = attrs['dette']
+        montant = attrs['montant_paye']
+        devise_paiement = attrs['devise_paiement']
+        equivalent_dette = attrs['equivalent_dette']
+        ancien_solde = dette.solde_restant
+        nouveau_solde = max(Decimal('0'), ancien_solde - equivalent_dette)
+        excedent = max(Decimal('0'), equivalent_dette - ancien_solde)
+
+        try:
+            caisse_preview = prepare_caisse_movement(
+                montant_operation=montant,
+                devise_operation=devise_paiement,
+                type_caisse=attrs['type_caisse'],
+                entreprise_id=attrs['tenant_id'],
+                explicit_conversion_rate=attrs.get('taux_change'),
+            )
+        except CaisseError as exc:
+            raise serializers.ValidationError({'detail': str(exc)}) from exc
+
+        return {
+            'dette': {
+                'id': dette.pk,
+                'devise': {'id': dette.devise_id, 'sigle': dette.devise.sigle},
+                'solde_avant': str(ancien_solde),
+                'equivalent_regle': str(equivalent_dette),
+                'solde_apres': str(nouveau_solde),
+                'excedent': str(excedent),
+            },
+            'paiement': {
+                'montant_paye': str(montant),
+                'devise': {'id': devise_paiement.pk, 'sigle': devise_paiement.sigle},
+                'taux_paiement_vers_dette': (
+                    str(attrs['taux_paiement_dette']) if attrs.get('taux_paiement_dette') is not None else None
+                ),
+            },
+            'caisse': caisse_preview.to_dict(),
+            'type_caisse': {
+                'id': attrs['type_caisse'].pk,
+                'nom': attrs['type_caisse'].nom,
+                'libelle': attrs['type_caisse'].libelle_affiche,
+            },
+            'conversion_appliquee': (
+                devise_paiement.pk != dette.devise_id
+                or caisse_preview.conversion_appliquee
+            ),
+        }

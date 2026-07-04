@@ -157,3 +157,155 @@ class PaiementDetteGroupedApiTests(APITestCase):
         self.assertEqual(Decimal(applied[0]['montant_applique']), Decimal('6.09000'))
         self.assertEqual(applied[1]['dette_id'], dette_2.pk)
         self.assertEqual(Decimal(applied[1]['montant_applique']), Decimal('1.91000'))
+
+
+@override_settings(ALLOWED_HOSTS=['testserver', 'localhost', '127.0.0.1'])
+class MultiDeviseConversionTests(APITestCase):
+    """Conversion inter-devises : vente, mouvement caisse, paiement dette."""
+
+    def setUp(self):
+        from stock.models import TauxChange
+
+        self.TauxChange = TauxChange
+        self.entreprise = Entreprise.objects.create(
+            nom='E-FX',
+            secteur='s',
+            pays='CD',
+            adresse='a',
+            telephone='t',
+            email='fx@example.com',
+            nif='n-fx',
+            responsable='resp',
+        )
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='admin_fx',
+            email='fx@example.com',
+            password='secretpass123',
+        )
+        Membership.objects.create(
+            user=self.user,
+            entreprise=self.entreprise,
+            role='admin',
+            is_active=True,
+        )
+        self.client.force_authenticate(user=self.user)
+
+        self.usd = Devise.objects.create(
+            sigle='USD', nom='Dollar', symbole='$', est_principal=True, entreprise=self.entreprise,
+        )
+        self.cdf = Devise.objects.create(
+            sigle='CDF', nom='Franc congolais', symbole='FC', est_principal=False, entreprise=self.entreprise,
+        )
+        self.caisse_usd = TypeCaisse.objects.create(
+            nom='Caisse USD', libelle='Caisse USD', code_type='CASH',
+            entreprise=self.entreprise, devise=self.usd, is_active=True, est_defaut=True,
+        )
+        self.caisse_cdf = TypeCaisse.objects.create(
+            nom='Caisse CDF', libelle='Caisse CDF', code_type='CASH',
+            entreprise=self.entreprise, devise=self.cdf, is_active=True, est_defaut=False,
+        )
+        self.TauxChange.objects.create(
+            entreprise=self.entreprise,
+            devise_source=self.usd,
+            devise_cible=self.cdf,
+            taux=Decimal('2300'),
+            is_active=True,
+        )
+
+    def test_preview_conversion_cdf_to_usd_caisse(self):
+        response = self.client.post(
+            '/api/mouvements-caisse/preview-conversion/',
+            {
+                'montant': '230000',
+                'devise_id': self.cdf.pk,
+                'type_caisse_id': self.caisse_usd.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertTrue(data['conversion_appliquee'])
+        self.assertEqual(data['montant_caisse'], '100.00000')
+        self.assertEqual(data['devise_caisse']['sigle'], 'USD')
+        self.assertEqual(data['devise_operation']['sigle'], 'CDF')
+
+    def test_creer_mouvement_entree_cdf_dans_caisse_usd(self):
+        from caisse.services.caisse import creer_mouvement_caisse
+
+        mv = creer_mouvement_caisse(
+            montant='230000',
+            devise=self.cdf,
+            type_mouvement='ENTREE',
+            entreprise_id=self.entreprise.pk,
+            succursale_id=None,
+            motif='Test conversion',
+            type_caisse=self.caisse_usd,
+            skip_session_check=True,
+        )
+        self.assertEqual(mv.montant, Decimal('100.00000'))
+        self.assertEqual(mv.devise_id, self.usd.pk)
+        self.assertEqual(mv.montant_origine, Decimal('230000.00000'))
+        self.assertEqual(mv.devise_origine_id, self.cdf.pk)
+        self.assertIsNotNone(mv.taux_conversion)
+
+    def test_paiement_dette_cdf_pour_dette_usd(self):
+        client_fiche = Client.objects.create(id='CLI-FX-2', nom='Client FX')
+        sortie = Sortie.objects.create(
+            client=client_fiche, devise=self.usd, statut='EN_CREDIT', entreprise=self.entreprise,
+        )
+        dette = DetteClient.objects.create(
+            client=client_fiche,
+            sortie=sortie,
+            montant_total=Decimal('1000.00000'),
+            devise=self.usd,
+            devise_reference=self.usd,
+            montant_reference=Decimal('1000.00000'),
+            entreprise=self.entreprise,
+            statut='EN_COURS',
+        )
+
+        preview = self.client.post(
+            '/api/paiements-dettes/preview/',
+            {
+                'dette_id': dette.pk,
+                'montant_paye': '2300000',
+                'devise_id': self.cdf.pk,
+                'type_caisse_id': self.caisse_cdf.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(preview.status_code, 200, preview.content)
+        preview_data = preview.json()
+        self.assertEqual(preview_data['dette']['equivalent_regle'], '1000.00000')
+        self.assertEqual(preview_data['dette']['solde_apres'], '0.00000')
+
+        response = self.client.post(
+            '/api/paiements-dettes/',
+            {
+                'dette_id': dette.pk,
+                'montant_paye': '2300000',
+                'devise_id': self.cdf.pk,
+                'type_caisse_id': self.caisse_cdf.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        dette.refresh_from_db()
+        self.assertEqual(dette.solde_restant, Decimal('0.00000'))
+        self.assertEqual(dette.statut, 'PAYEE')
+
+    def test_preview_conversion_refuse_sans_taux(self):
+        eur = Devise.objects.create(
+            sigle='EUR', nom='Euro', symbole='€', est_principal=False, entreprise=self.entreprise,
+        )
+        response = self.client.post(
+            '/api/mouvements-caisse/preview-conversion/',
+            {
+                'montant': '100',
+                'devise_id': eur.pk,
+                'type_caisse_id': self.caisse_usd.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400, response.content)

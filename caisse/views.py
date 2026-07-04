@@ -20,12 +20,16 @@ from rest_framework.response import Response
 
 from caisse.models import MouvementCaisse, TypeCaisse
 from caisse.serializers import (
+    ConversionPreviewSerializer,
     MouvementCaisseSerializer,
     PaiementDetteGroupedWriteSerializer,
+    PaiementDettePreviewSerializer,
     PaiementDetteReadSerializer,
     PaiementDetteWriteSerializer,
     TypeCaisseSerializer,
 )
+from caisse.services.caisse_defaut import CaisseError
+from caisse.services.currency_conversion import prepare_caisse_movement
 from caisse.paiement_dette_recu_mixin import PaiementDetteRecuMixin
 from caisse.services.caisse import mouvement_moyen_affiche
 from caisse.services.caisse_defaut import caisse_necessite_session
@@ -122,27 +126,40 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         type_mouvement = serializer.validated_data.get('type')
         montant = serializer.validated_data.get('montant', 0)
         type_caisse = serializer.validated_data.get('type_caisse')
+        devise_operation = serializer.validated_data.get('devise')
         if (
             type_mouvement == 'SORTIE'
             and montant > 0
-            and devise
+            and devise_operation
             and type_caisse
             and caisse_necessite_session(type_caisse)
         ):
             try:
+                conversion = prepare_caisse_movement(
+                    montant_operation=montant,
+                    devise_operation=devise_operation,
+                    type_caisse=type_caisse,
+                    entreprise_id=tenant_id,
+                )
+                montant_caisse = conversion.montant_caisse
+                devise_caisse = conversion.devise_caisse
+            except CaisseError as exc:
+                raise serializers.ValidationError({'detail': validation_error_message(exc)})
+
+            try:
                 session = require_session_caisse_ouverte(
-                    tenant_id, branch_id, devise.pk, type_caisse.pk,
+                    tenant_id, branch_id, devise_caisse.pk, type_caisse.pk,
                 )
                 solde_disponible = solde_session_courant(session)
             except SessionCaisseError as exc:
                 raise serializers.ValidationError({'detail': validation_error_message(exc)})
 
-            if montant > solde_disponible:
-                devise_nom = devise.nom if devise else "devise inconnue"
+            if montant_caisse > solde_disponible:
+                devise_nom = devise_caisse.nom if devise_caisse else "devise inconnue"
                 raise serializers.ValidationError({
                     'montant': (
                         f"Solde insuffisant en {devise_nom} pour la session cash ouverte. "
-                        f"Solde disponible: {solde_disponible}, Montant demandÃ©: {montant}."
+                        f"Solde disponible: {solde_disponible}, Montant demandé: {montant_caisse}."
                     )
                 })
 
@@ -155,6 +172,16 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         raise serializers.ValidationError(
             {'detail': _('La suppression des mouvements financiers historiques est interdite.')}
         )
+
+    @action(detail=False, methods=['post'], url_path='preview-conversion')
+    def preview_conversion(self, request):
+        """
+        Prévisualise la conversion opération → devise caisse.
+        POST /api/mouvements-caisse/preview-conversion/
+        """
+        serializer = ConversionPreviewSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        return Response(serializer.build_preview())
 
     @action(detail=False, methods=['get'])
     def resume(self, request):
@@ -899,6 +926,16 @@ class PaiementDetteViewSet(PaiementDetteRecuMixin, TenantFilterMixin, BusinessPe
         data = PaiementDetteReadSerializer(mc, context={'request': request}).data
         data['recu'] = recu_paiement_urls(request, mc.pk)
         return Response(data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], url_path='preview')
+    def preview(self, request):
+        """
+        Prévisualise un paiement de dette (conversion paiement/dette/caisse).
+        POST /api/paiements-dettes/preview/
+        """
+        serializer = PaiementDettePreviewSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        return Response(serializer.build_preview())
 
     @action(detail=False, methods=['post'], url_path='grouped')
     def grouped(self, request):

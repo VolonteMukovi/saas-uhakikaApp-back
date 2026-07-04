@@ -14,9 +14,10 @@ from django.db import transaction
 
 from caisse.models import MouvementCaisse, TypeCaisse
 from caisse.services.caisse_defaut import CaisseError, valider_caisse_pour_operation
+from caisse.services.currency_conversion import prepare_caisse_movement
+from stock.services.currency import build_conversion_snapshot, quantize_amount
 from caisse.services.session_caisse import SessionCaisseError, get_session_ouverte_for_caisse
 from stock.models import DetteClient
-from stock.services.currency import assert_caisse_devise_compatible, build_conversion_snapshot
 
 
 def _merge_details_into_motif(details: List[dict], entreprise_id: int, motif_base: str) -> str:
@@ -43,11 +44,13 @@ def _merge_details_into_motif(details: List[dict], entreprise_id: int, motif_bas
 def _resolve_type_caisse(
     type_caisse: Optional[TypeCaisse],
     type_caisse_id: Optional[int],
+    entreprise_id: int,
 ) -> tuple[Optional[TypeCaisse], Optional[int]]:
     if type_caisse is not None:
         return type_caisse, type_caisse.pk
     if type_caisse_id:
-        return None, int(type_caisse_id)
+        tc = TypeCaisse.objects.filter(pk=type_caisse_id, entreprise_id=entreprise_id).select_related('devise').first()
+        return tc, type_caisse_id
     return None, None
 
 
@@ -76,12 +79,16 @@ def creer_mouvement_caisse(
     taux_change=None,
     montant_reference=None,
     date_operation=None,
+    taux_conversion_explicite: Optional[Decimal] = None,
+    montant_applique: Optional[Decimal] = None,
+    devise_applique=None,
 ) -> MouvementCaisse:
     """
-    Crée un ``MouvementCaisse`` unique (pas de lignes ``DetailMouvementCaisse``).
+    Crée un ``MouvementCaisse`` unique.
 
-    - ``type_caisse`` ou ``type_caisse_id`` obligatoire sauf ``skip_session_check`` ou montant nul.
-    - Vérifie caisse active ; session ouverte uniquement pour la caisse cash par défaut.
+    ``montant`` + ``devise`` = montant dans la **devise de l'opération**.
+    Si la caisse utilise une autre devise, conversion automatique avant enregistrement.
+    Le mouvement stocké utilise la devise de la caisse ; l'origine est conservée si conversion.
     """
     details = details or []
     lines_total = sum(Decimal(str(d.get("montant", 0) or 0)) for d in details)
@@ -104,7 +111,8 @@ def creer_mouvement_caisse(
     if details:
         montant = Decimal(str(montant)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
-    montant_zero = montant == 0
+    montant_operation = montant
+    montant_zero = montant_operation == 0
 
     ct = None
     oid = None
@@ -118,25 +126,28 @@ def creer_mouvement_caisse(
     if details:
         motif = _merge_details_into_motif(details, entreprise_id, motif)
 
-    if not motif:
-        if sortie:
-            motif = f"Vente sortie #{sortie.pk} — {montant}"
-        elif entree:
-            motif = f"Approvisionnement entrée #{entree.pk} — {montant}"
-        elif content_object is not None and isinstance(content_object, DetteClient):
-            motif = f"Paiement dette #{content_object.pk} — {montant}"
-        else:
-            motif = f"Mouvement — {montant}"
-
-    type_caisse, type_caisse_id = _resolve_type_caisse(type_caisse, type_caisse_id)
+    type_caisse, type_caisse_id = _resolve_type_caisse(type_caisse, type_caisse_id, entreprise_id)
     if type_caisse_id is None and session_caisse is not None and session_caisse.type_caisse_id:
         type_caisse_id = session_caisse.type_caisse_id
         type_caisse = session_caisse.type_caisse
 
-    devise_id = devise.pk if devise else None
+    if not devise:
+        raise CaisseError("Devise requise pour un mouvement de caisse.")
 
-    if type_caisse is not None and devise is not None:
-        assert_caisse_devise_compatible(type_caisse, devise)
+    conversion = None
+    if type_caisse is not None and not montant_zero:
+        conversion = prepare_caisse_movement(
+            montant_operation=montant_operation,
+            devise_operation=devise,
+            type_caisse=type_caisse,
+            entreprise_id=entreprise_id,
+            date_operation=date_operation,
+            explicit_conversion_rate=taux_conversion_explicite,
+        )
+        montant = conversion.montant_caisse
+        devise = conversion.devise_caisse
+
+    devise_id = devise.pk if devise else None
 
     if not skip_session_check and not montant_zero:
         if not devise_id:
@@ -161,6 +172,16 @@ def creer_mouvement_caisse(
     elif not montant_zero and type_caisse is None and type_caisse_id:
         type_caisse = TypeCaisse.objects.filter(pk=type_caisse_id, entreprise_id=entreprise_id).first()
 
+    if not motif:
+        if sortie:
+            motif = f"Vente sortie #{sortie.pk} — {montant}"
+        elif entree:
+            motif = f"Approvisionnement entrée #{entree.pk} — {montant}"
+        elif content_object is not None and isinstance(content_object, DetteClient):
+            motif = f"Paiement dette #{content_object.pk} — {montant}"
+        else:
+            motif = f"Mouvement — {montant}"
+
     if sortie and categorie == "AUTRE":
         categorie = "VENTE"
     elif entree and categorie == "AUTRE":
@@ -172,7 +193,11 @@ def creer_mouvement_caisse(
     elif type_mouvement == "SORTIE" and categorie == "AUTRE":
         categorie = "SORTIE_MANUELLE"
 
-    if devise is not None and (devise_reference is None or montant_reference is None):
+    if conversion is not None:
+        devise_reference = conversion.devise_reference
+        taux_change = conversion.taux_reference
+        montant_reference = conversion.montant_reference
+    elif devise is not None and (devise_reference is None or montant_reference is None):
         snapshot = build_conversion_snapshot(
             entreprise_id=entreprise_id,
             amount=montant,
@@ -191,6 +216,12 @@ def creer_mouvement_caisse(
         devise_reference=devise_reference,
         taux_change=taux_change,
         montant_reference=montant_reference if montant_reference is not None else Decimal('0'),
+        montant_origine=conversion.montant_origine if conversion else None,
+        devise_origine=conversion.devise_origine if conversion else None,
+        taux_conversion=conversion.taux_conversion if conversion else None,
+        date_taux=conversion.date_taux if conversion else None,
+        montant_applique=quantize_amount(montant_applique) if montant_applique is not None else None,
+        devise_applique=devise_applique,
         type=type_mouvement,
         motif=motif,
         moyen=moyen,

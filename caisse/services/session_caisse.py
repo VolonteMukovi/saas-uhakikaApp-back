@@ -125,8 +125,9 @@ def get_session_ouverte_for_caisse(
     if not type_caisse.is_active:
         raise SessionCaisseError(str(MSG_CAISSE_INACTIVE))
 
-    if type_caisse.devise_id and devise_id and type_caisse.devise_id != devise_id:
-        raise SessionCaisseError(str(MSG_CAISSE_DEVISE))
+    caisse_devise_id = type_caisse.devise_id
+    if not caisse_devise_id:
+        return None
 
     branch = succursale_id
     if branch is not None and type_caisse.succursale_id not in (None, branch):
@@ -141,7 +142,7 @@ def get_session_ouverte_for_caisse(
     return require_session_caisse_ouverte(
         type_caisse.entreprise_id,
         branch,
-        devise_id,
+        caisse_devise_id,
         type_caisse.pk,
     )
 

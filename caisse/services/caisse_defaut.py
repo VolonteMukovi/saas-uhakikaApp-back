@@ -181,7 +181,4 @@ def valider_caisse_pour_operation(
     if succursale_id is not None and type_caisse.succursale_id not in (None, succursale_id):
         raise CaisseError(str(MSG_CAISSE_INTRouvable))
 
-    if devise_id and type_caisse.devise_id and type_caisse.devise_id != devise_id:
-        raise CaisseError(str(MSG_CAISSE_DEVISE))
-
     return type_caisse

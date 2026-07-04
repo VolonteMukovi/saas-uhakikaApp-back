@@ -374,7 +374,15 @@ class DetteClientQuerySet(models.QuerySet):
                 type='ENTREE',
             )
             .values('object_id')
-            .annotate(total=Sum('montant'))
+            .annotate(
+                total=Sum(
+                    Coalesce(
+                        F('montant_applique'),
+                        F('montant'),
+                        output_field=DecimalField(max_digits=14, decimal_places=5),
+                    )
+                )
+            )
             .values('total')[:1]
         )
         return self.annotate(
@@ -447,8 +455,13 @@ class DetteClient(models.Model):
 
     @property
     def montant_paye(self) -> Decimal:
-        agg = self._paiements_mouvements_qs().aggregate(t=Sum('montant'))['t']
-        return agg or Decimal('0.00')
+        total = Decimal('0.00')
+        for mv in self._paiements_mouvements_qs():
+            if mv.montant_applique is not None:
+                total += mv.montant_applique
+            else:
+                total += mv.montant or Decimal('0.00')
+        return total
 
     @property
     def solde_restant(self) -> Decimal:
