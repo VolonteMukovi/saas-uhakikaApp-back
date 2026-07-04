@@ -797,3 +797,325 @@ class TauxChangeApiTests(APITestCase):
         self.assertIsNotNone(dette.taux_change)
         self.assertGreater(dette.montant_reference, 0)
 
+
+@override_settings(ALLOWED_HOSTS=['testserver', 'localhost', '127.0.0.1'])
+class EntreeSortieUpdateTests(APITestCase):
+    """Tests modification approvisionnements et ventes."""
+
+    def setUp(self):
+        self.entreprise = Entreprise.objects.create(
+            nom='E-Update',
+            secteur='s',
+            pays='FR',
+            adresse='a',
+            telephone='t',
+            email='update@example.com',
+            nif='n-upd',
+            responsable='resp',
+        )
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='admin_update',
+            email='update@example.com',
+            password='secretpass123',
+        )
+        Membership.objects.create(
+            user=self.user,
+            entreprise=self.entreprise,
+            role='admin',
+            is_active=True,
+        )
+        self.client.force_authenticate(user=self.user)
+
+        self.devise = Devise.objects.create(
+            sigle='USD',
+            nom='Dollar',
+            symbole='$',
+            est_principal=True,
+            entreprise=self.entreprise,
+        )
+        self.type_caisse = TypeCaisse.objects.create(
+            nom='Banque USD',
+            libelle='Banque USD',
+            code_type='BANQUE',
+            entreprise=self.entreprise,
+            devise=self.devise,
+            is_active=True,
+            est_defaut=False,
+        )
+        self.unite = Unite.objects.create(libelle='pc', entreprise=self.entreprise)
+        self.type_article = TypeArticle.objects.create(libelle='Divers', entreprise=self.entreprise)
+        self.sous_type = SousTypeArticle.objects.create(
+            type_article=self.type_article,
+            libelle='General',
+            entreprise=self.entreprise,
+        )
+        self.article = Article.objects.create(
+            nom_scientifique='produit update',
+            nom_commercial='produit update',
+            sous_type_article=self.sous_type,
+            unite=self.unite,
+            emplacement='A1',
+            entreprise=self.entreprise,
+        )
+        self.article2 = Article.objects.create(
+            nom_scientifique='produit update 2',
+            nom_commercial='produit update 2',
+            sous_type_article=self.sous_type,
+            unite=self.unite,
+            emplacement='A2',
+            entreprise=self.entreprise,
+        )
+        self.client_fiche = Client.objects.create(id='CLI-UPD', nom='Client Update')
+        ClientEntreprise.objects.create(client=self.client_fiche, entreprise=self.entreprise)
+
+    def _create_entree_with_stock(self, quantite='10'):
+        entree = Entree.objects.create(libele='Appro test', entreprise=self.entreprise)
+        ligne = LigneEntree.objects.create(
+            article=self.article,
+            entree=entree,
+            quantite=Decimal(quantite),
+            quantite_restante=Decimal(quantite),
+            prix_unitaire=Decimal('2'),
+            prix_vente=Decimal('10'),
+            devise=self.devise,
+            seuil_alerte=Decimal('0'),
+        )
+        Stock.objects.update_or_create(
+            article=self.article,
+            defaults={'Qte': Decimal(quantite), 'seuilAlert': Decimal('0')},
+        )
+        return entree, ligne
+
+    def test_entree_increase_quantity_updates_stock(self):
+        entree, ligne = self._create_entree_with_stock('10')
+        response = self.client.patch(
+            f'/api/entrees/{entree.pk}/',
+            {
+                'libele': 'Appro test',
+                'lignes': [{
+                    'id': ligne.pk,
+                    'article_id': self.article.pk,
+                    'quantite': '15',
+                    'prix_unitaire': '2',
+                    'prix_vente': '10',
+                    'devise_id': self.devise.pk,
+                    'seuil_alerte': '0',
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        ligne.refresh_from_db()
+        self.assertEqual(ligne.quantite, Decimal('15'))
+        self.assertEqual(ligne.quantite_restante, Decimal('15'))
+        stock = Stock.objects.get(article=self.article)
+        self.assertEqual(stock.Qte, Decimal('15'))
+
+    def test_entree_decrease_quantity_updates_stock(self):
+        entree, ligne = self._create_entree_with_stock('10')
+        response = self.client.patch(
+            f'/api/entrees/{entree.pk}/',
+            {
+                'libele': 'Appro test',
+                'lignes': [{
+                    'id': ligne.pk,
+                    'article_id': self.article.pk,
+                    'quantite': '6',
+                    'prix_unitaire': '2',
+                    'prix_vente': '10',
+                    'devise_id': self.devise.pk,
+                    'seuil_alerte': '0',
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        ligne.refresh_from_db()
+        self.assertEqual(ligne.quantite, Decimal('6'))
+        stock = Stock.objects.get(article=self.article)
+        self.assertEqual(stock.Qte, Decimal('6'))
+
+    def test_entree_refuse_decrease_when_partially_sold(self):
+        entree, ligne = self._create_entree_with_stock('10')
+        ligne.quantite_restante = Decimal('2')
+        ligne.save(update_fields=['quantite_restante'])
+        response = self.client.patch(
+            f'/api/entrees/{entree.pk}/',
+            {
+                'libele': 'Appro test',
+                'lignes': [{
+                    'id': ligne.pk,
+                    'article_id': self.article.pk,
+                    'quantite': '5',
+                    'prix_unitaire': '2',
+                    'prix_vente': '10',
+                    'devise_id': self.devise.pk,
+                    'seuil_alerte': '0',
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        ligne.refresh_from_db()
+        self.assertEqual(ligne.quantite, Decimal('10'))
+
+    def test_entree_update_does_not_touch_caisse(self):
+        entree, ligne = self._create_entree_with_stock('5')
+        count_before = MouvementCaisse.objects.count()
+        response = self.client.patch(
+            f'/api/entrees/{entree.pk}/',
+            {
+                'libele': 'Appro modifie',
+                'lignes': [{
+                    'id': ligne.pk,
+                    'article_id': self.article.pk,
+                    'quantite': '8',
+                    'prix_unitaire': '2',
+                    'prix_vente': '10',
+                    'devise_id': self.devise.pk,
+                    'seuil_alerte': '0',
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(MouvementCaisse.objects.count(), count_before)
+
+    def _create_credit_sortie(self, quantite='3', prix='10'):
+        payload = {
+            'statut': 'EN_CREDIT',
+            'client_id': self.client_fiche.pk,
+            'lignes': [{
+                'article_id': self.article.pk,
+                'quantite': quantite,
+                'prix_unitaire': prix,
+                'devise_id': self.devise.pk,
+            }],
+        }
+        response = self.client.post('/api/sorties/', payload, format='json')
+        self.assertEqual(response.status_code, 201, response.content)
+        return Sortie.objects.get(pk=response.json()['id'])
+
+    def test_credit_sortie_update_adjusts_dette(self):
+        self._create_entree_with_stock('100')
+        sortie = self._create_credit_sortie('3', '10')
+        dette = DetteClient.objects.get(sortie=sortie)
+        self.assertEqual(dette.montant_total, Decimal('30.00000'))
+
+        response = self.client.patch(
+            f'/api/sorties/{sortie.pk}/',
+            {
+                'statut': 'EN_CREDIT',
+                'client_id': self.client_fiche.pk,
+                'lignes': [{
+                    'article_id': self.article.pk,
+                    'quantite': '2',
+                    'prix_unitaire': '10',
+                    'devise_id': self.devise.pk,
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        dette.refresh_from_db()
+        self.assertEqual(dette.montant_total, Decimal('20.00000'))
+
+    def test_credit_sortie_refuse_total_below_paid(self):
+        self._create_entree_with_stock('100')
+        sortie = self._create_credit_sortie('10', '10')
+        dette = DetteClient.objects.get(sortie=sortie)
+        ct_dette = ContentType.objects.get_for_model(DetteClient)
+        MouvementCaisse.objects.create(
+            montant=Decimal('70.00000'),
+            devise=self.devise,
+            type='ENTREE',
+            motif='Paiement partiel',
+            content_type=ct_dette,
+            object_id=dette.pk,
+            utilisateur=self.user,
+            reference_piece='PAY-UPD-1',
+            entreprise=self.entreprise,
+            type_caisse=self.type_caisse,
+            categorie='PAIEMENT_DETTE',
+        )
+        response = self.client.patch(
+            f'/api/sorties/{sortie.pk}/',
+            {
+                'statut': 'EN_CREDIT',
+                'client_id': self.client_fiche.pk,
+                'lignes': [{
+                    'article_id': self.article.pk,
+                    'quantite': '5',
+                    'prix_unitaire': '10',
+                    'devise_id': self.devise.pk,
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        dette.refresh_from_db()
+        self.assertEqual(dette.montant_total, Decimal('100.00000'))
+
+    def test_sortie_refuse_insufficient_stock(self):
+        self._create_entree_with_stock('5')
+        sortie = self._create_credit_sortie('2', '10')
+        response = self.client.patch(
+            f'/api/sorties/{sortie.pk}/',
+            {
+                'statut': 'EN_CREDIT',
+                'client_id': self.client_fiche.pk,
+                'lignes': [{
+                    'article_id': self.article.pk,
+                    'quantite': '20',
+                    'prix_unitaire': '10',
+                    'devise_id': self.devise.pk,
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+
+    def test_cash_sortie_update_adjusts_single_movement(self):
+        self._create_entree_with_stock('100')
+        create_resp = self.client.post(
+            '/api/sorties/',
+            {
+                'statut': 'PAYEE',
+                'lignes': [{
+                    'article_id': self.article.pk,
+                    'quantite': '2',
+                    'prix_unitaire': '50',
+                    'devise_id': self.devise.pk,
+                }],
+                'type_caisse_id': self.type_caisse.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(create_resp.status_code, 201, create_resp.content)
+        sortie = Sortie.objects.get(pk=create_resp.json()['id'])
+        ref = f'VENT-{sortie.pk}-USD'
+        self.assertEqual(MouvementCaisse.objects.filter(sortie=sortie, reference_piece=ref).count(), 1)
+        mv = MouvementCaisse.objects.get(sortie=sortie, reference_piece=ref)
+        self.assertEqual(mv.montant, Decimal('100.00000'))
+
+        update_resp = self.client.patch(
+            f'/api/sorties/{sortie.pk}/',
+            {
+                'statut': 'PAYEE',
+                'lignes': [{
+                    'article_id': self.article.pk,
+                    'quantite': '1',
+                    'prix_unitaire': '50',
+                    'devise_id': self.devise.pk,
+                }],
+                'type_caisse_id': self.type_caisse.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(update_resp.status_code, 200, update_resp.content)
+        self.assertEqual(MouvementCaisse.objects.filter(sortie=sortie, reference_piece=ref).count(), 1)
+        mv.refresh_from_db()
+        self.assertEqual(mv.montant, Decimal('50.00000'))
+        self.assertFalse(MouvementCaisse.objects.filter(reference_piece__startswith='AJ-VENT-').exists())
+

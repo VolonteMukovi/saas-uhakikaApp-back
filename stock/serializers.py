@@ -930,59 +930,27 @@ class EntreeSerializer(serializers.ModelSerializer):
             return entree
 
     def update(self, instance, validated_data):
-        with transaction.atomic():
-            lignes_data = validated_data.pop('lignes', [])
+        from stock.services.entree_update_service import update_entree_from_payload
 
-            instance.libele = validated_data.get('libele', instance.libele)
-            instance.description = validated_data.get('description', instance.description)
-            instance.save()
-
-            for old_ligne in instance.lignes.all():
-                stock_obj, _ = Stock.objects.get_or_create(
-                    article=old_ligne.article,
-                    defaults={'Qte': 0, 'seuilAlert': old_ligne.seuil_alerte},
-                )
-                stock_obj.Qte -= old_ligne.quantite
-                stock_obj.save(update_fields=['Qte'])
-
-            instance.lignes.all().delete()
-
-            devise_principale = get_principal_devise(getattr(instance, 'entreprise_id', None))
-
-            for ligne in lignes_data:
-                article_obj = ligne['article']
-                quantite = ligne['quantite']
-                devise_obj = ligne.get('devise') or devise_principale
-                montant_ligne = (Decimal(str(ligne.get('prix_unitaire') or 0)) * Decimal(str(quantite))).quantize(Decimal('0.00001'))
-                snapshot_ligne = build_conversion_snapshot(
-                    entreprise_id=getattr(instance, 'entreprise_id', None),
-                    amount=montant_ligne,
-                    devise_source=devise_obj,
-                    devise_reference=devise_principale,
-                )
-                LigneEntree.objects.create(
-                    entree=instance,
-                    article=article_obj,
-                    quantite=quantite,
-                    quantite_restante=quantite,
-                    prix_unitaire=ligne.get('prix_unitaire'),
-                    prix_vente=ligne.get('prix_vente'),
-                    date_expiration=ligne.get('date_expiration'),
-                    devise=devise_obj,
-                    devise_reference=snapshot_ligne['devise_reference'],
-                    taux_change=snapshot_ligne['taux_change'],
-                    montant_reference=snapshot_ligne['montant_reference'],
-                    seuil_alerte=ligne.get('seuil_alerte', 0)
-                )
-                stock_obj, _ = Stock.objects.get_or_create(
-                    article=article_obj,
-                    defaults={'Qte': 0, 'seuilAlert': ligne.get('seuil_alerte', 0)},
-                )
-                stock_obj.Qte += quantite
-                stock_obj.seuilAlert = ligne.get('seuil_alerte', 0)
-                stock_obj.save(update_fields=['Qte', 'seuilAlert'])
-
-            return instance
+        lignes_data = validated_data.pop('lignes', None)
+        data = {
+            'libele': validated_data.get('libele', instance.libele),
+            'description': validated_data.get('description', instance.description),
+        }
+        if lignes_data is not None:
+            data['lignes'] = [
+                {
+                    'article_id': ligne['article'].pk,
+                    'quantite': ligne['quantite'],
+                    'prix_unitaire': ligne.get('prix_unitaire'),
+                    'prix_vente': ligne.get('prix_vente'),
+                    'date_expiration': ligne.get('date_expiration'),
+                    'devise_id': ligne['devise'].pk if ligne.get('devise') else None,
+                    'seuil_alerte': ligne.get('seuil_alerte', 0),
+                }
+                for ligne in lignes_data
+            ]
+        return update_entree_from_payload(instance, data)
 
 
 

@@ -1278,268 +1278,29 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         return self._update_common(request, *args, **kwargs, partial=True)
 
     def _update_common(self, request, *args, **kwargs):
-        """Mise Ã  jour d'une sortie avec gestion FIFO complÃ¨te."""
+        """Mise a jour d'une sortie avec gestion FIFO, caisse et dette."""
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
-        user = request.user
-        old_total = self._total_sortie(instance)
-        
-        lignes_data = request.data.get('lignes', [])
-        if not lignes_data:
-            raise serializers.ValidationError("Au moins une ligne de sortie est requise.")
-        
-        default_dev = Devise.objects.filter(est_principal=True).first()
-        
+        lignes_data = request.data.get('lignes')
+
+        if lignes_data is not None and not lignes_data:
+            raise serializers.ValidationError({'lignes': 'Au moins une ligne de sortie est requise.'})
+        if not partial and lignes_data is None:
+            raise serializers.ValidationError({'lignes': 'Au moins une ligne de sortie est requise.'})
+
+        from stock.services.sortie_update_service import update_sortie_from_payload
+
+        type_caisse_id = extract_type_caisse_id(request.data)
         with transaction.atomic():
-            # ========== ROLLBACK : Restaurer les lots et supprimer les traÃ§abilitÃ©s ==========
-            for ancienne_ligne in instance.lignes.all():
-                # Restaurer quantite_restante pour chaque lot utilisÃ©
-                for lot_utilise in ancienne_ligne.lots_utilises.all():
-                    lot = lot_utilise.lot_entree
-                    lot.quantite_restante += lot_utilise.quantite
-                    lot.save()
-                
-                # Supprimer les bÃ©nÃ©fices associÃ©s
-                BeneficeLot.objects.filter(ligne_sortie=ancienne_ligne).delete()
-                
-                # Supprimer les traÃ§abilitÃ©s
-                ancienne_ligne.lots_utilises.all().delete()
-                
-                # Restaurer le stock total (pour compatibilitÃ©)
-                stock_obj, created = Stock.objects.get_or_create(
-                    article=ancienne_ligne.article, 
-                    defaults={'Qte': 0, 'seuilAlert': 0}
-                )
-                stock_obj.Qte += ancienne_ligne.quantite
-                stock_obj.save()
-            
-            # Supprimer toutes les anciennes lignes
-            instance.lignes.all().delete()
-            
-            # Mettre Ã  jour les champs de la sortie
-            if 'motif' in request.data:
-                instance.motif = request.data['motif']
-            if 'client_id' in request.data:
-                client_id = request.data.get('client_id')
-                if client_id:
-                    try:
-                        instance.client = Client.objects.get(pk=client_id)
-                    except Client.DoesNotExist:
-                        raise serializers.ValidationError(f"Client avec ID {client_id} non trouvÃ©.")
-                else:
-                    instance.client = None
-            if 'statut' in request.data:
-                instance.statut = request.data.get('statut')
-            instance.save()
-            
-            # ========== RECRÃ‰ATION : CrÃ©er les nouvelles lignes avec FIFO ==========
-            totaux_par_devise = {}
-            
-            for ligne in lignes_data:
-                article_id = ligne.get('article_id') or ligne.get('article')
-                
-                try:
-                    article_obj = Article.objects.get(article_id=article_id)
-                except Article.DoesNotExist:
-                    raise serializers.ValidationError({
-                        'article': f"Article avec ID {article_id} non trouvÃ©."
-                    })
-                
-                try:
-                    qte = _parse_decimal_quantity(ligne.get('quantite', 0))
-                except (InvalidOperation, TypeError, ValueError):
-                    raise serializers.ValidationError({
-                        'quantite': 'La quantitÃ© doit Ãªtre un nombre dÃ©cimal valide.'
-                    })
-                
-                # Prix rÃ©ellement encaissÃ© (peut Ãªtre fourni manuellement)
-                pu_raw = ligne.get('prix_unitaire')
-                prix_unitaire_encaisse = None
-                if pu_raw is not None:
-                    try:
-                        if isinstance(pu_raw, Decimal):
-                            prix_unitaire_encaisse = pu_raw
-                        else:
-                            prix_unitaire_encaisse = Decimal(str(pu_raw))
-                        if prix_unitaire_encaisse < 0:
-                            raise serializers.ValidationError({
-                                'prix_unitaire': 'Le prix unitaire ne peut pas Ãªtre nÃ©gatif.'
-                            })
-                    except (ValueError, TypeError):
-                        raise serializers.ValidationError({
-                            'prix_unitaire': 'Le prix unitaire doit Ãªtre un nombre valide.'
-                        })
-                
-                # VÃ©rifier le stock disponible (somme des quantite_restante)
-                stock_disponible = LigneEntree.objects.filter(
-                    article=article_obj,
-                    quantite_restante__gt=0
-                ).aggregate(total=models.Sum('quantite_restante'))['total'] or 0
-                
-                if stock_disponible < qte:
-                    raise serializers.ValidationError(
-                        f"Stock insuffisant pour l'article {article_obj.nom_scientifique} "
-                        f"(Disponible: {stock_disponible}, DemandÃ©: {qte})"
-                    )
-                
-                # Gestion de la devise
-                devise_id = ligne.get('devise_id') or ligne.get('devise')
-                if devise_id:
-                    try:
-                        devise_obj = Devise.objects.get(
-                            pk=devise_id, entreprise_id=instance.entreprise_id
-                        )
-                    except Devise.DoesNotExist:
-                        devise_obj = default_dev
-                else:
-                    devise_obj = default_dev
-                
-                # ========== LOGIQUE FIFO ==========
-                lots_disponibles = LigneEntree.objects.filter(
-                    article=article_obj,
-                    quantite_restante__gt=0
-                ).order_by('date_entree', 'id')  # FIFO
-                
-                quantite_restante_a_sortir = qte
-                lots_utilises_data = []
-                prix_vente_moyen_lots = Decimal('0.00')
-                total_prix_vente = Decimal('0.00')
-                
-                # Consommer les lots en FIFO
-                for lot in lots_disponibles:
-                    if quantite_restante_a_sortir <= 0:
-                        break
-                    
-                    quantite_a_prelever = min(lot.quantite_restante, quantite_restante_a_sortir)
-                    
-                    lots_utilises_data.append({
-                        'lot': lot,
-                        'quantite': quantite_a_prelever,
-                        'prix_achat': lot.prix_unitaire,
-                        'prix_vente': lot.prix_vente,  # Prix du lot (pour traÃ§abilitÃ©)
-                    })
-                    
-                    lot.quantite_restante -= quantite_a_prelever
-                    lot.save()
-                    
-                    quantite_restante_a_sortir -= quantite_a_prelever
-                    total_prix_vente += lot.prix_vente * Decimal(str(quantite_a_prelever))
-                
-                # Calculer le prix de vente moyen des lots (pour rÃ©fÃ©rence, si prix_unitaire non fourni)
-                if qte > 0:
-                    prix_vente_moyen_lots = total_prix_vente / Decimal(str(qte))
-                else:
-                    prix_vente_moyen_lots = Decimal('0.00')
-                
-                # Utiliser le prix rÃ©ellement encaissÃ© si fourni, sinon utiliser le prix moyen des lots
-                prix_unitaire_final = prix_unitaire_encaisse if prix_unitaire_encaisse is not None else prix_vente_moyen_lots
-                prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-                
-                # CrÃ©er la ligne de sortie avec le prix rÃ©ellement encaissÃ©
-                montant_ligne = (prix_unitaire_final * Decimal(str(qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-                snapshot_ligne = build_conversion_snapshot(
-                    entreprise_id=instance.entreprise_id,
-                    amount=montant_ligne,
-                    devise_source=devise_obj or default_dev,
-                )
-                ligne_sortie = LigneSortie.objects.create(
-                    sortie=instance,
-                    article=article_obj,
-                    quantite=qte,
-                    prix_unitaire=prix_unitaire_final,
-                    devise=devise_obj,
-                    devise_reference=snapshot_ligne['devise_reference'],
-                    taux_change=snapshot_ligne['taux_change'],
-                    montant_reference=snapshot_ligne['montant_reference'],
-                )
-                
-                # CrÃ©er les traÃ§abilitÃ©s et bÃ©nÃ©fices
-                # IMPORTANT : Le bÃ©nÃ©fice est calculÃ© avec le prix rÃ©ellement encaissÃ©
-                for lot_data in lots_utilises_data:
-                    lot = lot_data['lot']
-                    qte_lot = lot_data['quantite']
-                    prix_achat = lot_data['prix_achat']
-                    prix_vente_lot = lot_data['prix_vente']  # Prix du lot (pour traÃ§abilitÃ©)
-                    
-                    LigneSortieLot.objects.create(
-                        ligne_sortie=ligne_sortie,
-                        lot_entree=lot,
-                        quantite=qte_lot,
-                        prix_achat=prix_achat,
-                        prix_vente=prix_vente_lot  # Prix du lot (pour traÃ§abilitÃ©)
-                    )
-                    
-                    # Calculer le bÃ©nÃ©fice avec le prix rÃ©ellement encaissÃ©
-                    benefice_unitaire = prix_unitaire_final - prix_achat
-                    benefice_total = benefice_unitaire * Decimal(str(qte_lot))
-                    
-                    BeneficeLot.objects.create(
-                        lot_entree=lot,
-                        ligne_sortie=ligne_sortie,
-                        quantite_vendue=qte_lot,
-                        prix_achat=prix_achat,
-                        prix_vente=prix_unitaire_final,  # Prix rÃ©ellement encaissÃ© (pour calcul bÃ©nÃ©fice)
-                        benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
-                        benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-                    )
-                
-                # Calcul du montant pour cette ligne (prix rÃ©ellement encaissÃ©)
-                montant_ligne = prix_unitaire_final * Decimal(str(qte))
-                
-                # Accumulation par devise
-                devise_key = devise_obj.sigle if devise_obj else 'DEFAULT'
-                if devise_key not in totaux_par_devise:
-                    totaux_par_devise[devise_key] = {
-                        'devise_obj': devise_obj,
-                        'total': Decimal('0.00')
-                    }
-                totaux_par_devise[devise_key]['total'] += montant_ligne
-                
-                # Mettre Ã  jour le stock total
-                stock_obj, created = Stock.objects.get_or_create(
-                    article=article_obj,
-                    defaults={'Qte': 0, 'seuilAlert': 0}
-                )
-                stock_obj.Qte -= qte
-                stock_obj.save()
-            
-            # Ajustement caisse si nÃ©cessaire
-            new_total = self._total_sortie(instance)
-            diff = (new_total - old_total).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-            if diff != 0:
-                mouvement_type = 'ENTREE' if diff > 0 else 'SORTIE'
-                montant_abs = abs(diff)
-                type_caisse_id = extract_type_caisse_id(request.data)
-                if not type_caisse_id:
-                    raise serializers.ValidationError({'type_caisse_id': str(MSG_CAISSE_REQUISE)})
-                tenant_id = instance.entreprise_id or (user.get_entreprise_id(self.request) if user.is_authenticated else None)
-                if mouvement_type == 'SORTIE' and tenant_id:
-                    solde = self._solde_caisse_tenant(tenant_id, getattr(self.request, 'branch_id', None))
-                    if solde < montant_abs:
-                        raise serializers.ValidationError("Solde caisse insuffisant pour ajuster cette vente.")
-                default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first() if tenant_id else Devise.objects.filter(est_principal=True).first()
-                snapshot_mouvement = build_conversion_snapshot(
-                    entreprise_id=instance.entreprise_id,
-                    amount=montant_abs,
-                    devise_source=default_dev,
-                )
-                creer_mouvement_caisse(
-                    montant=montant_abs,
-                    devise=default_dev,
-                    type_mouvement=mouvement_type,
-                    entreprise_id=instance.entreprise_id,
-                    succursale_id=instance.succursale_id,
-                    content_object=instance,
-                    sortie=instance,
-                    reference_piece=f'AJ-VENT-{instance.pk}',
-                    motif='Ajustement vente',
-                    type_caisse_id=type_caisse_id,
-                    devise_reference=snapshot_mouvement['devise_reference'],
-                    taux_change=snapshot_mouvement['taux_change'],
-                    montant_reference=snapshot_mouvement['montant_reference'],
-                )
-        
+            instance = update_sortie_from_payload(
+                instance,
+                request.data,
+                utilisateur=request.user,
+                type_caisse_id=type_caisse_id,
+            )
+
         return Response(self.get_serializer(instance).data)
+
 
     def _solde_caisse(self, entreprise):
         from django.db.models import Sum
@@ -2248,62 +2009,34 @@ class LigneEntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
         stock.save()
     
     def update(self, request, *args, **kwargs):
-        """Mise Ã  jour d'une ligne d'entrÃ©e avec gestion FIFO."""
+        """Mise a jour d'une ligne d'entree via le service entree."""
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
-        
-        old_quantite = instance.quantite
-        old_quantite_restante = instance.quantite_restante
-        
+
+        validated = serializer.validated_data
+        article = validated.get('article', instance.article)
+        payload = {
+            'lignes': [{
+                'id': instance.pk,
+                'article_id': article.pk,
+                'quantite': validated.get('quantite', instance.quantite),
+                'prix_unitaire': validated.get('prix_unitaire', instance.prix_unitaire),
+                'prix_vente': validated.get('prix_vente', instance.prix_vente),
+                'date_expiration': validated.get('date_expiration', instance.date_expiration),
+                'devise_id': (validated.get('devise') or instance.devise).pk if (validated.get('devise') or instance.devise) else None,
+                'seuil_alerte': validated.get('seuil_alerte', instance.seuil_alerte),
+            }],
+        }
+        from stock.services.entree_update_service import update_entree_from_payload
+
         with transaction.atomic():
-            # Restaurer le stock de l'ancienne quantitÃ©
-            stock_obj, created = Stock.objects.get_or_create(
-                article=instance.article,
-                defaults={'Qte': 0, 'seuilAlert': 0}
-            )
-            stock_obj.Qte -= old_quantite
-            stock_obj.save()
-            
-            # Mettre Ã  jour la ligne
-            devise_ligne = serializer.validated_data.get('devise') or instance.devise
-            montant_ligne = (serializer.validated_data.get('prix_unitaire') or instance.prix_unitaire or Decimal('0.00')) * (serializer.validated_data.get('quantite') or instance.quantite or Decimal('0.00'))
-            snapshot_ligne = build_conversion_snapshot(
-                entreprise_id=instance.entree.entreprise_id,
-                amount=montant_ligne,
-                devise_source=devise_ligne,
-            )
-            updated_instance = serializer.save(
-                devise_reference=snapshot_ligne['devise_reference'],
-                taux_change=snapshot_ligne['taux_change'],
-                montant_reference=snapshot_ligne['montant_reference'],
-            )
-            
-            # S'assurer que quantite_restante est cohÃ©rente
-            nouvelle_quantite = updated_instance.quantite
-            diff_quantite = nouvelle_quantite - old_quantite
-            
-            if diff_quantite > 0:
-                # Augmentation : ajouter Ã  quantite_restante
-                updated_instance.quantite_restante += diff_quantite
-            elif diff_quantite < 0:
-                # Diminution : rÃ©duire quantite_restante proportionnellement
-                reduction = min(abs(diff_quantite), updated_instance.quantite_restante)
-                updated_instance.quantite_restante -= reduction
-            
-            # S'assurer que quantite_restante ne dÃ©passe pas quantite
-            if updated_instance.quantite_restante > updated_instance.quantite:
-                updated_instance.quantite_restante = updated_instance.quantite
-            
-            updated_instance.save()
-            
-            # Mettre Ã  jour le stock avec la nouvelle quantitÃ©
-            stock_obj.Qte += nouvelle_quantite
-            stock_obj.save()
-        
+            update_entree_from_payload(instance.entree, payload)
+            updated_instance = LigneEntree.objects.get(pk=instance.pk)
+
         return Response(self.get_serializer(updated_instance).data)
-    
+
     def partial_update(self, request, *args, **kwargs):
         """Mise Ã  jour partielle d'une ligne d'entrÃ©e."""
         return self.update(request, *args, **kwargs, partial=True)
@@ -2821,140 +2554,26 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         entree = self.get_object()
         serializer = self.get_serializer(entree, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
-        lignes_data = request.data.get('lignes', [])
-        user = request.user
-        
-        if not lignes_data:
-            raise serializers.ValidationError("Au moins une ligne d'entrÃ©e est requise.")
-        
-        default_dev = Devise.objects.filter(est_principal=True).first()
-        articles_groupes = {}
-        
-        for ligne in lignes_data:
-            article_id = ligne.get('article') or ligne.get('article_id')
-            if not article_id:
-                raise serializers.ValidationError("Chaque ligne doit avoir un article.")
-            
-            try:
-                article_obj = Article.objects.get(article_id=article_id)
-            except Article.DoesNotExist:
-                raise serializers.ValidationError(f"Article {article_id} introuvable.")
-            
-            try:
-                qte = _parse_decimal_quantity(ligne.get('quantite', 0))
-            except (InvalidOperation, TypeError, ValueError):
-                raise serializers.ValidationError("La quantitÃ© doit Ãªtre un nombre dÃ©cimal valide.")
-            
-            prix_unitaire_raw = ligne.get('prix_unitaire', 0)
-            try:
-                prix_unitaire = Decimal(str(prix_unitaire_raw))
-            except (ValueError, TypeError):
-                prix_unitaire = Decimal('0.00')
-            
-            # Prix de vente obligatoire
-            prix_vente_raw = ligne.get('prix_vente', 0)
-            try:
-                prix_vente = Decimal(str(prix_vente_raw))
-            except (ValueError, TypeError):
-                raise serializers.ValidationError({
-                    'prix_vente': 'Le prix de vente est obligatoire pour chaque ligne d\'entrÃ©e.'
-                })
-            
-            if prix_vente <= 0:
-                raise serializers.ValidationError({
-                    'prix_vente': 'Le prix de vente doit Ãªtre supÃ©rieur Ã  0.'
-                })
-            
-            try:
-                seuil_alerte = Decimal(str(ligne.get('seuil_alerte', 0)).replace(",", "."))
-            except (InvalidOperation, TypeError, ValueError):
-                seuil_alerte = Decimal('0')
-            devise_id = ligne.get('devise_id') or ligne.get('devise')
-            devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=entree.entreprise_id) if devise_id else default_dev
-            date_expiration = ligne.get('date_expiration')
-            
-            # Regrouper par article (fusionner les doublons)
-            if article_id in articles_groupes:
-                articles_groupes[article_id]['quantite'] += qte
-            else:
-                articles_groupes[article_id] = {
-                    'article_obj': article_obj,
-                    'quantite': qte,
-                    'prix_unitaire': prix_unitaire,
-                    'prix_vente': prix_vente,
-                    'seuil_alerte': seuil_alerte,
-                    'devise_obj': devise_obj,
-                    'date_expiration': date_expiration
-                }
-        
+
+        data = dict(request.data)
+        if 'libele' in serializer.validated_data:
+            data['libele'] = serializer.validated_data['libele']
+        if 'description' in serializer.validated_data:
+            data['description'] = serializer.validated_data['description']
+
+        if not partial and not data.get('lignes'):
+            raise serializers.ValidationError({'lignes': "Au moins une ligne d'entrée est requise."})
+
+        from stock.services.entree_update_service import update_entree_from_payload
+
         with transaction.atomic():
-            # Rollback anciennes lignes (restaurer quantite_restante et stock)
-            for ancienne_ligne in entree.lignes.all():
-                # Restaurer quantite_restante si des sorties ont Ã©tÃ© faites
-                # On ne peut pas simplement restaurer car des sorties peuvent avoir Ã©tÃ© faites
-                # On doit vÃ©rifier combien a Ã©tÃ© vendu
-                quantite_vendue = ancienne_ligne.quantite - ancienne_ligne.quantite_restante
-                
-                # Restaurer le stock
-                stock_obj, created = Stock.objects.get_or_create(
-                    article=ancienne_ligne.article,
-                    defaults={'Qte': 0, 'seuilAlert': 0},
-                )
-                stock_obj.Qte -= ancienne_ligne.quantite
-                stock_obj.save()
-            
-            # Supprimer toutes les anciennes lignes
-            entree.lignes.all().delete()
-            
-            # Mettre Ã  jour le libellÃ©
-            entree.libele = serializer.validated_data.get('libele', entree.libele)
-            entree.save(update_fields=['libele'])
-            
-            # CrÃ©er les nouvelles lignes avec FIFO
-            for article_id, ligne_data in articles_groupes.items():
-                article_obj = ligne_data['article_obj']
-                qte = ligne_data['quantite']
-                prix_unitaire = ligne_data['prix_unitaire']
-                prix_vente = ligne_data['prix_vente']
-                seuil_alerte = ligne_data['seuil_alerte']
-                devise_obj = ligne_data['devise_obj']
-                date_expiration = ligne_data['date_expiration']
-                
-                # CrÃ©er la ligne d'entrÃ©e avec quantite_restante initialisÃ©e
-                montant_ligne = (prix_unitaire * Decimal(str(qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-                snapshot_ligne = build_conversion_snapshot(
-                    entreprise_id=entree.entreprise_id,
-                    amount=montant_ligne,
-                    devise_source=devise_obj or default_dev,
-                )
-                LigneEntree.objects.create(
-                    entree=entree,
-                    article=article_obj,
-                    quantite=qte,
-                    quantite_restante=qte,
-                    prix_unitaire=prix_unitaire,
-                    prix_vente=prix_vente,
-                    date_expiration=date_expiration,
-                    devise=devise_obj,
-                    devise_reference=snapshot_ligne['devise_reference'],
-                    taux_change=snapshot_ligne['taux_change'],
-                    montant_reference=snapshot_ligne['montant_reference'],
-                    seuil_alerte=seuil_alerte
-                )
-                
-                # Mettre Ã  jour le stock
-                stock_obj, created = Stock.objects.get_or_create(
-                    article=article_obj, 
-                    defaults={'Qte': 0, 'seuilAlert': seuil_alerte}
-                )
-                stock_obj.Qte += qte
-                stock_obj.seuilAlert = seuil_alerte
-                stock_obj.save()
-        
+            entree = update_entree_from_payload(entree, data)
+
         return Response(self.get_serializer(entree).data, status=status.HTTP_200_OK)
+
     
     def partial_update(self, request, *args, **kwargs):
-        """Mise Ã  jour partielle d'une entrÃ©e."""
+        """Mise à jour partielle d'une entrée."""
         return self.update(request, *args, **kwargs, partial=True)
 
     def destroy(self, request, *args, **kwargs):
@@ -2975,7 +2594,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
 
     @action(detail=True, methods=['get'], url_path='bon-pos')
     def bon_entree_pos(self, request, pk=None):
-        """GÃ©nÃ¨re un bon d'entrÃ©e au format POS."""
+        """Génère un bon d'entrée au format POS."""
         entree = self.get_object()
         
         ent_ctx = self.request.user.get_entreprise(self.request)
