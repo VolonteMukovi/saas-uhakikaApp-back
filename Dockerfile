@@ -1,29 +1,19 @@
 FROM python:3.11-slim
 
-# Configuration des variables indispensables pour mysqlclient
-ENV MYSQLCLIENT_CFLAGS="-I/usr/include/mysql"
-ENV MYSQLCLIENT_LDFLAGS="-L/usr/lib/x86_64-linux-gnu -lmariadb"
-
-# Installation des dépendances système
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    default-libmysqlclient-dev \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-
+# Définition du dossier de travail dans le conteneur
 WORKDIR /app
 
-# On copie le fichier des dépendances
+# Copie du fichier des dépendances nettoyé
 COPY requirements.txt .
 
-# FIX : On retire "--upgrade pip" pour éviter le crash lié à Pip 26+
+# Installation des dépendances Python (Rapide et sans compilation C)
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copie du reste du code du projet
+# Copie de tout le code source du projet dans le conteneur
 COPY . .
 
-# Exposer le port par défaut
+# Exposition du port interne utilisé par Gunicorn
 EXPOSE 8000
 
-# Commande finale propre (Format Exec)
+# Commande finale : Exécution automatique des migrations Django puis lancement de Gunicorn
 CMD ["sh", "-c", "python manage.py migrate --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:8000"]
