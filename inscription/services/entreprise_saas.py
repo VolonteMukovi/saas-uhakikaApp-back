@@ -34,6 +34,13 @@ def evaluer_et_marquer_configuration(entreprise: Entreprise) -> bool:
     if entreprise.configuration_complete != complet:
         entreprise.configuration_complete = complet
         entreprise.save(update_fields=['configuration_complete'])
+    if complet:
+        from inscription.services.welcome_email import envoyer_bienvenue_si_eligible
+        from users.models import Membership
+        for membership in Membership.objects.filter(
+            entreprise=entreprise, role='admin', is_active=True,
+        ).select_related('user'):
+            envoyer_bienvenue_si_eligible(membership.user)
     return complet
 
 

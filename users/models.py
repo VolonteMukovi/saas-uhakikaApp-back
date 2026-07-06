@@ -10,6 +10,7 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('role', 'superadmin')  # Force le rôle superadmin
+        extra_fields.setdefault('email_verifie', True)
         
         if extra_fields.get('is_staff') is not True:
             raise ValueError('Le superuser doit avoir is_staff=True.')
@@ -33,6 +34,14 @@ class User(AbstractUser):
         ('user', 'Agent / Employé'),
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="user")
+    email_verifie = models.BooleanField(
+        default=False,
+        help_text="True lorsque l'utilisateur a confirmé son adresse e-mail UHAKIKAAPP.",
+    )
+    message_bienvenue_envoye = models.BooleanField(
+        default=False,
+        help_text="True après envoi unique de l'e-mail de bienvenue post-configuration.",
+    )
 
     objects = UserManager()
 

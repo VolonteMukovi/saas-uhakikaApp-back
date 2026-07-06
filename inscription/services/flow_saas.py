@@ -12,6 +12,7 @@ from inscription.services.entreprise_saas import entreprise_est_configuree
 from inscription.services.profil_saas import profil_est_complet
 
 # Statuts flow alignés sur FRONTEND_GUIDE_SAAS_FLOW_UHAKIKAAPP.md
+STATUT_EMAIL_NON_VERIFIEE = 'en_attente_verification_email'
 STATUT_PRE_INSCRIPTION = 'pre_inscription'
 STATUT_CREER_ENTREPRISE = 'creer_entreprise_minimale'
 STATUT_DASHBOARD_ACTIF = 'dashboard_actif'
@@ -54,6 +55,7 @@ def build_etat_flow_saas(user, request=None) -> dict:
 
     config_ok = entreprise_est_configuree(ent) if ent else False
     profil_ok = profil_est_complet(user) if user and user.is_authenticated else False
+    email_ok = bool(user and user.is_authenticated and getattr(user, 'email_verifie', False))
 
     licence_active = bool(etat_licence and etat_licence.get('est_actif'))
     en_attente_manuelle = (
@@ -69,6 +71,8 @@ def build_etat_flow_saas(user, request=None) -> dict:
 
     if not user or not user.is_authenticated:
         statut_flow = STATUT_PRE_INSCRIPTION
+    elif not email_ok:
+        statut_flow = STATUT_EMAIL_NON_VERIFIEE
     elif not a_entreprise:
         statut_flow = STATUT_CREER_ENTREPRISE
     elif en_attente_manuelle:
@@ -82,8 +86,8 @@ def build_etat_flow_saas(user, request=None) -> dict:
     else:
         statut_flow = STATUT_DASHBOARD_ACTIF
 
-    # Dashboard toujours accessible après inscription + entreprise minimale
-    acces_dashboard = bool(user and user.is_authenticated and a_entreprise)
+    # Dashboard accessible après vérification e-mail + entreprise minimale
+    acces_dashboard = bool(user and user.is_authenticated and email_ok and a_entreprise)
 
     operations_metier = (
         acces_dashboard
@@ -96,7 +100,12 @@ def build_etat_flow_saas(user, request=None) -> dict:
     messages = []
     actions = []
 
-    if not a_entreprise:
+    if user and user.is_authenticated and not email_ok:
+        messages.append(_(
+            'Confirmez votre adresse e-mail pour accéder à votre tableau de bord.'
+        ))
+        actions.append({'code': 'verifier_email', 'url': '/verify-email'})
+    elif not a_entreprise:
         messages.append(_(
             'Créez votre espace entreprise pour accéder au dashboard.'
         ))
@@ -195,6 +204,7 @@ def build_etat_flow_saas(user, request=None) -> dict:
         'peut_completer_entreprise': bool(a_entreprise),
         'peut_completer_profil': bool(user and user.is_authenticated),
         'pages_onboarding_autorisees': [
+            '/verify-email',
             '/company/setup',
             '/profile/setup',
             '/subscription/manual-pending',
@@ -208,9 +218,11 @@ def build_etat_flow_saas(user, request=None) -> dict:
         'actions_recommandees': actions,
         'regles_verification': {
             'authentification': bool(user and user.is_authenticated),
+            'email_verifie': email_ok,
             'entreprise': a_entreprise,
             'licence_active': licence_active,
             'configuration_entreprise': config_ok,
             'profil_complet': profil_ok,
         },
+        'email_verifie': email_ok,
     }

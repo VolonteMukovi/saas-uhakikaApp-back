@@ -95,6 +95,18 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     """Connexion : tokens + infos user ; claims session_start + contexte tenant (entreprise/succursale)."""
 
     def validate(self, attrs):
+        username_field = self.username_field
+        candidate = attrs.get(username_field)
+        password = attrs.get('password')
+        User = get_user_model()
+        pending = User.objects.filter(**{username_field: candidate}).first()
+        if pending and not pending.email_verifie and pending.check_password(password):
+            raise drf_serializers.ValidationError({
+                'detail': _('Veuillez confirmer votre adresse e-mail avant de vous connecter.'),
+                'code': 'email_not_verified',
+                'email': pending.email,
+                'statut_verification': 'EN_ATTENTE',
+            })
         super(TokenObtainPairSerializer, self).validate(attrs)
         assurer_contexte_initial_utilisateur(self.user)
         refresh = self.get_token(self.user)
@@ -860,6 +872,8 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = serializer_class(user, data=request.data, partial=(request.method == 'PATCH'))
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        from inscription.services.welcome_email import envoyer_bienvenue_si_eligible
+        envoyer_bienvenue_si_eligible(user, request)
         return Response(serializer.data)
     
     @swagger_auto_schema(

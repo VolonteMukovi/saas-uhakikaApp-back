@@ -3,8 +3,17 @@ Authentification JWT avec exposition du contexte tenant (entreprise_id, succursa
 et request.current_membership pour que is_admin() / is_agent() s'appuient sur Membership.role.
 """
 from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework.exceptions import AuthenticationFailed
+from django.utils.translation import gettext as _
 
 from .models import Membership
+
+
+_EMAIL_VERIF_EXEMPT_PREFIXES = (
+    '/api/inscription/verifier-email',
+    '/api/inscription/renvoyer-verification',
+    '/api/inscription/modifier-email-verification',
+)
 
 
 class JWTAuthenticationWithContext(JWTAuthentication):
@@ -19,6 +28,17 @@ class JWTAuthenticationWithContext(JWTAuthentication):
         if result is None:
             return None
         user, validated_token = result
+        if (
+            user.is_authenticated
+            and not user.is_superuser
+            and not getattr(user, 'email_verifie', True)
+        ):
+            path = getattr(request, 'path', '') or ''
+            if not any(path.startswith(prefix) for prefix in _EMAIL_VERIF_EXEMPT_PREFIXES):
+                raise AuthenticationFailed(
+                    _('Veuillez confirmer votre adresse e-mail avant d\'accéder à l\'application.'),
+                    code='email_not_verified',
+                )
         if hasattr(validated_token, 'get'):
             request.tenant_id = validated_token.get('entreprise_id')
             request.branch_id = validated_token.get('succursale_id')

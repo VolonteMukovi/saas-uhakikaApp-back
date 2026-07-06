@@ -27,26 +27,32 @@ class ConnexionGoogleTests(TestCase):
     def setUp(self):
         self.client = APIClient()
 
+    @patch('inscription.views.envoyer_email_verification')
     @patch('inscription.views.verifier_id_token_google')
-    def test_inscription_google_nouveau_compte(self, mock_verify):
+    def test_inscription_google_nouveau_compte(self, mock_verify, mock_send):
         mock_verify.return_value = PAYLOAD_GOOGLE
+        mock_send.return_value = {'envoye': True, 'delai_renvoi_secondes': 60}
         resp = self.client.post('/api/inscription/google/', {
             'credential': FAKE_GOOGLE_JWT,
         }, format='json')
         self.assertEqual(resp.status_code, 201)
         self.assertTrue(resp.data['est_nouveau_compte'])
         self.assertTrue(resp.data['connexion_google'])
-        self.assertIn('tokens', resp.data)
-        self.assertTrue(resp.data['a_entreprise'])
-        self.assertEqual(resp.data['prochaine_etape'], 'utiliser_application')
+        self.assertEqual(resp.data['statut_verification'], 'EN_ATTENTE')
+        self.assertNotIn('tokens', resp.data)
         user = User.objects.get(email='test@gmail.com')
         self.assertFalse(user.has_usable_password())
+        self.assertFalse(user.email_verifie)
+        self.assertFalse(user.is_active)
         self.assertTrue(ProfilConnexionGoogle.objects.filter(utilisateur=user).exists())
 
     @patch('inscription.views.verifier_id_token_google')
     def test_connexion_google_compte_existant(self, mock_verify):
         mock_verify.return_value = PAYLOAD_GOOGLE
-        user = User.objects.create_user(username='jean', email='test@gmail.com', password='x', role='admin')
+        user = User.objects.create_user(
+            username='jean', email='test@gmail.com', password='x', role='admin',
+            email_verifie=True, is_active=True,
+        )
         ProfilConnexionGoogle.objects.create(
             utilisateur=user,
             google_sub='google-sub-12345',
@@ -61,7 +67,10 @@ class ConnexionGoogleTests(TestCase):
     @patch('inscription.views.verifier_id_token_google')
     def test_liaison_email_existant_sans_google(self, mock_verify):
         mock_verify.return_value = PAYLOAD_GOOGLE
-        User.objects.create_user(username='jean', email='test@gmail.com', password='motdepasse1', role='admin')
+        User.objects.create_user(
+            username='jean', email='test@gmail.com', password='motdepasse1', role='admin',
+            email_verifie=True, is_active=True,
+        )
         resp = self.client.post('/api/inscription/google/', {
             'credential': FAKE_GOOGLE_JWT,
         }, format='json')

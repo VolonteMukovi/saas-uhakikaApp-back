@@ -15,12 +15,23 @@ class InscriptionCompteSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if attrs['password'] != attrs['password_confirm']:
             raise serializers.ValidationError(_('Les mots de passe ne correspondent pas'))
+        email = (attrs.get('email') or '').strip().lower()
+        User = get_user_model()
+        if email and User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError({
+                'email': _('Un compte existe déjà avec cette adresse e-mail.'),
+            })
         return attrs
 
     def create(self, validated_data):
         validated_data.pop('password_confirm')
         password = validated_data.pop('password')
-        user = get_user_model().objects.create_user(role='admin', **validated_data)
+        user = get_user_model().objects.create_user(
+            role='admin',
+            is_active=False,
+            email_verifie=False,
+            **validated_data,
+        )
         user.set_password(password)
         user.save()
         return user
@@ -30,6 +41,7 @@ class StatutOnboardingSerializer(serializers.Serializer):
     utilisateur_id = serializers.IntegerField()
     username = serializers.CharField()
     email = serializers.EmailField()
+    email_verifie = serializers.BooleanField(required=False, default=False)
     a_entreprise = serializers.BooleanField()
     entreprise_id = serializers.IntegerField(allow_null=True)
     entreprise_nom = serializers.CharField(allow_null=True)
@@ -124,6 +136,7 @@ class BootstrapSaasSerializer(serializers.Serializer):
 
 class EtatFlowSaasSerializer(serializers.Serializer):
     authentifie = serializers.BooleanField()
+    email_verifie = serializers.BooleanField(required=False, default=False)
     a_entreprise = serializers.BooleanField()
     entreprise_id = serializers.IntegerField(allow_null=True)
     entreprise_nom = serializers.CharField(allow_null=True)

@@ -1,0 +1,19 @@
+Bonjour {{ prenom }},
+
+Bienvenue sur UHAKIKAAPP.
+
+La configuration de votre entreprise {{ entreprise_nom }} a été effectuée avec succès. Votre espace de gestion est maintenant prêt à être utilisé.
+
+Votre formule : {{ plan_nom }}
+Période : {{ periode_libelle }}
+
+Vous pouvez désormais commencer à utiliser UHAKIKAAPP pour gérer votre activité.
+
+Accéder à mon tableau de bord :
+{{ dashboard_url }}
+
+Merci d'avoir choisi UHAKIKAAPP.
+Notre équipe reste disponible pour vous accompagner : {{ support_email }}
+
+UHAKIKAAPP
+La certitude d'une gestion fiable et maîtrisée.

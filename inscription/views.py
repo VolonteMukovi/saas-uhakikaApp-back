@@ -26,6 +26,8 @@ from inscription.serializers import (
 
 )
 
+from inscription.services.email_responses import build_reponse_attente_verification
+from inscription.services.email_messaging import envoyer_email_verification
 from inscription.services.auth_response import build_jwt_login_response
 
 from inscription.services.bootstrap_saas import assurer_contexte_initial_utilisateur
@@ -96,6 +98,8 @@ def _build_statut_onboarding(user, request=None):
 
         'email': user.email or '',
 
+        'email_verifie': bool(getattr(user, 'email_verifie', False)),
+
         'a_entreprise': a_entreprise,
 
         'entreprise_id': ent.id if ent else None,
@@ -113,6 +117,16 @@ def _build_statut_onboarding(user, request=None):
 
 
 def _reponse_auth_inscription(user, request, est_nouveau_compte=False, message=None):
+
+    if not getattr(user, 'email_verifie', False):
+        envoyer_email_verification(user, forcer=not est_nouveau_compte)
+        body = build_reponse_attente_verification(
+            user,
+            connexion_google=True,
+            est_nouveau_compte=est_nouveau_compte,
+        )
+        body['message'] = message or body['message']
+        return body
 
     tokens_payload = build_jwt_login_response(user, request)
     bootstrap = tokens_payload.pop('bootstrap', None)
@@ -162,27 +176,8 @@ class InscriptionCompteView(APIView):
 
         user = serializer.save()
 
-        tokens_payload = build_jwt_login_response(user, request)
-        bootstrap = tokens_payload.pop('bootstrap', None)
-
-        statut = _build_statut_onboarding(user, request)
-
-        body = {
-            **StatutOnboardingSerializer(statut).data,
-            'est_nouveau_compte': True,
-            'connexion_google': False,
-            'tokens': {
-                'refresh': tokens_payload['refresh'],
-                'access': tokens_payload['access'],
-            },
-            'user': tokens_payload['user'],
-            'message': _(
-                'Compte créé. Votre essai gratuit Découverte Pro de 60 jours est activé.'
-            ),
-        }
-        if bootstrap and bootstrap.get('bootstrap_effectue'):
-            body['bootstrap'] = bootstrap
-
+        envoyer_email_verification(user, forcer=True)
+        body = build_reponse_attente_verification(user, connexion_google=False, est_nouveau_compte=True)
         return Response(body, status=status.HTTP_201_CREATED)
 
 
@@ -232,7 +227,7 @@ class ConnexionGoogleView(APIView):
 
             message = _(
 
-                'Compte créé via Google. Essai gratuit Découverte Pro activé pour 60 jours.'
+                'Compte créé via Google. Un e-mail de confirmation vous a été envoyé.'
 
             )
 
@@ -244,15 +239,11 @@ class ConnexionGoogleView(APIView):
 
             http_status = status.HTTP_200_OK
 
+        body = _reponse_auth_inscription(user, request, est_nouveau_compte=est_nouveau, message=message)
+        if not user.email_verifie:
+            http_status = status.HTTP_201_CREATED if est_nouveau else status.HTTP_403_FORBIDDEN
 
-
-        return Response(
-
-            _reponse_auth_inscription(user, request, est_nouveau_compte=est_nouveau, message=message),
-
-            status=http_status,
-
-        )
+        return Response(body, status=http_status)
 
 
 

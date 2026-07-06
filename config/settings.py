@@ -267,6 +267,25 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# === E-mail transactionnel (Resend SMTP) ===
+EMAIL_BACKEND = config("EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend")
+EMAIL_HOST = config("EMAIL_HOST", default="")
+EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=bool)
+EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
+DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="UhakikaApp <noreply@uhakikaapp.store>")
+SERVER_EMAIL = DEFAULT_FROM_EMAIL
+
+FRONTEND_BASE_URL = config("FRONTEND_BASE_URL", default="http://localhost:5173").rstrip("/")
+FRONTEND_VERIFY_EMAIL_PATH = config("FRONTEND_VERIFY_EMAIL_PATH", default="/verify-email")
+FRONTEND_DASHBOARD_PATH = config("FRONTEND_DASHBOARD_PATH", default="/dashboard")
+SUPPORT_EMAIL = config("SUPPORT_EMAIL", default="support@uhakikaapp.store")
+
+EMAIL_VERIFICATION_TOKEN_HOURS = config("EMAIL_VERIFICATION_TOKEN_HOURS", default=24, cast=int)
+EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = config("EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS", default=60, cast=int)
+EMAIL_VERIFICATION_RESEND_MAX_PER_HOUR = config("EMAIL_VERIFICATION_RESEND_MAX_PER_HOUR", default=5, cast=int)
+
 # === POS / ESC-POS (imprimante ticket 58mm) ===
 # Exemple Windows: POS_PRINTER_PORT=COM3
 # Exemple Linux:   POS_PRINTER_PORT=/dev/ttyUSB0

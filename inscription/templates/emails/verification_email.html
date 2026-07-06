@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Confirmez votre adresse e-mail</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f6f8;font-family:Arial,Helvetica,sans-serif;color:#1f2937;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f6f8;padding:24px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border-radius:12px;overflow:hidden;">
+          <tr>
+            <td style="padding:28px 24px;background:#0f766e;color:#ffffff;">
+              <h1 style="margin:0;font-size:22px;">UHAKIKAAPP</h1>
+              <p style="margin:8px 0 0;font-size:14px;opacity:.95;">La certitude d'une gestion fiable et maîtrisée.</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:28px 24px;">
+              <p style="margin:0 0 16px;font-size:16px;">Bonjour {{ prenom }},</p>
+              <p style="margin:0 0 16px;line-height:1.6;">Merci de vous être inscrit sur <strong>UHAKIKAAPP</strong>.</p>
+              <p style="margin:0 0 24px;line-height:1.6;">Pour sécuriser votre compte et finaliser votre inscription, veuillez confirmer votre adresse e-mail en cliquant sur le bouton ci-dessous.</p>
+              <p style="margin:0 0 24px;text-align:center;">
+                <a href="{{ verification_url }}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;padding:14px 24px;border-radius:8px;font-weight:bold;">Confirmer mon adresse e-mail</a>
+              </p>
+              <p style="margin:0 0 12px;font-size:13px;color:#6b7280;line-height:1.5;">Ce lien est personnel et expire après {{ validite_heures }} heures.</p>
+              <p style="margin:0;font-size:13px;color:#6b7280;line-height:1.5;">Si vous n'êtes pas à l'origine de cette inscription, vous pouvez ignorer ce message.</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 24px;background:#f9fafb;font-size:12px;color:#6b7280;">
+              L'équipe UHAKIKAAPP — {{ support_email }}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

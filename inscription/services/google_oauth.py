@@ -392,6 +392,8 @@ def connecter_ou_inscrire_via_google(payload: dict) -> tuple[User, bool]:
         first_name=given_name,
         last_name=family_name,
         role='admin',
+        is_active=False,
+        email_verifie=False,
     )
     user.set_unusable_password()
     user.save(update_fields=['password'])

@@ -54,6 +54,7 @@ def build_jwt_login_response(user, request=None, *, bootstrap=True):
         'id': user.id,
         'username': user.username,
         'email': user.email,
+        'email_verifie': bool(getattr(user, 'email_verifie', False)),
         'entreprise': entreprises[0]['entreprise'] if entreprises else None,
         'enterprises': entreprises,
         'succursales': _succursales_for_membership(first_m) if first_m else [],
