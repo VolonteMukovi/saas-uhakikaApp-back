@@ -6,7 +6,7 @@ WORKDIR /app
 # Copie du fichier des dépendances nettoyé
 COPY requirements.txt .
 
-# Installation des dépendances Python (Rapide et sans compilation C)
+# Installation des dépendances Python
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copie de tout le code source du projet dans le conteneur
