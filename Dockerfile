@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-
+# Configuration des variables pour la compilation de mysqlclient
 ENV MYSQLCLIENT_CFLAGS="-I/usr/include/mysql"
 ENV MYSQLCLIENT_LDFLAGS="-L/usr/lib/x86_64-linux-gnu -lmariadb"
 
@@ -24,5 +24,5 @@ COPY . .
 # Exposer le port par défaut
 EXPOSE 8000
 
-# Commande finale combinée (Migrations + Lancement)
-CMD python manage.py migrate --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:8000
+# Commande finale corrigée (sans le point à la fin)
+CMD ["sh", "-c", "python manage.py migrate --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:8000"]
