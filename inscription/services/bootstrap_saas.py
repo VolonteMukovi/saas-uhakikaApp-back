@@ -6,12 +6,18 @@ le dashboard dans un état sans entreprise, sans rôle ni licence.
 """
 from __future__ import annotations
 
+from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.utils.translation import gettext as _
 
 from abonnements.models import AbonnementEntreprise, FormuleAbonnement
 from abonnements.services.licence import demarrer_essai_gratuit, get_abonnement_courant
+from inscription.services.entreprise_onboarding import consolider_entreprises_utilisateur
 from inscription.services.entreprise_saas import creer_entreprise_minimale
 from users.models import Membership
+from users.services.membership_context import get_primary_membership
+
+User = get_user_model()
 
 
 def _nom_entreprise_par_defaut(user) -> str:
@@ -42,49 +48,46 @@ def assurer_contexte_initial_utilisateur(
     if user.is_superuser and not Membership.objects.filter(user=user, is_active=True).exists():
         return {'bootstrap_effectue': False, 'raison': 'superadmin_sans_contexte'}
 
-    membership = (
-        Membership.objects
-        .filter(user=user, is_active=True)
-        .select_related('entreprise')
-        .order_by('entreprise_id', 'id')
-        .first()
-    )
+    with transaction.atomic():
+        User.objects.select_for_update().get(pk=user.pk)
+        consolider_entreprises_utilisateur(user)
+        membership = get_primary_membership(user)
 
-    if membership:
-        abo = get_abonnement_courant(membership.entreprise_id)
-        if abo:
+        if membership:
+            abo = get_abonnement_courant(membership.entreprise_id)
+            if abo:
+                return {
+                    'bootstrap_effectue': False,
+                    'raison': 'contexte_existant',
+                    'entreprise_id': membership.entreprise_id,
+                    'entreprise_nom': membership.entreprise.nom,
+                    'abonnement_id': abo.id,
+                    'statut_licence': abo.statut,
+                }
+            abo = demarrer_essai_gratuit(membership.entreprise, user=user)
             return {
-                'bootstrap_effectue': False,
-                'raison': 'contexte_existant',
+                'bootstrap_effectue': True,
+                'type': 'essai_active',
                 'entreprise_id': membership.entreprise_id,
                 'entreprise_nom': membership.entreprise.nom,
                 'abonnement_id': abo.id,
                 'statut_licence': abo.statut,
+                'message': _('Essai gratuit Découverte Pro activé pour 60 jours.'),
             }
-        abo = demarrer_essai_gratuit(membership.entreprise, user=user)
+
+        result = creer_entreprise_minimale(
+            user,
+            nom=(nom_entreprise or _nom_entreprise_par_defaut(user)).strip(),
+            pays=pays,
+            email_entreprise=user.email or '',
+            formule_code=FormuleAbonnement.CODE_ESSAI,
+            periode=AbonnementEntreprise.PERIODE_ESSAI,
+            source_activation='essai_gratuit',
+        )
         return {
             'bootstrap_effectue': True,
-            'type': 'essai_active',
-            'entreprise_id': membership.entreprise_id,
-            'entreprise_nom': membership.entreprise.nom,
-            'abonnement_id': abo.id,
-            'statut_licence': abo.statut,
-            'message': _('Essai gratuit Découverte Pro activé pour 60 jours.'),
+            'type': 'contexte_cree',
+            **result,
+            'message': result.get('message')
+            or _('Espace UHAKIKAAPP configuré. Essai gratuit Découverte Pro activé pour 60 jours.'),
         }
-
-    result = creer_entreprise_minimale(
-        user,
-        nom=(nom_entreprise or _nom_entreprise_par_defaut(user)).strip(),
-        pays=pays,
-        email_entreprise=user.email or '',
-        formule_code=FormuleAbonnement.CODE_ESSAI,
-        periode=AbonnementEntreprise.PERIODE_ESSAI,
-        source_activation='essai_gratuit',
-    )
-    return {
-        'bootstrap_effectue': True,
-        'type': 'contexte_cree',
-        **result,
-        'message': result.get('message')
-        or _('Espace UHAKIKAAPP configuré. Essai gratuit Découverte Pro activé pour 60 jours.'),
-    }

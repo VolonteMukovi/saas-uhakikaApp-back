@@ -451,13 +451,49 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
         # Utilisateur sans entreprise : ne voit aucune entreprise tant qu'il n'en a pas crÃ©Ã©e
         return Entreprise.objects.none()
 
+    def create(self, request, *args, **kwargs):
+        """Crée ou met à jour l'entreprise provisoire — jamais de doublon."""
+        from rest_framework.exceptions import ValidationError
+        from inscription.services.entreprise_saas import (
+            entreprise_est_configuree,
+            evaluer_et_marquer_configuration,
+        )
+        from users.services.membership_context import get_primary_membership
+
+        user = request.user
+        if user.is_superadmin():
+            return super().create(request, *args, **kwargs)
+
+        membership = get_primary_membership(user, request)
+        if membership:
+            ent = membership.entreprise
+            if entreprise_est_configuree(ent) and ent.configuration_complete:
+                raise ValidationError({
+                    'detail': _(
+                        'Votre entreprise est déjà configurée. '
+                        'Utilisez la modification pour mettre à jour vos informations.'
+                    ),
+                    'code': 'entreprise_deja_configuree',
+                    'entreprise_id': ent.id,
+                })
+            serializer = self.get_serializer(ent, data=request.data)
+            serializer.is_valid(raise_exception=True)
+            entreprise = serializer.save()
+            evaluer_et_marquer_configuration(entreprise)
+            data = dict(serializer.data)
+            data['mis_a_jour'] = True
+            data['code'] = 'entreprise_mise_a_jour'
+            return Response(data, status=status.HTTP_200_OK)
+
+        return super().create(request, *args, **kwargs)
+
     def perform_create(self, serializer):
         from users.models import Membership
+
         user = self.request.user
         if user.is_superadmin():
             raise PermissionDenied(_("Le super administrateur ne peut pas crÃ©er d'entreprise. Utilisez un compte Admin."))
-        # Tout utilisateur authentifiÃ© non superadmin peut crÃ©er une entreprise.
-        # Il devient automatiquement admin de cette entreprise via Membership.
+
         entreprise = serializer.save()
         Membership.objects.get_or_create(
             user=user,

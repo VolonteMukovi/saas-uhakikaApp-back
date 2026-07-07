@@ -49,13 +49,10 @@ class User(AbstractUser):
         """
         Membership du contexte courant.
         Si request est fourni et a current_membership (défini par l'auth JWT), utilise celui-là
-        pour cet utilisateur ; sinon premier membership actif.
+        pour cet utilisateur ; sinon membership principal (onboarding / configuré).
         """
-        if request is not None:
-            m = getattr(request, 'current_membership', None)
-            if m is not None and m.user_id == self.pk:
-                return m
-        return self.memberships.filter(is_active=True).select_related('entreprise', 'default_succursale').first()
+        from users.services.membership_context import get_primary_membership
+        return get_primary_membership(self, request)
 
     def get_entreprise(self, request=None):
         """Entreprise courante (contexte request ou premier membership actif)."""

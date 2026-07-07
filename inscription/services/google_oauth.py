@@ -108,7 +108,8 @@ def _verifier_via_tokeninfo_google(token: str, client_ids: list[str]) -> dict | 
         with urllib.request.urlopen(url, timeout=10) as resp:
             data = json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        logger.warning('Tokeninfo Google HTTP %s', exc.code)
+        body = exc.read().decode(errors='replace') if exc.fp else ''
+        logger.warning('Tokeninfo Google HTTP %s: %s', exc.code, body[:500])
         return None
     except Exception as exc:
         logger.warning('Tokeninfo Google indisponible: %s', exc)
@@ -304,9 +305,28 @@ def verifier_id_token_google(id_token_str: str) -> dict:
                 exc,
                 _hint_horloge(token_hint),
             )
-            payload = _verifier_via_tokeninfo_google(token, client_ids)
-            if payload:
-                logger.info('Jeton Google validé via tokeninfo (horloge locale décalée corrigée)')
+            horloge_hint = _hint_horloge(token_hint)
+            # Réessai avec tolérance élargie si l'horloge Windows est en retard.
+            before_iat = horloge_hint.get('seconds_before_iat')
+            if payload is None and isinstance(before_iat, int) and before_iat > clock_skew:
+                try:
+                    request = google_requests.Request()
+                    payload = id_token.verify_oauth2_token(
+                        token,
+                        request,
+                        audience=None,
+                        clock_skew_in_seconds=before_iat + 120,
+                    )
+                    logger.info(
+                        'Jeton Google validé avec tolérance horloge étendue (%ss)',
+                        before_iat + 120,
+                    )
+                except ValueError:
+                    payload = None
+            if payload is None:
+                payload = _verifier_via_tokeninfo_google(token, client_ids)
+                if payload:
+                    logger.info('Jeton Google validé via tokeninfo (horloge locale décalée)')
         if payload is None:
             raise _message_erreur_verification(verify_error, token_hint, client_ids) from verify_error
     except Exception as exc:

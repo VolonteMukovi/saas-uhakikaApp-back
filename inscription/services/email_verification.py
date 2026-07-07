@@ -5,6 +5,7 @@ import hashlib
 import logging
 import secrets
 from datetime import timedelta
+from urllib.parse import quote
 
 from django.conf import settings
 from django.db import transaction
@@ -86,12 +87,45 @@ def creer_jeton_verification(user, *, email_cible: str | None = None) -> tuple[s
     return token_clair, enregistrement
 
 
-def build_verification_url(token_clair: str) -> str:
+def _frontend_path(path: str) -> str:
+    path = path if path.startswith('/') else f'/{path}'
+    locale = getattr(settings, 'FRONTEND_LOCALE_PREFIX', '').rstrip('/')
+    return f'{locale}{path}' if locale else path
+
+
+def build_frontend_url(path: str, *, query: str = '') -> str:
+    """URL absolue vers une page frontend (locale incluse)."""
     base = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
+    url = f'{base}{_frontend_path(path)}'
+    if query:
+        url = f'{url}?{query.lstrip("?")}'
+    return url
+
+
+def build_frontend_verification_url(token_clair: str) -> str:
+    """Page frontend de confirmation avec le jeton dans la query string."""
     path = getattr(settings, 'FRONTEND_VERIFY_EMAIL_PATH', '/verify-email')
-    if not path.startswith('/'):
-        path = f'/{path}'
-    return f'{base}{path}?token={token_clair}'
+    encoded = quote(token_clair, safe='')
+    return build_frontend_url(path, query=f'token={encoded}')
+
+
+def build_verification_url(token_clair: str) -> str:
+    """
+    URL du bouton dans l'e-mail.
+    En production : API GET → redirect frontend (préserve le token i18n).
+    En local : lien frontend direct (évite 127.0.0.1 dans l'e-mail = signal spam).
+    """
+    encoded = quote(token_clair, safe='')
+    via_api = getattr(settings, 'EMAIL_VERIFICATION_LINK_VIA_API', True)
+    api_base = getattr(settings, 'PUBLIC_API_BASE_URL', '').rstrip('/')
+    if via_api and api_base and not _url_est_locale(api_base):
+        return f'{api_base}/api/inscription/confirmer-email/?token={encoded}'
+    return build_frontend_verification_url(token_clair)
+
+
+def _url_est_locale(url: str) -> bool:
+    lower = (url or '').lower()
+    return any(h in lower for h in ('localhost', '127.0.0.1', '0.0.0.0', '[::1]'))
 
 
 @transaction.atomic
@@ -185,5 +219,5 @@ def modifier_email_en_attente(user, nouvel_email: str, *, password: str | None =
 
     user.email = nouvel_email
     user.save(update_fields=['email'])
-    token_clair, _ = creer_jeton_verification(user, email_cible=nouvel_email)
+    token_clair, _jeton = creer_jeton_verification(user, email_cible=nouvel_email)
     return token_clair

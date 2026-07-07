@@ -22,13 +22,9 @@ def build_jwt_login_response(user, request=None, *, bootstrap=True):
     refresh = RefreshToken.for_user(user)
     refresh['session_start'] = int(time.time())
 
-    first_m = (
-        Membership.objects
-        .select_related('entreprise', 'default_succursale')
-        .filter(user_id=user.id, is_active=True)
-        .order_by('entreprise_id', 'id')
-        .first()
-    )
+    from users.services.membership_context import get_primary_membership
+
+    first_m = get_primary_membership(user, request)
     _add_context_to_token(refresh, first_m)
 
     if api_settings.UPDATE_LAST_LOGIN:

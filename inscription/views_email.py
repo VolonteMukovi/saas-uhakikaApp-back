@@ -1,5 +1,7 @@
 """Endpoints vérification d'e-mail."""
+from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.http import HttpResponseRedirect
 from django.utils.translation import gettext as _
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import serializers, status
@@ -8,10 +10,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from inscription.services.auth_response import build_jwt_login_response
+from inscription.services.email_errors import message_erreur_envoi_email
 from inscription.services.email_messaging import envoyer_email_verification
 from inscription.services.email_responses import build_reponse_attente_verification, build_reponse_email_verifie
 from inscription.services.email_verification import (
     ErreurVerificationEmail,
+    build_frontend_url,
+    build_frontend_verification_url,
     confirmer_email_avec_jeton,
     modifier_email_en_attente,
 )
@@ -33,6 +38,22 @@ class ModifierEmailVerificationSerializer(serializers.Serializer):
     email = serializers.EmailField()
     nouvel_email = serializers.EmailField()
     password = serializers.CharField(required=False, allow_blank=True, write_only=True)
+
+
+class ConfirmerEmailRedirectView(APIView):
+    """
+    Point d'entrée GET depuis le lien e-mail.
+    Redirige vers la page frontend avec le jeton (ex. /fr/verify-email?token=...).
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        token = (request.GET.get('token') or '').strip()
+        if not token:
+            return HttpResponseRedirect(
+                build_frontend_url(getattr(settings, 'FRONTEND_VERIFY_EMAIL_PATH', '/verify-email'))
+            )
+        return HttpResponseRedirect(build_frontend_verification_url(token))
 
 
 class VerifierEmailView(APIView):
@@ -96,9 +117,19 @@ class RenvoyerVerificationView(APIView):
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
             )
 
+        if not result.get('envoye'):
+            return Response(
+                {
+                    'message': message_erreur_envoi_email(result.get('code')),
+                    'email_envoye': False,
+                    'code': result.get('code') or 'erreur_envoi',
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         return Response({
             'message': _('Un nouveau message de confirmation vient d\'être envoyé.'),
-            'email_envoye': bool(result.get('envoye')),
+            'email_envoye': True,
             'delai_renvoi_secondes': result.get('delai_renvoi_secondes', 60),
         })
 

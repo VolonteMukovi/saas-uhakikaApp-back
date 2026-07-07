@@ -101,6 +101,7 @@ class CreerEntrepriseMinimaleView(APIView):
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
+        http_status = status.HTTP_200_OK if result.get('mis_a_jour') else status.HTTP_201_CREATED
         tokens_payload = build_jwt_login_response(request.user, request, bootstrap=False)
         flow = build_etat_flow_saas(request.user, request)
 
@@ -115,5 +116,5 @@ class CreerEntrepriseMinimaleView(APIView):
                 'user': tokens_payload['user'],
                 'redirection': '/dashboard',
             },
-            status=status.HTTP_201_CREATED,
+            status=http_status,
         )

@@ -133,6 +133,10 @@ def exception_handler(exc, context):
     elif isinstance(data, dict):
         detail = _validation_errors_to_detail(data)
         extra = {'errors': data} if status_code == status.HTTP_400_BAD_REQUEST else None
+        if extra is not None:
+            for key in ('code', 'entreprise_id'):
+                if key in data:
+                    extra[key] = data[key]
     else:
         detail = str(data)
         extra = None

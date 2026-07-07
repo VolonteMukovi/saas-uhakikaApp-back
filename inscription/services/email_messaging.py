@@ -8,7 +8,19 @@ from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
 from django.utils.translation import gettext as _
 
+from inscription.models import EmailEnvoiLog
+from inscription.services.email_delivery import (
+    build_transactional_headers,
+    classifier_erreur_smtp,
+    creer_journal_email,
+    marquer_email_echec,
+    marquer_email_envoye,
+    resolve_from_email,
+    verification_deja_envoyee_recemment,
+    verifier_destinataire_resend,
+)
 from inscription.services.email_verification import (
+    build_frontend_url,
     build_verification_url,
     creer_jeton_verification,
     peut_renvoyer_verification,
@@ -17,59 +29,104 @@ from inscription.services.email_verification import (
 logger = logging.getLogger(__name__)
 
 
-def _envoyer_email(*, sujet: str, destinataire: str, template_txt: str, template_html: str, context: dict) -> bool:
+def _envoyer_email(
+    *,
+    sujet: str,
+    destinataire: str,
+    template_txt: str,
+    template_html: str,
+    context: dict,
+    email_type: str,
+    utilisateur=None,
+) -> tuple[bool, str | None, EmailEnvoiLog | None]:
     if not destinataire:
         logger.warning('Envoi e-mail ignoré : destinataire vide (%s)', sujet)
-        return False
+        return False, 'destinataire_vide', None
+
+    journal = creer_journal_email(
+        utilisateur=utilisateur,
+        type_email=email_type,
+        destinataire=destinataire,
+        sujet=sujet,
+    )
+    from_email = resolve_from_email()
+    code_bloque = verifier_destinataire_resend(destinataire, from_email=from_email)
+    if code_bloque:
+        marquer_email_echec(
+            journal,
+            code=code_bloque,
+            details='Expéditeur sandbox @resend.dev : destinataire non autorisé',
+        )
+        return False, code_bloque, journal
     try:
         text_body = render_to_string(template_txt, context)
         html_body = render_to_string(template_html, context)
         message = EmailMultiAlternatives(
             subject=sujet,
             body=text_body,
-            from_email=settings.DEFAULT_FROM_EMAIL,
+            from_email=from_email,
             to=[destinataire],
+            headers=build_transactional_headers(email_type=email_type, destinataire=destinataire),
         )
         message.attach_alternative(html_body, 'text/html')
         message.send(fail_silently=False)
-        return True
-    except Exception:
+        marquer_email_envoye(journal)
+        return True, None, journal
+    except Exception as exc:
         logger.exception('Échec envoi e-mail "%s" à %s', sujet, destinataire)
-        return False
+        detail = str(exc)
+        code = classifier_erreur_smtp(detail)
+        marquer_email_echec(journal, code=code, details=detail)
+        return False, code, journal
 
 
 def envoyer_email_verification(user, *, forcer: bool = False) -> dict:
     """
     Envoie l'e-mail de confirmation si autorisé.
-    Retourne { envoyé, token_clair?, delai_renvoi_secondes, code? }.
+    Retourne { envoyé, delai_renvoi_secondes, code? }.
     """
     if user.email_verifie:
         return {'envoye': False, 'code': 'deja_verifie', 'delai_renvoi_secondes': 0}
 
     if not forcer:
+        if verification_deja_envoyee_recemment(user):
+            return {
+                'envoye': True,
+                'code': 'deja_envoye',
+                'delai_renvoi_secondes': int(
+                    getattr(settings, 'EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS', 60)
+                ),
+            }
         ok, restant, code = peut_renvoyer_verification(user)
         if not ok:
             return {'envoye': False, 'code': code, 'delai_renvoi_secondes': restant}
 
-    token_clair, _ = creer_jeton_verification(user)
+    token_clair, _jeton = creer_jeton_verification(user)
     prenom = (user.first_name or user.username or '').strip()
     context = {
         'prenom': prenom or _('Utilisateur'),
         'verification_url': build_verification_url(token_clair),
         'validite_heures': int(getattr(settings, 'EMAIL_VERIFICATION_TOKEN_HOURS', 24)),
         'support_email': getattr(settings, 'SUPPORT_EMAIL', 'support@uhakikaapp.store'),
+        'site_url': getattr(settings, 'FRONTEND_BASE_URL', 'https://uhakikaapp.store'),
     }
-    envoye = _envoyer_email(
-        sujet=_('Confirmez votre adresse e-mail — UHAKIKAAPP'),
+    sujet = _('[UHAKIKAAPP] Confirmez votre adresse e-mail')
+    envoye, erreur, _journal = _envoyer_email(
+        sujet=sujet,
         destinataire=user.email,
         template_txt='emails/verification_email.txt',
         template_html='emails/verification_email.html',
         context=context,
+        email_type=EmailEnvoiLog.TYPE_VERIFICATION,
+        utilisateur=user,
     )
-    return {
+    result = {
         'envoye': envoye,
         'delai_renvoi_secondes': int(getattr(settings, 'EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS', 60)),
     }
+    if not envoye:
+        result['code'] = erreur or 'erreur_envoi'
+    return result
 
 
 def envoyer_email_bienvenue(user, *, entreprise, etat_licence: dict | None, limites_plan: dict | None) -> bool:
@@ -94,15 +151,19 @@ def envoyer_email_bienvenue(user, *, entreprise, etat_licence: dict | None, limi
         'jours_restants': (etat_licence or {}).get('jours_restants'),
         'utilisateurs_max': (limites_plan or {}).get('utilisateurs_max'),
         'fonctionnalites_cles': _fonctionnalites_plan(formule, limites_plan),
-        'dashboard_url': f"{getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')}{getattr(settings, 'FRONTEND_DASHBOARD_PATH', '/dashboard')}",
+        'dashboard_url': build_frontend_url(getattr(settings, 'FRONTEND_DASHBOARD_PATH', '/dashboard')),
         'support_email': getattr(settings, 'SUPPORT_EMAIL', 'support@uhakikaapp.store'),
+        'site_url': getattr(settings, 'FRONTEND_BASE_URL', 'https://uhakikaapp.store'),
     }
-    envoye = _envoyer_email(
-        sujet=_('Bienvenue sur UHAKIKAAPP — Votre espace est prêt'),
+    sujet = _('[UHAKIKAAPP] Bienvenue — Votre espace est prêt')
+    envoye, _erreur, _journal = _envoyer_email(
+        sujet=sujet,
         destinataire=user.email,
         template_txt='emails/welcome_email.txt',
         template_html='emails/welcome_email.html',
         context=context,
+        email_type=EmailEnvoiLog.TYPE_BIENVENUE,
+        utilisateur=user,
     )
     if envoye:
         user.message_bienvenue_envoye = True

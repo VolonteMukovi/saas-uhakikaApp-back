@@ -26,6 +26,7 @@ from inscription.serializers import (
 
 )
 
+from inscription.services.email_errors import message_erreur_envoi_email
 from inscription.services.email_responses import build_reponse_attente_verification
 from inscription.services.email_messaging import envoyer_email_verification
 from inscription.services.auth_response import build_jwt_login_response
@@ -116,17 +117,32 @@ def _build_statut_onboarding(user, request=None):
 
 
 
+def _reponse_attente_apres_envoi(user, *, connexion_google: bool, est_nouveau_compte: bool, message=None):
+    result = envoyer_email_verification(user, forcer=not est_nouveau_compte)
+    body = build_reponse_attente_verification(
+        user,
+        connexion_google=connexion_google,
+        est_nouveau_compte=est_nouveau_compte,
+        email_envoye=bool(result.get('envoye')),
+        email_erreur=result.get('code'),
+    )
+    if message:
+        body['message'] = message
+    elif not result.get('envoye'):
+        from inscription.services.email_errors import message_erreur_envoi_email
+        body['message'] = message_erreur_envoi_email(result.get('code'))
+    return body
+
+
 def _reponse_auth_inscription(user, request, est_nouveau_compte=False, message=None):
 
     if not getattr(user, 'email_verifie', False):
-        envoyer_email_verification(user, forcer=not est_nouveau_compte)
-        body = build_reponse_attente_verification(
+        return _reponse_attente_apres_envoi(
             user,
             connexion_google=True,
             est_nouveau_compte=est_nouveau_compte,
+            message=message,
         )
-        body['message'] = message or body['message']
-        return body
 
     tokens_payload = build_jwt_login_response(user, request)
     bootstrap = tokens_payload.pop('bootstrap', None)
@@ -176,8 +192,9 @@ class InscriptionCompteView(APIView):
 
         user = serializer.save()
 
-        envoyer_email_verification(user, forcer=True)
-        body = build_reponse_attente_verification(user, connexion_google=False, est_nouveau_compte=True)
+        body = _reponse_attente_apres_envoi(
+            user, connexion_google=False, est_nouveau_compte=True,
+        )
         return Response(body, status=status.HTTP_201_CREATED)
 
 

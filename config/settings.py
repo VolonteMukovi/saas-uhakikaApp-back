@@ -267,7 +267,7 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# === E-mail transactionnel (Resend SMTP) ===
+# === E-mail transactionnel (Brevo SMTP) ===
 EMAIL_BACKEND = config("EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend")
 EMAIL_HOST = config("EMAIL_HOST", default="")
 EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
@@ -276,11 +276,19 @@ EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="UhakikaApp <noreply@uhakikaapp.store>")
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
+EMAIL_TRANSACTIONAL_FROM = config("EMAIL_TRANSACTIONAL_FROM", default="").strip()
 
 FRONTEND_BASE_URL = config("FRONTEND_BASE_URL", default="http://localhost:5173").rstrip("/")
+# Préfixe i18n du frontend Next.js (ex. /fr → /fr/verify-email)
+FRONTEND_LOCALE_PREFIX = config("FRONTEND_LOCALE_PREFIX", default="/fr").rstrip("/")
 FRONTEND_VERIFY_EMAIL_PATH = config("FRONTEND_VERIFY_EMAIL_PATH", default="/verify-email")
 FRONTEND_DASHBOARD_PATH = config("FRONTEND_DASHBOARD_PATH", default="/dashboard")
+# URL publique de l'API (lien du bouton e-mail → redirection vers le frontend avec ?token=)
+PUBLIC_API_BASE_URL = config("PUBLIC_API_BASE_URL", default="http://127.0.0.1:8000").rstrip("/")
+EMAIL_VERIFICATION_LINK_VIA_API = config("EMAIL_VERIFICATION_LINK_VIA_API", default=True, cast=bool)
 SUPPORT_EMAIL = config("SUPPORT_EMAIL", default="support@uhakikaapp.store")
+# Legacy Resend sandbox (ignoré avec Brevo) — onboarding@resend.dev uniquement
+RESEND_SANDBOX_OWNER_EMAIL = config("RESEND_SANDBOX_OWNER_EMAIL", default="").strip().lower()
 
 EMAIL_VERIFICATION_TOKEN_HOURS = config("EMAIL_VERIFICATION_TOKEN_HOURS", default=24, cast=int)
 EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = config("EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS", default=60, cast=int)

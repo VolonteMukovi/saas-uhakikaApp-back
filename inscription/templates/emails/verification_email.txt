@@ -1,15 +1,14 @@
 Bonjour {{ prenom }},
 
-Merci de vous être inscrit sur UHAKIKAAPP.
-
-Pour sécuriser votre compte et finaliser votre inscription, veuillez confirmer votre adresse e-mail en ouvrant le lien suivant :
+Pour activer votre compte UHAKIKAAPP, veuillez confirmer votre adresse e-mail en ouvrant le lien ci-dessous :
 
 {{ verification_url }}
 
-Ce lien est personnel et expire après {{ validite_heures }} heures.
+Ce lien est personnel, à usage unique, et expire dans {{ validite_heures }} heures.
 
-Si vous n'êtes pas à l'origine de cette inscription, vous pouvez ignorer ce message.
+Si vous n'avez pas créé de compte, ignorez ce message.
 
-L'équipe UHAKIKAAPP
-La certitude d'une gestion fiable et maîtrisée.
+—
+UHAKIKAAPP (message transactionnel)
 {{ support_email }}
+{{ site_url }}

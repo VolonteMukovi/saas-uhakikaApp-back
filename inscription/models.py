@@ -55,3 +55,42 @@ class EmailVerificationToken(models.Model):
 
     def __str__(self):
         return f'Verif email user={self.utilisateur_id} ({self.email_cible})'
+
+
+class EmailEnvoiLog(models.Model):
+    """Journal des envois e-mail transactionnels (diagnostic / anti-doublon)."""
+
+    TYPE_VERIFICATION = 'verification_email'
+    TYPE_BIENVENUE = 'welcome_email'
+
+    STATUT_PREPARE = 'prepare'
+    STATUT_ENVOYE = 'envoye'
+    STATUT_ECHEC = 'echec'
+
+    utilisateur = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='journal_emails',
+        null=True,
+        blank=True,
+    )
+    type_email = models.CharField(max_length=32, db_index=True)
+    destinataire = models.EmailField()
+    sujet = models.CharField(max_length=255, blank=True)
+    statut = models.CharField(max_length=20, default=STATUT_PREPARE, db_index=True)
+    code_erreur = models.CharField(max_length=64, blank=True)
+    details = models.TextField(blank=True)
+    cree_le = models.DateTimeField(auto_now_add=True)
+    envoye_le = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-cree_le']
+        indexes = [
+            models.Index(fields=['utilisateur', 'type_email', '-cree_le']),
+            models.Index(fields=['destinataire', 'type_email', '-cree_le']),
+        ]
+        verbose_name = 'Journal envoi e-mail'
+        verbose_name_plural = 'Journal envois e-mail'
+
+    def __str__(self):
+        return f'{self.type_email} → {self.destinataire} ({self.statut})'

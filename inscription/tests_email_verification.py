@@ -52,7 +52,7 @@ class EmailVerificationTests(APITestCase):
         self.assertFalse(created.is_active)
 
     def test_verification_active_le_compte_et_retourne_tokens(self):
-        token, _ = creer_jeton_verification(self.user)
+        token, _jeton = creer_jeton_verification(self.user)
         resp = self.client.post('/api/inscription/verifier-email/', {'token': token}, format='json')
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertTrue(resp.data['email_verifie'])
@@ -76,6 +76,49 @@ class EmailVerificationTests(APITestCase):
         with self.assertRaises(ErreurVerificationEmail) as ctx:
             confirmer_email_avec_jeton(token)
         self.assertEqual(ctx.exception.code, 'token_expire')
+
+    @override_settings(
+        FRONTEND_LOCALE_PREFIX='/fr',
+        PUBLIC_API_BASE_URL='https://api.uhakikaapp.store',
+        EMAIL_VERIFICATION_LINK_VIA_API=True,
+    )
+    def test_lien_email_passe_par_api_avec_locale(self):
+        from inscription.services.email_verification import build_verification_url
+
+        url = build_verification_url('abc123')
+        self.assertTrue(url.startswith('https://api.uhakikaapp.store/api/inscription/confirmer-email/?token='))
+
+    def test_lien_local_utilise_frontend_sans_ip(self):
+        from inscription.services.email_verification import build_verification_url
+
+        with self.settings(
+            PUBLIC_API_BASE_URL='http://127.0.0.1:8000',
+            FRONTEND_BASE_URL='http://localhost:3000',
+            FRONTEND_LOCALE_PREFIX='/fr',
+            EMAIL_VERIFICATION_LINK_VIA_API=True,
+        ):
+            url = build_verification_url('abc123')
+        self.assertIn('localhost:3000/fr/verify-email?token=', url)
+        self.assertNotIn('127.0.0.1', url)
+
+    @override_settings(
+        DEFAULT_FROM_EMAIL='UhakikaApp <onboarding@resend.dev>',
+        RESEND_SANDBOX_OWNER_EMAIL='owner@test.com',
+    )
+    def test_sandbox_resend_bloque_autre_destinataire(self):
+        from inscription.services.email_delivery import verifier_destinataire_resend
+
+        self.assertEqual(
+            verifier_destinataire_resend('other@test.com'),
+            'destinataire_sandbox_resend',
+        )
+        self.assertIsNone(verifier_destinataire_resend('owner@test.com'))
+
+    @override_settings(FRONTEND_LOCALE_PREFIX='/fr', FRONTEND_BASE_URL='https://app.uhakikaapp.store')
+    def test_redirect_confirmer_email_vers_frontend_avec_token(self):
+        resp = self.client.get('/api/inscription/confirmer-email/?token=jeton-test')
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp['Location'], 'https://app.uhakikaapp.store/fr/verify-email?token=jeton-test')
 
     @patch('inscription.services.welcome_email.envoyer_email_bienvenue')
     def test_bienvenue_declenche_apres_configuration(self, mock_welcome):
