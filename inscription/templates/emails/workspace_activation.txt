@@ -1,0 +1,15 @@
+Bonjour {{ prenom }},
+
+Votre profil et votre entreprise {{ entreprise_nom }} sont maintenant configurés sur UHAKIKAAPP.
+
+Votre essai {{ plan_nom }} est actif. Vous pouvez gérer vos ventes, votre stock, vos clients et votre caisse.
+
+Pour accéder à votre espace, cliquez sur le lien ci-dessous :
+
+{{ activation_url }}
+
+Ce lien est personnel et expire dans {{ validite_jours }} jours.
+
+Si vous n'avez pas demandé cet accès, ignorez ce message.
+
+UHAKIKAAPP — {{ support_email }}

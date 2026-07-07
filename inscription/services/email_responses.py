@@ -39,16 +39,23 @@ def build_reponse_attente_verification(
 
 
 def build_reponse_email_verifie(user, tokens_payload: dict) -> dict:
-    dashboard = getattr(settings, 'FRONTEND_DASHBOARD_PATH', '/dashboard')
+    from inscription.services.onboarding_status import (
+        chemin_redirection_pour_etape,
+        resoudre_next_step,
+    )
+
+    next_step = resoudre_next_step(user)
+    onboarding_path = chemin_redirection_pour_etape(next_step)
     return {
         'success': True,
         'code': 'email_verifie',
         'email_verifie': True,
         'message': _(
             'Adresse e-mail confirmée avec succès. '
-            'Bienvenue dans UHAKIKAAPP. Complétez maintenant votre profil et les informations de votre entreprise.'
+            'Poursuivez la configuration de votre profil et de votre entreprise.'
         ),
-        'redirection': dashboard,
+        'redirection': onboarding_path,
+        'next_step': next_step,
         'tokens': {
             'refresh': tokens_payload['refresh'],
             'access': tokens_payload['access'],

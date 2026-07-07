@@ -21,6 +21,7 @@ METHODES_LECTURE = frozenset({'GET', 'HEAD', 'OPTIONS'})
 CHEMINS_EXEMPTES_PREFIXES = (
     '/api/auth/',
     '/api/inscription/',
+    '/api/onboarding/',
     '/admin/',
     '/swagger',
     '/redoc/',

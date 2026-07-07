@@ -20,6 +20,7 @@ from inscription.services.email_verification import (
     confirmer_email_avec_jeton,
     modifier_email_en_attente,
 )
+from inscription.services.onboarding_status import build_onboarding_status
 from inscription.views import _build_statut_onboarding
 from inscription.serializers import StatutOnboardingSerializer
 
@@ -75,13 +76,15 @@ class VerifierEmailView(APIView):
             body['code'] = 'deja_verifie'
             body['message'] = _('Votre adresse e-mail a déjà été confirmée. Vous pouvez vous connecter.')
             statut = _build_statut_onboarding(user, request)
-            body['onboarding'] = StatutOnboardingSerializer(statut).data
+            body['onboarding'] = build_onboarding_status(user, request)
+            body['onboarding_legacy'] = StatutOnboardingSerializer(statut).data
             return Response(body, status=status.HTTP_200_OK)
 
         tokens_payload = build_jwt_login_response(user, request)
         body = build_reponse_email_verifie(user, tokens_payload)
         statut = _build_statut_onboarding(user, request)
-        body['onboarding'] = StatutOnboardingSerializer(statut).data
+        body['onboarding'] = build_onboarding_status(user, request)
+        body['onboarding_legacy'] = StatutOnboardingSerializer(statut).data
         return Response(body, status=status.HTTP_200_OK)
 
 

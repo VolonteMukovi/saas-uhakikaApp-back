@@ -9,12 +9,30 @@ from abonnements.models import AbonnementEntreprise
 from abonnements.services.limites import build_resume_limites
 from abonnements.services.licence import build_etat_licence
 from inscription.services.entreprise_saas import entreprise_est_configuree
+from inscription.services.onboarding_status import (
+    NEXT_ACTIVATION,
+    NEXT_COMPANY,
+    NEXT_DASHBOARD,
+    NEXT_PROFILE,
+    NEXT_REVIEW,
+    NEXT_VERIFY_EMAIL,
+    NEXT_WELCOME,
+    build_onboarding_status,
+    chemin_redirection_pour_etape,
+    onboarding_metier_autorise,
+    resoudre_next_step,
+)
 from inscription.services.profil_saas import profil_est_complet
 
 # Statuts flow alignés sur FRONTEND_GUIDE_SAAS_FLOW_UHAKIKAAPP.md
 STATUT_EMAIL_NON_VERIFIEE = 'en_attente_verification_email'
 STATUT_PRE_INSCRIPTION = 'pre_inscription'
 STATUT_CREER_ENTREPRISE = 'creer_entreprise_minimale'
+STATUT_ONBOARDING_PROFIL = 'onboarding_profil'
+STATUT_ONBOARDING_ENTREPRISE = 'onboarding_entreprise'
+STATUT_ONBOARDING_REVIEW = 'onboarding_review'
+STATUT_ONBOARDING_ACTIVATION = 'onboarding_activation'
+STATUT_ONBOARDING_WELCOME = 'onboarding_welcome'
 STATUT_DASHBOARD_ACTIF = 'dashboard_actif'
 STATUT_DASHBOARD_CONFIG_INCOMPLETE = 'dashboard_configuration_incomplete'
 STATUT_DASHBOARD_LICENCE_EXPIREE = 'dashboard_licence_expiree'
@@ -56,6 +74,10 @@ def build_etat_flow_saas(user, request=None) -> dict:
     config_ok = entreprise_est_configuree(ent) if ent else False
     profil_ok = profil_est_complet(user) if user and user.is_authenticated else False
     email_ok = bool(user and user.is_authenticated and getattr(user, 'email_verifie', False))
+    onboarding_ok = bool(user and getattr(user, 'onboarding_complete', False))
+    workspace_ok = bool(user and getattr(user, 'workspace_activated', False))
+    welcome_ok = bool(user and getattr(user, 'welcome_seen', False))
+    next_step = resoudre_next_step(user, request) if user and user.is_authenticated else NEXT_VERIFY_EMAIL
 
     licence_active = bool(etat_licence and etat_licence.get('est_actif'))
     en_attente_manuelle = (
@@ -73,27 +95,40 @@ def build_etat_flow_saas(user, request=None) -> dict:
         statut_flow = STATUT_PRE_INSCRIPTION
     elif not email_ok:
         statut_flow = STATUT_EMAIL_NON_VERIFIEE
+    elif next_step == NEXT_PROFILE:
+        statut_flow = STATUT_ONBOARDING_PROFIL
+    elif next_step == NEXT_COMPANY:
+        statut_flow = STATUT_ONBOARDING_ENTREPRISE
+    elif next_step == NEXT_REVIEW:
+        statut_flow = STATUT_ONBOARDING_REVIEW
+    elif next_step == NEXT_ACTIVATION:
+        statut_flow = STATUT_ONBOARDING_ACTIVATION
+    elif next_step == NEXT_WELCOME:
+        statut_flow = STATUT_ONBOARDING_WELCOME
     elif not a_entreprise:
         statut_flow = STATUT_CREER_ENTREPRISE
-    elif en_attente_manuelle:
+    elif next_step == NEXT_DASHBOARD and en_attente_manuelle:
         statut_flow = STATUT_PENDING_MANUAL
-    elif licence_expiree or not licence_active:
+    elif next_step == NEXT_DASHBOARD and (licence_expiree or not licence_active):
         statut_flow = STATUT_DASHBOARD_LICENCE_EXPIREE
+    elif next_step == NEXT_DASHBOARD:
+        statut_flow = STATUT_DASHBOARD_ACTIF
     elif not config_ok:
         statut_flow = STATUT_DASHBOARD_CONFIG_INCOMPLETE
     elif not profil_ok:
         statut_flow = STATUT_PROFIL_INCOMPLET
     else:
-        statut_flow = STATUT_DASHBOARD_ACTIF
+        statut_flow = STATUT_ONBOARDING_PROFIL
 
-    # Dashboard accessible après vérification e-mail + entreprise minimale
-    acces_dashboard = bool(user and user.is_authenticated and email_ok and a_entreprise)
+    # Dashboard uniquement après onboarding complet + activation + écran bienvenue
+    acces_dashboard = bool(
+        user and user.is_authenticated and email_ok and onboarding_ok
+        and workspace_ok and welcome_ok
+    )
 
     operations_metier = (
-        acces_dashboard
+        onboarding_metier_autorise(user, request)
         and licence_active
-        and config_ok
-        and profil_ok
         and not en_attente_manuelle
     )
 
@@ -102,9 +137,26 @@ def build_etat_flow_saas(user, request=None) -> dict:
 
     if user and user.is_authenticated and not email_ok:
         messages.append(_(
-            'Confirmez votre adresse e-mail pour accéder à votre tableau de bord.'
+            'Confirmez votre adresse e-mail pour poursuivre la configuration de votre espace.'
         ))
-        actions.append({'code': 'verifier_email', 'url': '/verify-email'})
+        actions.append({'code': 'verifier_email', 'url': chemin_redirection_pour_etape(NEXT_VERIFY_EMAIL)})
+    elif next_step == NEXT_PROFILE:
+        messages.append(_('Complétez votre profil pour continuer la configuration.'))
+        actions.append({'code': 'onboarding_profil', 'url': chemin_redirection_pour_etape(NEXT_PROFILE)})
+    elif next_step == NEXT_COMPANY:
+        messages.append(_('Complétez les informations de votre entreprise.'))
+        actions.append({'code': 'onboarding_entreprise', 'url': chemin_redirection_pour_etape(NEXT_COMPANY)})
+    elif next_step == NEXT_REVIEW:
+        messages.append(_('Vérifiez votre configuration avant de finaliser.'))
+        actions.append({'code': 'onboarding_review', 'url': chemin_redirection_pour_etape(NEXT_REVIEW)})
+    elif next_step == NEXT_ACTIVATION:
+        messages.append(_(
+            'Consultez votre boîte e-mail et cliquez sur le lien pour activer votre espace.'
+        ))
+        actions.append({'code': 'onboarding_activation', 'url': chemin_redirection_pour_etape(NEXT_ACTIVATION)})
+    elif next_step == NEXT_WELCOME:
+        messages.append(_('Bienvenue sur UHAKIKAAPP ! Finalisez votre accueil.'))
+        actions.append({'code': 'onboarding_welcome', 'url': chemin_redirection_pour_etape(NEXT_WELCOME)})
     elif not a_entreprise:
         messages.append(_(
             'Créez votre espace entreprise pour accéder au dashboard.'
@@ -164,7 +216,7 @@ def build_etat_flow_saas(user, request=None) -> dict:
             'message': messages[-1] if messages else '',
             'action': {'code': 'renouveler', 'url': '/subscription/renew'},
         })
-    if a_entreprise and not config_ok:
+    if a_entreprise and not config_ok and onboarding_ok:
         bannieres.append({
             'code': 'configuration_incomplete',
             'niveau': 'warning',
@@ -174,7 +226,7 @@ def build_etat_flow_saas(user, request=None) -> dict:
             ),
             'action': {'code': 'completer_entreprise', 'url': '/company/setup'},
         })
-    if user and user.is_authenticated and not profil_ok:
+    if user and user.is_authenticated and not profil_ok and onboarding_ok:
         bannieres.append({
             'code': 'profil_incomplet',
             'niveau': 'info',
@@ -182,6 +234,11 @@ def build_etat_flow_saas(user, request=None) -> dict:
             'message': _('Ajoutez votre prénom et nom pour débloquer certaines actions.'),
             'action': {'code': 'completer_profil', 'url': '/profile/setup'},
         })
+
+    onboarding_status = (
+        build_onboarding_status(user, request)
+        if user and user.is_authenticated else {}
+    )
 
     if etat_licence and etat_licence.get('est_essai') and licence_active:
         jours = etat_licence.get('jours_restants')
@@ -205,12 +262,24 @@ def build_etat_flow_saas(user, request=None) -> dict:
         'peut_completer_profil': bool(user and user.is_authenticated),
         'pages_onboarding_autorisees': [
             '/verify-email',
+            '/onboarding',
+            '/onboarding/profile',
+            '/onboarding/company',
+            '/onboarding/review',
+            '/onboarding/activation',
+            '/welcome',
             '/company/setup',
             '/profile/setup',
             '/subscription/manual-pending',
             '/subscription/renew',
             '/onboarding/company-minimal',
         ],
+        'onboarding_completed': onboarding_ok,
+        'workspace_activated': workspace_ok,
+        'welcome_seen': welcome_ok,
+        'next_step': next_step,
+        'redirection': chemin_redirection_pour_etape(next_step),
+        'onboarding': onboarding_status,
         'bannieres': bannieres,
         'etat_licence': etat_licence,
         'limites_plan': limites,
@@ -223,6 +292,9 @@ def build_etat_flow_saas(user, request=None) -> dict:
             'licence_active': licence_active,
             'configuration_entreprise': config_ok,
             'profil_complet': profil_ok,
+            'onboarding_complete': onboarding_ok,
+            'workspace_activated': workspace_ok,
+            'welcome_seen': welcome_ok,
         },
         'email_verifie': email_ok,
     }

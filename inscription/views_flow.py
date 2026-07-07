@@ -15,6 +15,7 @@ from inscription.services.auth_response import build_jwt_login_response
 from inscription.services.bootstrap_saas import assurer_contexte_initial_utilisateur
 from inscription.services.entreprise_saas import creer_entreprise_minimale
 from inscription.services.flow_saas import build_etat_flow_saas
+from inscription.services.onboarding_status import build_onboarding_status
 
 
 class FlowSaasView(APIView):
@@ -114,7 +115,7 @@ class CreerEntrepriseMinimaleView(APIView):
                     'access': tokens_payload['access'],
                 },
                 'user': tokens_payload['user'],
-                'redirection': '/dashboard',
+                'redirection': build_onboarding_status(request.user, request).get('redirection', '/onboarding'),
             },
             status=http_status,
         )

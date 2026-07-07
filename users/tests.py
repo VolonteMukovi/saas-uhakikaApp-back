@@ -1,9 +1,30 @@
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from stock.models import Entreprise
 from users.models import Membership
+
+
+@override_settings(ALLOWED_HOSTS=["testserver", "localhost", "127.0.0.1"])
+class TokenRefreshTests(APITestCase):
+    def test_refresh_utilisateur_supprime_retourne_401(self):
+        User = get_user_model()
+        user = User.objects.create_user(
+            username='deleted_refresh',
+            email='deleted@example.com',
+            password='secretpass123',
+            email_verifie=True,
+        )
+        refresh = str(RefreshToken.for_user(user))
+        user_id = user.id
+        user.delete()
+        self.assertFalse(User.objects.filter(pk=user_id).exists())
+
+        resp = self.client.post('/api/auth/refresh/', {'refresh': refresh}, format='json')
+        self.assertEqual(resp.status_code, 401, resp.content)
+        self.assertIn('detail', resp.json())
 
 
 @override_settings(ALLOWED_HOSTS=["testserver", "localhost", "127.0.0.1"])

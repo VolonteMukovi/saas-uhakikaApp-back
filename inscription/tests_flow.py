@@ -20,6 +20,12 @@ class FlowSaasTests(TestCase):
             password='testpass123',
             role='admin',
             email='flow@test.com',
+            email_verifie=True,
+            first_name='Flow',
+            last_name='User',
+            onboarding_complete=True,
+            workspace_activated=True,
+            welcome_seen=True,
         )
 
     def test_flow_sans_entreprise_bootstrap_auto(self):
@@ -41,7 +47,7 @@ class FlowSaasTests(TestCase):
             'source_activation': 'essai_gratuit',
         }, format='json')
         self.assertEqual(resp.status_code, 201)
-        self.assertTrue(resp.data['acces_dashboard'])
+        self.assertFalse(resp.data['acces_dashboard'])
         self.assertFalse(resp.data['configuration_entreprise_complete'])
         self.assertFalse(resp.data['operations_metier_autorisees'])
         self.assertIn('tokens', resp.data)

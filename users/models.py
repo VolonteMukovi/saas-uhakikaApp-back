@@ -42,6 +42,22 @@ class User(AbstractUser):
         default=False,
         help_text="True après envoi unique de l'e-mail de bienvenue post-configuration.",
     )
+    onboarding_complete = models.BooleanField(
+        default=False,
+        help_text="True lorsque l'utilisateur a finalisé le wizard d'onboarding (étape vérification).",
+    )
+    workspace_activated = models.BooleanField(
+        default=False,
+        help_text="True après clic sur le lien d'activation finale de l'espace (e-mail post-onboarding).",
+    )
+    welcome_seen = models.BooleanField(
+        default=False,
+        help_text="True après affichage unique de l'écran de bienvenue avant le premier accès dashboard.",
+    )
+    email_activation_envoye = models.BooleanField(
+        default=False,
+        help_text="True après envoi de l'e-mail d'activation finale de l'espace.",
+    )
 
     objects = UserManager()
 

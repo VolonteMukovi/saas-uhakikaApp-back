@@ -57,11 +57,39 @@ class EmailVerificationToken(models.Model):
         return f'Verif email user={self.utilisateur_id} ({self.email_cible})'
 
 
+class WorkspaceActivationToken(models.Model):
+    """Jeton d'activation finale de l'espace (post-onboarding, lien e-mail bienvenue)."""
+
+    utilisateur = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='jetons_activation_espace',
+    )
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    cree_le = models.DateTimeField(auto_now_add=True)
+    expire_le = models.DateTimeField()
+    utilise_le = models.DateTimeField(null=True, blank=True)
+    invalide = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-cree_le']
+        indexes = [
+            models.Index(fields=['utilisateur', '-cree_le']),
+            models.Index(fields=['expire_le']),
+        ]
+        verbose_name = 'Jeton activation espace'
+        verbose_name_plural = 'Jetons activation espace'
+
+    def __str__(self):
+        return f'Activation espace user={self.utilisateur_id}'
+
+
 class EmailEnvoiLog(models.Model):
     """Journal des envois e-mail transactionnels (diagnostic / anti-doublon)."""
 
     TYPE_VERIFICATION = 'verification_email'
     TYPE_BIENVENUE = 'welcome_email'
+    TYPE_ACTIVATION_ESPACE = 'workspace_activation'
 
     STATUT_PREPARE = 'prepare'
     STATUT_ENVOYE = 'envoye'

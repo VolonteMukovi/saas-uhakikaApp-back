@@ -214,3 +214,50 @@ def _fonctionnalites_plan(formule: dict, limites_plan: dict | None) -> list[str]
             _('Accès à toutes les fonctionnalités disponibles'),
         ]
     return [_('Fonctionnalités selon votre formule active')]
+
+
+def envoyer_email_activation_espace(
+    user,
+    *,
+    entreprise,
+    etat_licence: dict | None,
+    limites_plan: dict | None,
+    forcer: bool = False,
+) -> bool:
+    """E-mail final post-onboarding — lien vers l'écran de bienvenue (pas re-vérification e-mail)."""
+    if user.email_activation_envoye and not forcer:
+        return False
+    if not getattr(user, 'onboarding_complete', False):
+        return False
+
+    from inscription.services.workspace_activation import (
+        build_activation_espace_url,
+        creer_jeton_activation_espace,
+    )
+
+    token_clair, _jeton = creer_jeton_activation_espace(user)
+    jours = (etat_licence or {}).get('jours_restants') or 60
+    context = {
+        'prenom': (user.first_name or user.username or '').strip() or _('Utilisateur'),
+        'entreprise_nom': getattr(entreprise, 'nom', '') or '',
+        'plan_nom': (etat_licence or {}).get('formule_nom') or _('Découverte Pro'),
+        'jours_essai': jours,
+        'activation_url': build_activation_espace_url(token_clair),
+        'validite_jours': int(getattr(settings, 'WORKSPACE_ACTIVATION_TOKEN_DAYS', 7)),
+        'support_email': getattr(settings, 'SUPPORT_EMAIL', 'support@uhakikaapp.store'),
+        'site_url': getattr(settings, 'FRONTEND_BASE_URL', 'https://uhakikaapp.store'),
+    }
+    sujet = _('[UHAKIKAAPP] Votre espace est prêt — accédez à UHAKIKAAPP')
+    envoye, _erreur, _journal = _envoyer_email(
+        sujet=sujet,
+        destinataire=user.email,
+        template_txt='emails/workspace_activation.txt',
+        template_html='emails/workspace_activation.html',
+        context=context,
+        email_type=EmailEnvoiLog.TYPE_ACTIVATION_ESPACE,
+        utilisateur=user,
+    )
+    if envoye:
+        user.email_activation_envoye = True
+        user.save(update_fields=['email_activation_envoye'])
+    return envoye

@@ -6,6 +6,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework import serializers as drf_serializers
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.settings import api_settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import update_last_login
@@ -156,12 +157,15 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         primary_entreprise = entreprises[0]["entreprise"] if entreprises else None
         user_data["entreprise"] = primary_entreprise
         user_data["enterprises"] = entreprises
-        # Succursales du premier membership (contexte JWT initial) — même structure que GET .../succursales/
         user_data["succursales"] = (
             _succursales_for_membership(first_m) if first_m else []
         )
         user_data["default_succursale_id"] = first_m.default_succursale_id if first_m else None
+        from inscription.services.onboarding_status import build_onboarding_status
+        user_data["onboarding"] = build_onboarding_status(self.user)
         data["user"] = user_data
+        data["onboarding"] = user_data["onboarding"]
+        data["redirection"] = user_data["onboarding"].get("redirection")
         return data
 
 
@@ -217,7 +221,14 @@ class CustomTokenRefreshSerializer(TokenRefreshSerializer):
                 raise drf_serializers.ValidationError(
                     {"detail": self.error_messages["session_expired"]}
                 )
-        return super().validate(attrs)
+        User = get_user_model()
+        try:
+            return super().validate(attrs)
+        except User.DoesNotExist:
+            raise AuthenticationFailed(
+                _('Utilisateur introuvable. Veuillez vous reconnecter.'),
+                code='user_not_found',
+            )
 
 
 class CustomTokenRefreshView(TokenRefreshView):

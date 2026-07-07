@@ -13,6 +13,16 @@ from inscription.views_email import (
     RenvoyerVerificationView,
     VerifierEmailView,
 )
+from inscription.views_onboarding import (
+    ActiverEspaceRedirectView,
+    OnboardingActivateWorkspaceView,
+    OnboardingCompanyView,
+    OnboardingCompleteView,
+    OnboardingMarkWelcomeSeenView,
+    OnboardingProfileView,
+    OnboardingResendActivationView,
+    OnboardingStatusView,
+)
 
 urlpatterns = [
     path('inscription/compte/', InscriptionCompteView.as_view(), name='inscription-compte'),
@@ -26,4 +36,12 @@ urlpatterns = [
     path('inscription/flow/', FlowSaasView.as_view(), name='inscription-flow'),
     path('inscription/bootstrap/', BootstrapSaasView.as_view(), name='inscription-bootstrap'),
     path('inscription/entreprise-minimale/', CreerEntrepriseMinimaleView.as_view(), name='inscription-entreprise-minimale'),
+    path('onboarding/status/', OnboardingStatusView.as_view(), name='onboarding-status'),
+    path('onboarding/profile/', OnboardingProfileView.as_view(), name='onboarding-profile'),
+    path('onboarding/company/', OnboardingCompanyView.as_view(), name='onboarding-company'),
+    path('onboarding/complete/', OnboardingCompleteView.as_view(), name='onboarding-complete'),
+    path('onboarding/mark-welcome-seen/', OnboardingMarkWelcomeSeenView.as_view(), name='onboarding-mark-welcome-seen'),
+    path('onboarding/activate-workspace/', OnboardingActivateWorkspaceView.as_view(), name='onboarding-activate-workspace'),
+    path('onboarding/resend-activation/', OnboardingResendActivationView.as_view(), name='onboarding-resend-activation'),
+    path('onboarding/activer-espace/', ActiverEspaceRedirectView.as_view(), name='onboarding-activer-espace'),
 ]

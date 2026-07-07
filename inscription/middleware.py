@@ -19,10 +19,12 @@ class ControleConfigurationMetierMiddleware:
 
         bloquer, code, detail = doit_bloquer_configuration_metier(request)
         if bloquer:
+            title = _('Configuration incomplète')
+            if code == 'onboarding_incomplet':
+                from inscription.services.onboarding_status import message_blocage_onboarding
+                title, detail = message_blocage_onboarding(request.user, request)
             body = {
-                'type': f'urn:uhakika:problem:{code}',
-                'title': _('Configuration incomplète'),
-                'status': 403,
+                'title': title,
                 'detail': detail,
                 'code': code,
                 'action_recommandee': 'completer_configuration',
