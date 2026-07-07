@@ -48,6 +48,7 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "config.http.correlation.CorrelationIdMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "config.middleware.AcceptLanguageMiddleware",
     "config.http.versioning.ApiVersionMiddleware",
@@ -260,10 +261,22 @@ LOCALE_PATHS = [BASE_DIR / "locale"]
 SUPPORTED_LANG_CODES = ["fr", "en"]
 DEFAULT_LANG_FOR_API = "fr"
 
-STATIC_URL = "static/"
+# --- FICHIERS STATIQUES (CSS, JS, Admin) ---
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
+# --- FICHIERS MÉDIAS (photos, documents uploadés) ---
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
