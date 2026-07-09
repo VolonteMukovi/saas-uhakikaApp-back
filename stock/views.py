@@ -16,8 +16,10 @@ from .models import (
     SousTypeArticle,
     Unite,
     Article,
+    ConditionnementArticle,
     Entree,
     LigneEntree,
+    PrixConditionnementEntree,
     Stock,
     Sortie,
     LigneSortie,
@@ -796,11 +798,31 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 
                 # Conversion sÃ©curisÃ©e des donnÃ©es
                 try:
-                    qte = _parse_decimal_quantity(ligne.get('quantite', 0))
+                    qte_saisie = _parse_decimal_quantity(ligne.get('quantite', 0))
                 except (InvalidOperation, TypeError, ValueError):
                     raise serializers.ValidationError({
                         'quantite': 'La quantitÃ© doit Ãªtre un nombre dÃ©cimal valide.'
                     })
+                if qte_saisie <= 0:
+                    raise serializers.ValidationError({'quantite': 'La quantité doit être supérieure à 0.'})
+                conditionnement_id = ligne.get('conditionnement_id') or ligne.get('conditionnement')
+                conditionnement_obj = None
+                if conditionnement_id:
+                    try:
+                        conditionnement_obj = ConditionnementArticle.objects.get(
+                            pk=conditionnement_id,
+                            article=article_obj,
+                        )
+                    except ConditionnementArticle.DoesNotExist:
+                        raise serializers.ValidationError({
+                            'conditionnement_id': f'Conditionnement {conditionnement_id} introuvable pour cet article.'
+                        })
+                    multiplicateur = Decimal(str(conditionnement_obj.multiplicateur_base or '1'))
+                    if multiplicateur <= 0:
+                        raise serializers.ValidationError({'conditionnement_id': 'Multiplicateur conditionnement invalide.'})
+                    qte = (qte_saisie * multiplicateur).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                else:
+                    qte = qte_saisie
                 
                 # Prix rÃ©ellement encaissÃ© (peut Ãªtre fourni manuellement pour promotions, rÃ©ductions, etc.)
                 pu_raw = ligne.get('prix_unitaire')
@@ -866,7 +888,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         'lot': lot,
                         'quantite': quantite_a_prelever,
                         'prix_achat': lot.prix_unitaire,
-                        'prix_vente': lot.prix_vente,  # Prix du lot (pour traÃ§abilitÃ©)
+                        'prix_vente': lot.prix_vente_unitaire_base or lot.prix_vente,  # Prix du lot (pour traÃ§abilitÃ©)
                     })
                     
                     # Mettre Ã  jour le lot
@@ -874,7 +896,17 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     lot.save()
                     
                     quantite_restante_a_sortir -= quantite_a_prelever
-                    total_prix_vente += lot.prix_vente * Decimal(str(quantite_a_prelever))
+                    unit_sale_price = lot.prix_vente_unitaire_base or lot.prix_vente
+                    if conditionnement_obj is not None:
+                        prix_specifique = PrixConditionnementEntree.objects.filter(
+                            ligne_entree=lot,
+                            conditionnement=conditionnement_obj,
+                        ).order_by('-est_prix_principal', 'id').first()
+                        if prix_specifique is not None:
+                            unit_sale_price = (
+                                prix_specifique.prix_vente / Decimal(str(conditionnement_obj.multiplicateur_base))
+                            ).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                    total_prix_vente += unit_sale_price * Decimal(str(quantite_a_prelever))
                 
                 # Calculer le prix de vente moyen des lots (pour rÃ©fÃ©rence, si prix_unitaire non fourni)
                 if qte > 0:
@@ -1787,6 +1819,74 @@ class UniteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVie
         return super().get_queryset().order_by('-id')
 
 
+class ConditionnementArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    queryset = ConditionnementArticle.objects.select_related('article').all()
+    serializer_class = ConditionnementArticleSerializer
+    tenant_lookup = 'article__entreprise_id'
+
+    def get_queryset(self):
+        return super().get_queryset().order_by('article_id', '-est_defaut', 'nom', 'id')
+
+    def perform_create(self, serializer):
+        tenant_id, branch_id = self.get_tenant_ids()
+        article = serializer.validated_data['article']
+        if tenant_id and article.entreprise_id != tenant_id:
+            raise serializers.ValidationError({'article_id': 'Article hors entreprise courante.'})
+        serializer.save()
+
+    def perform_update(self, serializer):
+        tenant_id, _ = self.get_tenant_ids()
+        article = serializer.validated_data.get('article', serializer.instance.article)
+        if tenant_id and article.entreprise_id != tenant_id:
+            raise serializers.ValidationError({'article_id': 'Article hors entreprise courante.'})
+        serializer.save()
+
+
+class PrixConditionnementEntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    queryset = PrixConditionnementEntree.objects.select_related(
+        'ligne_entree__entree',
+        'ligne_entree__article',
+        'conditionnement',
+        'devise',
+    ).all()
+    serializer_class = PrixConditionnementEntreeSerializer
+    tenant_lookup = 'ligne_entree__entree__entreprise_id'
+
+    def get_queryset(self):
+        return super().get_queryset().order_by('-id')
+
+    def _validate_relations(self, payload):
+        ligne_entree = payload.get('ligne_entree') or self.get_object().ligne_entree
+        conditionnement = payload.get('conditionnement') or self.get_object().conditionnement
+        devise = payload.get('devise') or self.get_object().devise
+        if ligne_entree.article_id != conditionnement.article_id:
+            raise serializers.ValidationError({
+                'conditionnement_id': 'Le conditionnement doit appartenir au même article que la ligne d’entrée.',
+            })
+        if devise.entreprise_id != ligne_entree.entree.entreprise_id:
+            raise serializers.ValidationError({
+                'devise_id': 'La devise doit appartenir à l’entreprise de la ligne d’entrée.',
+            })
+
+    def perform_create(self, serializer):
+        self._validate_relations(serializer.validated_data)
+        instance = serializer.save()
+        if instance.est_prix_principal:
+            PrixConditionnementEntree.objects.filter(
+                ligne_entree=instance.ligne_entree,
+                est_prix_principal=True,
+            ).exclude(pk=instance.pk).update(est_prix_principal=False)
+
+    def perform_update(self, serializer):
+        self._validate_relations(serializer.validated_data)
+        instance = serializer.save()
+        if instance.est_prix_principal:
+            PrixConditionnementEntree.objects.filter(
+                ligne_entree=instance.ligne_entree,
+                est_prix_principal=True,
+            ).exclude(pk=instance.pk).update(est_prix_principal=False)
+
+
 class TypeArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = TypeArticle.objects.all()
     serializer_class = TypeArticleSerializer
@@ -2295,18 +2395,55 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             else:
                 article_lookup = None
 
+            raw_quantite = ligne.get('quantite')
+            if raw_quantite is None:
+                raw_quantite = ligne.get('quantite_base')
+            if raw_quantite is None:
+                raw_quantite = ligne.get('quantite_saisie')
             try:
-                qte = _parse_decimal_quantity(ligne.get('quantite', 0))
+                qte = _parse_decimal_quantity(raw_quantite or 0)
             except (InvalidOperation, TypeError, ValueError):
                 raise serializers.ValidationError({'quantite': 'La quantitÃ© doit Ãªtre un nombre dÃ©cimal valide.'})
-            prix_unitaire_raw = ligne.get('prix_unitaire', 0)
+            prix_unitaire_raw = ligne.get('prix_unitaire')
+            if prix_unitaire_raw is None:
+                prix_unitaire_raw = ligne.get('prix_achat_unitaire_base')
+            if prix_unitaire_raw is None:
+                prix_unitaire_raw = ligne.get('prix_achat_conditionnement')
+                cond_id = ligne.get('conditionnement_id') or ligne.get('conditionnement')
+                if prix_unitaire_raw is not None and cond_id and article_lookup:
+                    try:
+                        article_obj_tmp = Article.objects.get(article_id=article_lookup)
+                        cond_tmp = ConditionnementArticle.objects.get(pk=cond_id, article=article_obj_tmp)
+                        mult_tmp = Decimal(str(cond_tmp.multiplicateur_base or '1'))
+                        if mult_tmp > 0:
+                            prix_unitaire_raw = (Decimal(str(prix_unitaire_raw)) / mult_tmp).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                    except Exception:
+                        pass
+            if prix_unitaire_raw is None:
+                prix_unitaire_raw = 0
             try:
                 prix_unitaire = Decimal(str(prix_unitaire_raw))
             except (ValueError, TypeError, InvalidOperation):
                 prix_unitaire = Decimal('0.00')
             
             # Prix de vente (obligatoire pour calculer les bÃ©nÃ©fices)
-            prix_vente_raw = ligne.get('prix_vente', 0)
+            prix_vente_raw = ligne.get('prix_vente')
+            if prix_vente_raw is None:
+                prix_vente_raw = ligne.get('prix_vente_unitaire_base')
+            if prix_vente_raw is None:
+                prix_vente_raw = ligne.get('prix_vente_conditionnement')
+                cond_id = ligne.get('conditionnement_id') or ligne.get('conditionnement')
+                if prix_vente_raw is not None and cond_id and article_lookup:
+                    try:
+                        article_obj_tmp = Article.objects.get(article_id=article_lookup)
+                        cond_tmp = ConditionnementArticle.objects.get(pk=cond_id, article=article_obj_tmp)
+                        mult_tmp = Decimal(str(cond_tmp.multiplicateur_base or '1'))
+                        if mult_tmp > 0:
+                            prix_vente_raw = (Decimal(str(prix_vente_raw)) / mult_tmp).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                    except Exception:
+                        pass
+            if prix_vente_raw is None:
+                prix_vente_raw = 0
             try:
                 prix_vente = Decimal(str(prix_vente_raw))
             except (ValueError, TypeError, InvalidOperation):

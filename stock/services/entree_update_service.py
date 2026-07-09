@@ -7,6 +7,10 @@ from django.db import transaction
 from rest_framework import serializers
 
 from stock.models import Article, Devise, Entree, LigneEntree
+from stock.services.conditionnement_pricing import (
+    build_ligne_entree_values,
+    upsert_prix_conditionnement_entree,
+)
 from stock.services.currency import build_conversion_snapshot
 from stock.services.stock_adjustment import (
     apply_stock_delta,
@@ -56,14 +60,10 @@ def _create_ligne_entree(entree: Entree, payload: dict, *, default_dev: Devise |
         raise serializers.ValidationError({'lignes': 'Chaque ligne doit avoir un article.'})
 
     article = _resolve_article(article_id, entree.entreprise_id)
-    quantite = quantize_qty(payload.get('quantite', 0))
-    if quantite <= 0:
-        raise serializers.ValidationError({'quantite': 'La quantité doit être supérieure à 0.'})
-
-    prix_unitaire = _parse_decimal(payload.get('prix_unitaire', 0))
-    prix_vente = _parse_decimal(payload.get('prix_vente', 0))
-    if prix_vente <= 0:
-        raise serializers.ValidationError({'prix_vente': 'Le prix de vente doit être supérieur à 0.'})
+    ligne_values = build_ligne_entree_values(article, payload)
+    quantite = ligne_values['quantite']
+    prix_unitaire = ligne_values['prix_unitaire']
+    prix_vente = ligne_values['prix_vente']
 
     seuil_alerte = _parse_decimal(payload.get('seuil_alerte', 0))
     devise_obj = _resolve_devise(
@@ -77,16 +77,28 @@ def _create_ligne_entree(entree: Entree, payload: dict, *, default_dev: Devise |
     ligne = LigneEntree.objects.create(
         entree=entree,
         article=article,
-        quantite=quantite,
-        quantite_restante=quantite,
-        prix_unitaire=prix_unitaire,
-        prix_vente=prix_vente,
+        conditionnement=ligne_values['conditionnement'],
+        quantite_saisie=ligne_values['quantite_saisie'],
+        quantite_base=ligne_values['quantite_base'],
+        quantite=ligne_values['quantite'],
+        quantite_restante=ligne_values['quantite_restante'],
+        prix_achat_conditionnement=ligne_values['prix_achat_conditionnement'],
+        prix_vente_conditionnement=ligne_values['prix_vente_conditionnement'],
+        prix_achat_unitaire_base=ligne_values['prix_achat_unitaire_base'],
+        prix_vente_unitaire_base=ligne_values['prix_vente_unitaire_base'],
+        prix_unitaire=ligne_values['prix_unitaire'],
+        prix_vente=ligne_values['prix_vente'],
         date_expiration=payload.get('date_expiration'),
         devise=devise_obj,
         devise_reference=snapshot['devise_reference'],
         taux_change=snapshot['taux_change'],
         montant_reference=snapshot['montant_reference'],
         seuil_alerte=seuil_alerte,
+    )
+    upsert_prix_conditionnement_entree(
+        ligne,
+        payload.get('prix_conditionnements'),
+        devise_obj or devise_principale,
     )
     apply_stock_delta(article, quantite, seuil_alerte=seuil_alerte)
     return ligne
@@ -105,9 +117,19 @@ def _update_ligne_entree(entree: Entree, ligne: LigneEntree, payload: dict, *, d
     else:
         new_article = old_article
 
-    new_quantite = quantize_qty(payload.get('quantite', ligne.quantite))
-    if new_quantite <= 0:
-        raise serializers.ValidationError({'quantite': 'La quantité doit être supérieure à 0.'})
+    ligne_values = build_ligne_entree_values(new_article, payload | {
+        'conditionnement_id': payload.get('conditionnement_id') or payload.get('conditionnement') or getattr(ligne, 'conditionnement_id', None),
+        'quantite': payload.get('quantite', ligne.quantite),
+        'quantite_saisie': payload.get('quantite_saisie', ligne.quantite_saisie),
+        'quantite_base': payload.get('quantite_base', ligne.quantite_base),
+        'prix_unitaire': payload.get('prix_unitaire', ligne.prix_unitaire),
+        'prix_vente': payload.get('prix_vente', ligne.prix_vente),
+        'prix_achat_conditionnement': payload.get('prix_achat_conditionnement', ligne.prix_achat_conditionnement),
+        'prix_vente_conditionnement': payload.get('prix_vente_conditionnement', ligne.prix_vente_conditionnement),
+        'prix_achat_unitaire_base': payload.get('prix_achat_unitaire_base', ligne.prix_achat_unitaire_base),
+        'prix_vente_unitaire_base': payload.get('prix_vente_unitaire_base', ligne.prix_vente_unitaire_base),
+    })
+    new_quantite = ligne_values['quantite']
 
     if new_article.pk != old_article.pk:
         if vendue > 0:
@@ -119,7 +141,7 @@ def _update_ligne_entree(entree: Entree, ligne: LigneEntree, payload: dict, *, d
             })
         apply_stock_delta(old_article, -old_quantite)
         ligne.article = new_article
-        ligne.quantite = new_quantite
+        ligne.quantite = ligne_values['quantite']
         ligne.quantite_restante = new_quantite
         apply_stock_delta(new_article, new_quantite)
     else:
@@ -130,10 +152,8 @@ def _update_ligne_entree(entree: Entree, ligne: LigneEntree, payload: dict, *, d
         if delta != 0:
             apply_stock_delta(old_article, delta)
 
-    prix_unitaire = _parse_decimal(payload.get('prix_unitaire', ligne.prix_unitaire))
-    prix_vente = _parse_decimal(payload.get('prix_vente', ligne.prix_vente))
-    if prix_vente <= 0:
-        raise serializers.ValidationError({'prix_vente': 'Le prix de vente doit être supérieur à 0.'})
+    prix_unitaire = ligne_values['prix_unitaire']
+    prix_vente = ligne_values['prix_vente']
 
     seuil_alerte = _parse_decimal(payload.get('seuil_alerte', ligne.seuil_alerte))
     devise_obj = _resolve_devise(
@@ -149,12 +169,24 @@ def _update_ligne_entree(entree: Entree, ligne: LigneEntree, payload: dict, *, d
 
     ligne.prix_unitaire = prix_unitaire
     ligne.prix_vente = prix_vente
+    ligne.conditionnement = ligne_values['conditionnement']
+    ligne.quantite_saisie = ligne_values['quantite_saisie']
+    ligne.quantite_base = ligne_values['quantite_base']
+    ligne.prix_achat_conditionnement = ligne_values['prix_achat_conditionnement']
+    ligne.prix_vente_conditionnement = ligne_values['prix_vente_conditionnement']
+    ligne.prix_achat_unitaire_base = ligne_values['prix_achat_unitaire_base']
+    ligne.prix_vente_unitaire_base = ligne_values['prix_vente_unitaire_base']
     ligne.devise = devise_obj
     ligne.devise_reference = snapshot['devise_reference']
     ligne.taux_change = snapshot['taux_change']
     ligne.montant_reference = snapshot['montant_reference']
     ligne.seuil_alerte = seuil_alerte
     ligne.save()
+    upsert_prix_conditionnement_entree(
+        ligne,
+        payload.get('prix_conditionnements'),
+        devise_obj or devise_principale,
+    )
 
     from stock.models import Stock
     stock_obj, _ = Stock.objects.get_or_create(

@@ -26,6 +26,7 @@ from stock.models import (
     Stock,
 )
 from stock.services.currency import build_conversion_snapshot
+from stock.services.conditionnement_pricing import get_or_create_conditionnement_defaut
 
 
 def _dec(value, default='0') -> Decimal:
@@ -322,11 +323,19 @@ def _creer_entree_ajustement(
             amount=montant_ligne,
             devise_source=devise,
         )
+        conditionnement_defaut = get_or_create_conditionnement_defaut(article)
         LigneEntree.objects.create(
             entree=entree,
             article=article,
+            conditionnement=conditionnement_defaut,
+            quantite_saisie=qte,
+            quantite_base=qte,
             quantite=qte,
             quantite_restante=qte,
+            prix_achat_conditionnement=pu,
+            prix_vente_conditionnement=pv,
+            prix_achat_unitaire_base=pu,
+            prix_vente_unitaire_base=pv,
             prix_unitaire=pu,
             prix_vente=pv,
             devise=devise,

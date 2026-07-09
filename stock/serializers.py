@@ -8,8 +8,10 @@ from .models import (
     SousTypeArticle,
     Unite,
     Article,
+    ConditionnementArticle,
     Entree,
     LigneEntree,
+    PrixConditionnementEntree,
     Stock,
     Sortie,
     LigneSortie,
@@ -29,6 +31,11 @@ from order.services.lot_closure import entree_is_from_lot_closure
 from stock.services.article_names import article_duplicate_exists, normalize_nom_scientifique
 from stock.services.tenant_context import get_tenant_ids
 from stock.services.currency import build_conversion_snapshot, get_principal_devise
+from stock.services.conditionnement_pricing import (
+    build_ligne_entree_values,
+    get_or_create_conditionnement_defaut,
+    upsert_prix_conditionnement_entree,
+)
 
 
 class LocalizedDecimalField(serializers.DecimalField):
@@ -179,6 +186,60 @@ class ArticleSearchSerializer(ArticleSerializer):
         fields = ArticleSerializer.Meta.fields + ['relevance']
 
 
+class ConditionnementArticleSerializer(serializers.ModelSerializer):
+    article_id = serializers.SlugRelatedField(
+        slug_field='article_id',
+        queryset=Article.objects.all(),
+        source='article',
+        write_only=True,
+    )
+    article = serializers.SlugRelatedField(slug_field='article_id', read_only=True)
+    multiplicateur_base = LocalizedDecimalField(max_digits=12, decimal_places=5)
+
+    class Meta:
+        model = ConditionnementArticle
+        fields = ['id', 'article', 'article_id', 'nom', 'multiplicateur_base', 'est_defaut', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']
+
+
+class PrixConditionnementEntreeSerializer(serializers.ModelSerializer):
+    ligne_entree_id = serializers.PrimaryKeyRelatedField(
+        queryset=LigneEntree.objects.all(),
+        source='ligne_entree',
+        write_only=True,
+    )
+    ligne_entree = serializers.PrimaryKeyRelatedField(read_only=True)
+    conditionnement_id = serializers.PrimaryKeyRelatedField(
+        queryset=ConditionnementArticle.objects.all(),
+        source='conditionnement',
+        write_only=True,
+    )
+    conditionnement = ConditionnementArticleSerializer(read_only=True)
+    devise_id = serializers.PrimaryKeyRelatedField(
+        queryset=Devise.objects.all(),
+        source='devise',
+        write_only=True,
+    )
+    devise = DeviseSerializer(read_only=True)
+
+    class Meta:
+        model = PrixConditionnementEntree
+        fields = [
+            'id',
+            'ligne_entree',
+            'ligne_entree_id',
+            'conditionnement',
+            'conditionnement_id',
+            'prix_vente',
+            'devise',
+            'devise_id',
+            'est_prix_principal',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+
 class EntrepriseSerializer(serializers.ModelSerializer):
     """
     CRUD entreprise. Tous les champs sont éditables par l'Admin (logo, email, slogan, etc.).
@@ -266,7 +327,7 @@ class LigneSortieSerializer(serializers.ModelSerializer):
 
     lots_utilises = serializers.SerializerMethodField(read_only=True)
     benefices_lots = serializers.SerializerMethodField(read_only=True)
-    quantite = LocalizedDecimalField(max_digits=12, decimal_places=5)
+    quantite = LocalizedDecimalField(max_digits=12, decimal_places=5, required=False, allow_null=True)
     
     class Meta:
         model = LigneSortie
@@ -777,7 +838,24 @@ class LigneEntreeSerializer(serializers.ModelSerializer):
     )
     devise = DeviseSerializer(read_only=True)
     devise_reference = DeviseSerializer(read_only=True)
-    quantite = LocalizedDecimalField(max_digits=12, decimal_places=5)
+    conditionnement = ConditionnementArticleSerializer(read_only=True)
+    conditionnement_id = serializers.PrimaryKeyRelatedField(
+        queryset=ConditionnementArticle.objects.all(),
+        source='conditionnement',
+        write_only=True,
+        required=False,
+        allow_null=True,
+    )
+    quantite = LocalizedDecimalField(max_digits=12, decimal_places=5, required=False, allow_null=True)
+    quantite_saisie = LocalizedDecimalField(max_digits=12, decimal_places=5, required=False, allow_null=True)
+    quantite_base = LocalizedDecimalField(max_digits=12, decimal_places=5, required=False, allow_null=True)
+    prix_achat_conditionnement = LocalizedDecimalField(max_digits=10, decimal_places=5, required=False, allow_null=True)
+    prix_vente_conditionnement = LocalizedDecimalField(max_digits=10, decimal_places=5, required=False, allow_null=True)
+    prix_achat_unitaire_base = LocalizedDecimalField(max_digits=10, decimal_places=5, required=False, allow_null=True)
+    prix_vente_unitaire_base = LocalizedDecimalField(max_digits=10, decimal_places=5, required=False, allow_null=True)
+    prix_unitaire = LocalizedDecimalField(max_digits=10, decimal_places=5, required=False, allow_null=True)
+    prix_vente = LocalizedDecimalField(max_digits=10, decimal_places=5, required=False, allow_null=True)
+    prix_conditionnements = PrixConditionnementEntreeSerializer(many=True, required=False)
     seuil_alerte = LocalizedDecimalField(max_digits=12, decimal_places=5)
     devise_id = serializers.PrimaryKeyRelatedField(
         queryset=Devise.objects.all(), 
@@ -790,9 +868,13 @@ class LigneEntreeSerializer(serializers.ModelSerializer):
     class Meta:
         model = LigneEntree
         fields = [
-            'id', 'article', 'article_id', 'quantite', 'quantite_restante', 
+            'id', 'article', 'article_id', 'conditionnement', 'conditionnement_id',
+            'quantite_saisie', 'quantite_base', 'quantite', 'quantite_restante',
+            'prix_achat_conditionnement', 'prix_vente_conditionnement',
+            'prix_achat_unitaire_base', 'prix_vente_unitaire_base',
             'prix_unitaire', 'prix_vente', 'date_entree', 'date_expiration', 
-            'entree', 'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference', 'seuil_alerte'
+            'entree', 'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference', 'seuil_alerte',
+            'prix_conditionnements',
         ]
         read_only_fields = ['date_entree', 'entree', 'quantite_restante']
 
@@ -802,15 +884,22 @@ class LigneEntreeSerializer(serializers.ModelSerializer):
         if attrs.get('seuil_alerte') is None:
             raise serializers.ValidationError({'seuil_alerte': _('Le seuil d\'alerte est obligatoire pour chaque ligne d\'entrée.')})
 
-        # La quantité doit être fournie et strictement positive
+        # La quantité peut être reçue en legacy (`quantite`) ou en conditionnement (`quantite_saisie`/`quantite_base`)
         quantite = attrs.get('quantite')
-        if quantite is None:
+        quantite_saisie = attrs.get('quantite_saisie')
+        quantite_base = attrs.get('quantite_base')
+        if quantite is None and quantite_saisie is None and quantite_base is None:
             raise serializers.ValidationError({'quantite': _('La quantité est obligatoire pour chaque ligne d\'entrée.')})
         try:
-            if quantite <= 0:
+            value = quantite if quantite is not None else (quantite_saisie if quantite_saisie is not None else quantite_base)
+            if value <= 0:
                 raise serializers.ValidationError({'quantite': _('La quantité doit être supérieure à 0.')})
         except TypeError:
             raise serializers.ValidationError({'quantite': _('La quantité doit être un nombre valide.')})
+        conditionnement = attrs.get('conditionnement')
+        article = attrs.get('article')
+        if conditionnement is not None and article is not None and conditionnement.article_id != article.article_id:
+            raise serializers.ValidationError({'conditionnement_id': _('Le conditionnement ne correspond pas à l’article.')})
 
         return attrs
 
@@ -896,28 +985,57 @@ class EntreeSerializer(serializers.ModelSerializer):
 
             for ligne in lignes_data:
                 article_obj = ligne['article']
-                quantite = ligne['quantite']
+                ligne_values = build_ligne_entree_values(
+                    article_obj,
+                    {
+                        'conditionnement_id': ligne.get('conditionnement').pk if ligne.get('conditionnement') else None,
+                        'quantite': ligne.get('quantite'),
+                        'quantite_saisie': ligne.get('quantite_saisie'),
+                        'quantite_base': ligne.get('quantite_base'),
+                        'prix_unitaire': ligne.get('prix_unitaire'),
+                        'prix_vente': ligne.get('prix_vente'),
+                        'prix_achat_conditionnement': ligne.get('prix_achat_conditionnement'),
+                        'prix_vente_conditionnement': ligne.get('prix_vente_conditionnement'),
+                        'prix_achat_unitaire_base': ligne.get('prix_achat_unitaire_base'),
+                        'prix_vente_unitaire_base': ligne.get('prix_vente_unitaire_base'),
+                    },
+                )
+                quantite = ligne_values['quantite']
                 devise_obj = ligne.get('devise') or devise_principale
-                montant_ligne = (Decimal(str(ligne.get('prix_unitaire') or 0)) * Decimal(str(quantite))).quantize(Decimal('0.00001'))
+                montant_ligne = (
+                    Decimal(str(ligne_values['prix_unitaire'])) * Decimal(str(quantite))
+                ).quantize(Decimal('0.00001'))
                 snapshot_ligne = build_conversion_snapshot(
                     entreprise_id=entreprise_id,
                     amount=montant_ligne,
                     devise_source=devise_obj,
                     devise_reference=devise_principale,
                 )
-                LigneEntree.objects.create(
+                le = LigneEntree.objects.create(
                     entree=entree,
                     article=article_obj,
-                    quantite=quantite,
-                    quantite_restante=quantite,
-                    prix_unitaire=ligne.get('prix_unitaire'),
-                    prix_vente=ligne.get('prix_vente'),
+                    conditionnement=ligne_values['conditionnement'],
+                    quantite_saisie=ligne_values['quantite_saisie'],
+                    quantite_base=ligne_values['quantite_base'],
+                    quantite=ligne_values['quantite'],
+                    quantite_restante=ligne_values['quantite_restante'],
+                    prix_achat_conditionnement=ligne_values['prix_achat_conditionnement'],
+                    prix_vente_conditionnement=ligne_values['prix_vente_conditionnement'],
+                    prix_achat_unitaire_base=ligne_values['prix_achat_unitaire_base'],
+                    prix_vente_unitaire_base=ligne_values['prix_vente_unitaire_base'],
+                    prix_unitaire=ligne_values['prix_unitaire'],
+                    prix_vente=ligne_values['prix_vente'],
                     date_expiration=ligne.get('date_expiration'),
                     devise=devise_obj,
                     devise_reference=snapshot_ligne['devise_reference'],
                     taux_change=snapshot_ligne['taux_change'],
                     montant_reference=snapshot_ligne['montant_reference'],
                     seuil_alerte=ligne.get('seuil_alerte', 0)
+                )
+                upsert_prix_conditionnement_entree(
+                    le,
+                    ligne.get('prix_conditionnements'),
+                    devise_obj or devise_principale,
                 )
                 stock_obj, _ = Stock.objects.get_or_create(
                     article=article_obj,
@@ -941,12 +1059,20 @@ class EntreeSerializer(serializers.ModelSerializer):
             data['lignes'] = [
                 {
                     'article_id': ligne['article'].pk,
+                    'conditionnement_id': ligne['conditionnement'].pk if ligne.get('conditionnement') else None,
+                    'quantite_saisie': ligne.get('quantite_saisie'),
+                    'quantite_base': ligne.get('quantite_base'),
                     'quantite': ligne['quantite'],
+                    'prix_achat_conditionnement': ligne.get('prix_achat_conditionnement'),
+                    'prix_vente_conditionnement': ligne.get('prix_vente_conditionnement'),
+                    'prix_achat_unitaire_base': ligne.get('prix_achat_unitaire_base'),
+                    'prix_vente_unitaire_base': ligne.get('prix_vente_unitaire_base'),
                     'prix_unitaire': ligne.get('prix_unitaire'),
                     'prix_vente': ligne.get('prix_vente'),
                     'date_expiration': ligne.get('date_expiration'),
                     'devise_id': ligne['devise'].pk if ligne.get('devise') else None,
                     'seuil_alerte': ligne.get('seuil_alerte', 0),
+                    'prix_conditionnements': ligne.get('prix_conditionnements'),
                 }
                 for ligne in lignes_data
             ]

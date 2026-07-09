@@ -20,6 +20,7 @@ from rest_framework.exceptions import ValidationError
 
 from order.models import Lot, LotItem
 from stock.models import Devise, Entree, LigneEntree, Stock
+from stock.services.conditionnement_pricing import get_or_create_conditionnement_defaut
 from stock.services.currency import build_conversion_snapshot
 
 
@@ -183,6 +184,7 @@ def apply_stock_on_lot_closure(lot: Lot, approvisionnement: list[dict]) -> Entre
         seuil_alerte = cl.seuil_alerte
         date_expiration = cl.date_expiration
         devise_obj = default_dev
+        conditionnement_defaut = get_or_create_conditionnement_defaut(article_obj)
 
         montant_ligne = (prix_unitaire * Decimal(str(qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         snapshot_ligne = build_conversion_snapshot(
@@ -193,8 +195,15 @@ def apply_stock_on_lot_closure(lot: Lot, approvisionnement: list[dict]) -> Entre
         LigneEntree.objects.create(
             entree=entree,
             article=article_obj,
+            conditionnement=conditionnement_defaut,
+            quantite_saisie=qte,
+            quantite_base=qte,
             quantite=qte,
             quantite_restante=qte,
+            prix_achat_conditionnement=prix_unitaire,
+            prix_vente_conditionnement=prix_vente,
+            prix_achat_unitaire_base=prix_unitaire,
+            prix_vente_unitaire_base=prix_vente,
             prix_unitaire=prix_unitaire,
             prix_vente=prix_vente,
             date_expiration=date_expiration,

@@ -176,6 +176,55 @@ class Article(models.Model):
         super().save(*args, **kwargs)
 
 
+class ConditionnementArticle(models.Model):
+    """
+    Définition des conditionnements possibles d'un article.
+    Le prix n'est pas stocké ici : il est défini sur les approvisionnements (LigneEntree).
+    """
+    article = models.ForeignKey(Article, on_delete=models.CASCADE, related_name='conditionnements')
+    nom = models.CharField(max_length=100)
+    multiplicateur_base = models.DecimalField(
+        max_digits=12,
+        decimal_places=5,
+        default=Decimal('1'),
+        help_text="Nombre d'unités de base contenues dans ce conditionnement.",
+    )
+    est_defaut = models.BooleanField(
+        default=False,
+        help_text="Conditionnement appliqué par défaut (ex: pièce/unité).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['article_id', '-est_defaut', 'nom', 'id']
+        indexes = [
+            models.Index(fields=['article', 'est_defaut']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['article', 'nom'],
+                name='uniq_conditionnement_article_nom',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.article_id} - {self.nom} x{self.multiplicateur_base}"
+
+    def save(self, *args, **kwargs):
+        if self.multiplicateur_base is None:
+            self.multiplicateur_base = Decimal('1')
+        self.multiplicateur_base = Decimal(str(self.multiplicateur_base))
+        if self.multiplicateur_base <= 0:
+            raise ValueError('Le multiplicateur du conditionnement doit être strictement positif.')
+        if self.est_defaut:
+            ConditionnementArticle.objects.filter(
+                article_id=self.article_id,
+                est_defaut=True,
+            ).exclude(pk=self.pk).update(est_defaut=False)
+        super().save(*args, **kwargs)
+
+
 class Entree(models.Model):
     libele = models.CharField(max_length=100)
     description = models.TextField(blank=True)
@@ -195,8 +244,21 @@ class Entree(models.Model):
 
 class LigneEntree(models.Model):  
     article = models.ForeignKey(Article, on_delete=models.CASCADE)
+    conditionnement = models.ForeignKey(
+        ConditionnementArticle,
+        on_delete=models.PROTECT,
+        related_name='lignes_entree',
+        null=True,
+        blank=True,
+    )
+    quantite_saisie = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
+    quantite_base = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
     quantite = models.DecimalField(max_digits=12, decimal_places=5)
     quantite_restante = models.DecimalField(max_digits=12, decimal_places=5,default=0, help_text="Quantité encore disponible dans ce lot (FIFO)")
+    prix_achat_conditionnement = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
+    prix_vente_conditionnement = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
+    prix_achat_unitaire_base = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
+    prix_vente_unitaire_base = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
     prix_unitaire = models.DecimalField(max_digits=10, decimal_places=5, help_text="Prix d'achat unitaire")
     prix_vente = models.DecimalField(max_digits=10, decimal_places=5, help_text="Prix de vente unitaire défini à l'entrée")
     date_expiration = models.DateField(null=True, blank=True, help_text="Date d'expiration du produit (optionnelle)")
@@ -226,11 +288,55 @@ class LigneEntree(models.Model):
         return f"LigneEntree: {self.article.nom_scientifique} x {self.quantite_restante}/{self.quantite} (Entree {self.entree.id})"
     
     def save(self, *args, **kwargs):
+        if self.quantite_base is None:
+            self.quantite_base = self.quantite
+        if self.quantite_saisie is None:
+            self.quantite_saisie = self.quantite
+        if self.prix_achat_unitaire_base is None:
+            self.prix_achat_unitaire_base = self.prix_unitaire
+        if self.prix_vente_unitaire_base is None:
+            self.prix_vente_unitaire_base = self.prix_vente
+        if self.prix_achat_conditionnement is None:
+            self.prix_achat_conditionnement = self.prix_unitaire
+        if self.prix_vente_conditionnement is None:
+            self.prix_vente_conditionnement = self.prix_vente
         # Initialiser quantite_restante à quantite si c'est une nouvelle entrée
         if self.pk is None:
             self.quantite_restante = self.quantite
         super().save(*args, **kwargs)
 
+
+class PrixConditionnementEntree(models.Model):
+    """
+    Prix de vente spécifiques par conditionnement pour une ligne d'entrée (lot).
+    """
+    ligne_entree = models.ForeignKey(
+        LigneEntree, on_delete=models.CASCADE, related_name='prix_conditionnements'
+    )
+    conditionnement = models.ForeignKey(
+        ConditionnementArticle, on_delete=models.PROTECT, related_name='prix_ligne_entrees'
+    )
+    prix_vente = models.DecimalField(max_digits=10, decimal_places=5)
+    devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='prix_conditionnement_entrees')
+    est_prix_principal = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['ligne_entree_id', '-est_prix_principal', 'id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['ligne_entree', 'conditionnement'],
+                name='uniq_prix_cond_par_ligne_entree',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['ligne_entree', 'conditionnement']),
+            models.Index(fields=['devise']),
+        ]
+
+    def __str__(self):
+        return f"Ligne {self.ligne_entree_id} - {self.conditionnement.nom}: {self.prix_vente}"
 
 
 class Stock(models.Model):

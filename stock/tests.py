@@ -13,6 +13,7 @@ from caisse.models import MouvementCaisse, TypeCaisse
 from caisse.services.caisse import creer_mouvement_caisse
 from stock.models import (
     Article,
+    ConditionnementArticle,
     Client,
     ClientEntreprise,
     Devise,
@@ -21,6 +22,7 @@ from stock.models import (
     Entree,
     LigneEntree,
     LigneSortie,
+    PrixConditionnementEntree,
     Sortie,
     Stock,
     SousTypeArticle,
@@ -1118,4 +1120,145 @@ class EntreeSortieUpdateTests(APITestCase):
         mv.refresh_from_db()
         self.assertEqual(mv.montant, Decimal('50.00000'))
         self.assertFalse(MouvementCaisse.objects.filter(reference_piece__startswith='AJ-VENT-').exists())
+
+
+@override_settings(ALLOWED_HOSTS=['testserver', 'localhost', '127.0.0.1'])
+class ConditionnementPricingTests(APITestCase):
+    def setUp(self):
+        self.entreprise = Entreprise.objects.create(
+            nom='E-cond',
+            secteur='s',
+            pays='FR',
+            adresse='a',
+            telephone='t',
+            email='cond@e.com',
+            nif='n-cond',
+            responsable='r-cond',
+        )
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='admin_cond',
+            email='cond@example.com',
+            password='secretpass123',
+        )
+        Membership.objects.create(
+            user=self.user,
+            entreprise=self.entreprise,
+            role='admin',
+            is_active=True,
+        )
+        self.client.force_authenticate(user=self.user)
+
+        self.unite = Unite.objects.create(libelle='Bouteille', entreprise=self.entreprise)
+        self.type_article = TypeArticle.objects.create(libelle='Boisson', entreprise=self.entreprise)
+        self.sous_type = SousTypeArticle.objects.create(
+            type_article=self.type_article,
+            libelle='Eau',
+            entreprise=self.entreprise,
+        )
+        self.devise = Devise.objects.create(
+            sigle='USD',
+            nom='Dollar',
+            symbole='$',
+            est_principal=True,
+            entreprise=self.entreprise,
+        )
+        self.article = Article.objects.create(
+            nom_scientifique='Eau 500ml',
+            nom_commercial='Eau',
+            sous_type_article=self.sous_type,
+            unite=self.unite,
+            emplacement='A1',
+            entreprise=self.entreprise,
+        )
+        self.cond_piece = ConditionnementArticle.objects.create(
+            article=self.article,
+            nom='Bouteille',
+            multiplicateur_base=Decimal('1'),
+            est_defaut=True,
+        )
+        self.cond_carton = ConditionnementArticle.objects.create(
+            article=self.article,
+            nom='Carton 24',
+            multiplicateur_base=Decimal('24'),
+            est_defaut=False,
+        )
+
+    def test_create_entree_with_conditionnement_converts_to_base(self):
+        payload = {
+            'libele': 'Appro eau carton',
+            'description': 'test conversion conditionnement',
+            'lignes': [
+                {
+                    'article_id': self.article.pk,
+                    'conditionnement_id': self.cond_carton.pk,
+                    'quantite_saisie': '10',
+                    'prix_achat_conditionnement': '12',
+                    'prix_vente_conditionnement': '15',
+                    'devise_id': self.devise.pk,
+                    'seuil_alerte': '0',
+                }
+            ],
+        }
+        response = self.client.post('/api/entrees/', payload, format='json')
+        self.assertEqual(response.status_code, 201, response.content)
+        ligne = LigneEntree.objects.get(article=self.article)
+        self.assertEqual(ligne.quantite, Decimal('240.00000'))
+        self.assertEqual(ligne.quantite_restante, Decimal('240.00000'))
+        self.assertEqual(ligne.prix_unitaire, Decimal('0.50000'))
+        self.assertEqual(ligne.prix_vente, Decimal('0.62500'))
+        self.assertEqual(ligne.conditionnement_id, self.cond_carton.id)
+        self.assertEqual(ligne.quantite_saisie, Decimal('10.00000'))
+
+    def test_conditionnement_and_prix_conditionnement_endpoints(self):
+        create_cond_resp = self.client.post(
+            '/api/conditionnements-articles/',
+            {
+                'article_id': self.article.pk,
+                'nom': 'Pack 12',
+                'multiplicateur_base': '12',
+                'est_defaut': False,
+            },
+            format='json',
+        )
+        self.assertEqual(create_cond_resp.status_code, 201, create_cond_resp.content)
+        cond_pack_id = create_cond_resp.json()['id']
+
+        entree_resp = self.client.post(
+            '/api/entrees/',
+            {
+                'libele': 'Appro lot endpoint',
+                'description': 'test endpoint prix conditionnement',
+                'lignes': [
+                    {
+                        'article_id': self.article.pk,
+                        'quantite': '24',
+                        'prix_unitaire': '0.5',
+                        'prix_vente': '0.75',
+                        'devise_id': self.devise.pk,
+                        'seuil_alerte': '0',
+                    }
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(entree_resp.status_code, 201, entree_resp.content)
+        ligne_entree = LigneEntree.objects.get(article=self.article, entree_id=entree_resp.json()['id'])
+
+        prix_resp = self.client.post(
+            '/api/prix-conditionnement-entrees/',
+            {
+                'ligne_entree_id': ligne_entree.id,
+                'conditionnement_id': cond_pack_id,
+                'prix_vente': '8',
+                'devise_id': self.devise.pk,
+                'est_prix_principal': True,
+            },
+            format='json',
+        )
+        self.assertEqual(prix_resp.status_code, 201, prix_resp.content)
+        self.assertEqual(
+            PrixConditionnementEntree.objects.filter(ligne_entree=ligne_entree, conditionnement_id=cond_pack_id).count(),
+            1,
+        )
 

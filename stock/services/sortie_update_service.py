@@ -6,7 +6,15 @@ from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from django.db import transaction
 from rest_framework import serializers
 
-from stock.models import Article, Client, Devise, LigneSortie, Sortie
+from stock.models import (
+    Article,
+    Client,
+    ConditionnementArticle,
+    Devise,
+    LigneSortie,
+    PrixConditionnementEntree,
+    Sortie,
+)
 from stock.services.credit_sale_adjustment_service import sync_dette_for_credit_sortie
 from stock.services.currency import build_conversion_snapshot
 from stock.services.sale_cash_adjustment_service import sync_sortie_cash_movements
@@ -23,6 +31,46 @@ def _parse_decimal_quantity(raw_value) -> Decimal:
     if raw_value is None:
         return Decimal('0')
     return Decimal(str(raw_value).replace(',', '.')).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+
+
+def _resolve_conditionnement(article: Article, ligne_payload: dict) -> ConditionnementArticle | None:
+    cid = ligne_payload.get('conditionnement_id') or ligne_payload.get('conditionnement')
+    if not cid:
+        return None
+    try:
+        return ConditionnementArticle.objects.get(pk=cid, article=article)
+    except ConditionnementArticle.DoesNotExist as exc:
+        raise serializers.ValidationError(
+            {'conditionnement_id': f'Conditionnement {cid} introuvable pour {article.article_id}.'}
+        ) from exc
+
+
+def _compute_prix_moyen_depuis_lots(
+    lots_utilises_data: list[dict],
+    conditionnement: ConditionnementArticle | None,
+) -> Decimal:
+    total = Decimal('0')
+    total_qte = Decimal('0')
+    for lot_data in lots_utilises_data:
+        lot = lot_data['lot']
+        qte = Decimal(str(lot_data['quantite']))
+        unit_base_price = lot.prix_vente_unitaire_base or lot.prix_vente
+        if conditionnement is not None:
+            prix_specifique = PrixConditionnementEntree.objects.filter(
+                ligne_entree=lot,
+                conditionnement=conditionnement,
+            ).order_by('-est_prix_principal', 'id').first()
+            if prix_specifique is not None:
+                mult = Decimal(str(conditionnement.multiplicateur_base or '1'))
+                if mult > 0:
+                    unit_base_price = (prix_specifique.prix_vente / mult).quantize(
+                        Decimal('0.00001'), rounding=ROUND_DOWN
+                    )
+        total += unit_base_price * qte
+        total_qte += qte
+    if total_qte <= 0:
+        return Decimal('0')
+    return (total / total_qte).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
 
 def _parse_prix_unitaire(raw) -> Decimal | None:
@@ -45,9 +93,17 @@ def _process_sortie_ligne(sortie: Sortie, ligne_payload: dict, *, default_dev: D
     except Article.DoesNotExist:
         raise serializers.ValidationError({'article': f"Article avec ID {article_id} non trouvé."})
 
-    qte = _parse_decimal_quantity(ligne_payload.get('quantite', 0))
-    if qte <= 0:
+    qte_saisie = _parse_decimal_quantity(ligne_payload.get('quantite', 0))
+    if qte_saisie <= 0:
         raise serializers.ValidationError({'quantite': 'La quantité doit être supérieure à 0.'})
+    conditionnement = _resolve_conditionnement(article_obj, ligne_payload)
+    if conditionnement is not None:
+        multiplicateur = Decimal(str(conditionnement.multiplicateur_base or '1'))
+        if multiplicateur <= 0:
+            raise serializers.ValidationError({'conditionnement_id': 'Multiplicateur conditionnement invalide.'})
+        qte = (qte_saisie * multiplicateur).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+    else:
+        qte = qte_saisie
 
     prix_unitaire_encaisse = _parse_prix_unitaire(ligne_payload.get('prix_unitaire'))
 
@@ -62,10 +118,7 @@ def _process_sortie_ligne(sortie: Sortie, ligne_payload: dict, *, default_dev: D
 
     lots_utilises_data, total_prix_vente = consume_fifo_lots(article_obj, qte)
 
-    if qte > 0:
-        prix_vente_moyen_lots = total_prix_vente / qte
-    else:
-        prix_vente_moyen_lots = Decimal('0')
+    prix_vente_moyen_lots = _compute_prix_moyen_depuis_lots(lots_utilises_data, conditionnement)
 
     prix_unitaire_final = prix_unitaire_encaisse if prix_unitaire_encaisse is not None else prix_vente_moyen_lots
     prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)

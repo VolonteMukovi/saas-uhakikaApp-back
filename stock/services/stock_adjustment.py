@@ -103,12 +103,13 @@ def consume_fifo_lots(article: Article, quantite: Decimal) -> list[dict]:
             'lot': lot,
             'quantite': quantite_a_prelever,
             'prix_achat': lot.prix_unitaire,
-            'prix_vente': lot.prix_vente,
+            'prix_vente': lot.prix_vente_unitaire_base or lot.prix_vente,
         })
         lot.quantite_restante = quantize_qty(lot.quantite_restante) - quantite_a_prelever
         lot.save(update_fields=['quantite_restante'])
         quantite_restante_a_sortir -= quantite_a_prelever
-        total_prix_vente += lot.prix_vente * quantite_a_prelever
+        unit_sale_price = lot.prix_vente_unitaire_base or lot.prix_vente
+        total_prix_vente += unit_sale_price * quantite_a_prelever
 
     if quantite_restante_a_sortir > 0:
         disponible = stock_disponible_article(article)
