@@ -329,6 +329,10 @@ POS_PRINTER_TIMEOUT = config("POS_PRINTER_TIMEOUT", default=1, cast=int)
 # Largeur texte (caractères/ligne). 58mm = souvent 32 (font A) ou 42 (font B).
 POS_PRINTER_CHARS_PER_LINE = config("POS_PRINTER_CHARS_PER_LINE", default=32, cast=int)
 
+# Codes-barres internes (série réservée, ex. 200000000001)
+CODE_BARRES_INTERNE_PREFIX = config('CODE_BARRES_INTERNE_PREFIX', default='20')
+CODE_BARRES_INTERNE_DIGITS = config('CODE_BARRES_INTERNE_DIGITS', default=12, cast=int)
+
 # Configuration du logging pour tracer les suppressions automatiques d'articles
 # Créer le répertoire logs s'il n'existe pas
 LOGS_DIR = BASE_DIR / 'logs'

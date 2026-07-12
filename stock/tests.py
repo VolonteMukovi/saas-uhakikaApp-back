@@ -1262,3 +1262,251 @@ class ConditionnementPricingTests(APITestCase):
             1,
         )
 
+
+@override_settings(ALLOWED_HOSTS=['testserver', 'localhost', '127.0.0.1'])
+class CodeBarresArticleTests(APITestCase):
+    def setUp(self):
+        self.entreprise = Entreprise.objects.create(
+            nom='E-barcode',
+            secteur='s',
+            pays='FR',
+            adresse='a',
+            telephone='t',
+            email='barcode@e.com',
+            nif='n-barcode',
+            responsable='r-barcode',
+        )
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='admin_barcode',
+            email='barcode@example.com',
+            password='secretpass123',
+        )
+        Membership.objects.create(
+            user=self.user,
+            entreprise=self.entreprise,
+            role='admin',
+            is_active=True,
+        )
+        self.client.force_authenticate(user=self.user)
+
+        self.unite = Unite.objects.create(libelle='Pc', entreprise=self.entreprise)
+        self.type_article = TypeArticle.objects.create(libelle='Matiere', entreprise=self.entreprise)
+        self.sous_type = SousTypeArticle.objects.create(
+            type_article=self.type_article,
+            libelle='Plastique',
+            entreprise=self.entreprise,
+        )
+        self.devise = Devise.objects.create(
+            sigle='USD',
+            nom='Dollar',
+            symbole='$',
+            est_principal=True,
+            entreprise=self.entreprise,
+        )
+        self.article = Article.objects.create(
+            nom_scientifique='Plastique',
+            nom_commercial='plastique',
+            sous_type_article=self.sous_type,
+            unite=self.unite,
+            emplacement='A1',
+            entreprise=self.entreprise,
+        )
+        self.cond_piece = ConditionnementArticle.objects.create(
+            article=self.article,
+            nom='Pc',
+            multiplicateur_base=Decimal('1'),
+            est_defaut=True,
+        )
+        self.cond_plaque = ConditionnementArticle.objects.create(
+            article=self.article,
+            nom='Plaque',
+            multiplicateur_base=Decimal('16'),
+            est_defaut=False,
+        )
+        Stock.objects.create(article=self.article, Qte=0, seuilAlert=0)
+
+    def _create_entree_stock(self):
+        payload = {
+            'libele': 'Appro plastique',
+            'description': 'stock barcode test',
+            'lignes': [
+                {
+                    'article_id': self.article.pk,
+                    'conditionnement_id': self.cond_plaque.pk,
+                    'quantite_saisie': '2',
+                    'prix_achat_conditionnement': '18',
+                    'prix_vente_conditionnement': '21',
+                    'devise_id': self.devise.pk,
+                    'seuil_alerte': '0',
+                }
+            ],
+        }
+        response = self.client.post('/api/entrees/', payload, format='json')
+        self.assertEqual(response.status_code, 201, response.content)
+
+    def test_create_code_barres_on_conditionnement(self):
+        response = self.client.post(
+            '/api/codes-barres-articles/',
+            {
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_plaque.pk,
+                'code': '123456789016',
+                'type_code': 'EAN13',
+                'est_principal': True,
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        data = response.json()
+        self.assertEqual(data['code'], '123456789016')
+        self.assertEqual(data['conditionnement']['nom'], 'Plaque')
+
+    def test_duplicate_code_rejected(self):
+        self.client.post(
+            '/api/codes-barres-articles/',
+            {
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_plaque.pk,
+                'code': '9999999999999',
+            },
+            format='json',
+        )
+        other_article = Article.objects.create(
+            nom_scientifique='Autre article',
+            sous_type_article=self.sous_type,
+            unite=self.unite,
+            emplacement='B1',
+            entreprise=self.entreprise,
+        )
+        other_cond = ConditionnementArticle.objects.create(
+            article=other_article,
+            nom='Unité',
+            multiplicateur_base=Decimal('1'),
+            est_defaut=True,
+        )
+        response = self.client.post(
+            '/api/codes-barres-articles/',
+            {
+                'article_id': other_article.pk,
+                'conditionnement_id': other_cond.pk,
+                'code': '9999999999999',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn('code', response.json())
+
+    def test_lookup_found_with_price_and_stock(self):
+        self._create_entree_stock()
+        self.client.post(
+            '/api/codes-barres-articles/',
+            {
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_plaque.pk,
+                'code': '123456789016',
+            },
+            format='json',
+        )
+        response = self.client.get('/api/stock/code-barres/lookup/?code=123456789016')
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertTrue(data['found'])
+        self.assertEqual(data['article']['id'], self.article.pk)
+        self.assertEqual(data['conditionnement']['nom'], 'Plaque')
+        self.assertEqual(data['conditionnement']['quantite_base'], '16.00000')
+        self.assertEqual(data['stock']['quantite_base'], '32.00000')
+        self.assertEqual(data['prix']['montant'], '21.00000')
+        self.assertEqual(data['prix']['devise'], 'USD')
+        self.assertIn(data['prix']['source'], (
+            'prix_conditionnement_ligne',
+            'prix_conditionnement_fifo',
+            'prix_unitaire_base_fifo',
+        ))
+
+    def test_lookup_not_found(self):
+        response = self.client.get('/api/stock/code-barres/lookup/?code=0000000000000')
+        self.assertEqual(response.status_code, 404, response.content)
+        data = response.json()
+        self.assertFalse(data['found'])
+        self.assertIn('message', data)
+
+    def test_lookup_inactive_code_not_found(self):
+        create_resp = self.client.post(
+            '/api/codes-barres-articles/',
+            {
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_piece.pk,
+                'code': '1111111111111',
+            },
+            format='json',
+        )
+        cb_id = create_resp.json()['id']
+        patch_resp = self.client.patch(
+            f'/api/codes-barres-articles/{cb_id}/',
+            {'est_actif': False},
+            format='json',
+        )
+        self.assertEqual(patch_resp.status_code, 200, patch_resp.content)
+        lookup_resp = self.client.get('/api/stock/code-barres/lookup/?code=1111111111111')
+        self.assertEqual(lookup_resp.status_code, 404, lookup_resp.content)
+
+    def test_generer_code_interne_numerique(self):
+        response = self.client.post(
+            '/api/codes-barres-articles/generer/',
+            {
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_plaque.pk,
+                'format': 'numerique',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        data = response.json()
+        self.assertTrue(data['code'].startswith('20'))
+        self.assertEqual(data['type_code'], 'CODE128')
+        self.assertIn('etiquette_url', data)
+
+    def test_generer_refuse_si_code_existe(self):
+        self.client.post(
+            '/api/codes-barres-articles/generer/',
+            {
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_piece.pk,
+            },
+            format='json',
+        )
+        response = self.client.post(
+            '/api/codes-barres-articles/generer/',
+            {
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_piece.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+
+    def test_generer_manquants(self):
+        response = self.client.post(
+            '/api/codes-barres-articles/generer-manquants/',
+            {'article_id': self.article.pk},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(response.json()['count'], 2)
+
+    def test_etiquette_pdf(self):
+        gen = self.client.post(
+            '/api/codes-barres-articles/generer/',
+            {
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_plaque.pk,
+            },
+            format='json',
+        )
+        cb_id = gen.json()['id']
+        response = self.client.get(f'/api/codes-barres-articles/{cb_id}/etiquette/')
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response['Content-Type'], 'application/pdf')
+        self.assertTrue(response.content.startswith(b'%PDF'))
+

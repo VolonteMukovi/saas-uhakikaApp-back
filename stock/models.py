@@ -1,3 +1,5 @@
+import uuid
+
 from django.db import models
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, is_password_usable, make_password
@@ -222,6 +224,101 @@ class ConditionnementArticle(models.Model):
                 article_id=self.article_id,
                 est_defaut=True,
             ).exclude(pk=self.pk).update(est_defaut=False)
+        super().save(*args, **kwargs)
+
+
+class CodeBarresArticle(models.Model):
+    """
+    Code-barres lié à un article et à un conditionnement précis (pièce, pack, carton…).
+    Un code est unique par entreprise.
+    """
+
+    TYPE_EAN13 = 'EAN13'
+    TYPE_EAN8 = 'EAN8'
+    TYPE_UPC = 'UPC'
+    TYPE_CODE128 = 'CODE128'
+    TYPE_QR = 'QR'
+    TYPE_INTERNE = 'INTERNE'
+    TYPE_AUTRE = 'AUTRE'
+    TYPE_CODE_CHOICES = [
+        (TYPE_EAN13, 'EAN-13'),
+        (TYPE_EAN8, 'EAN-8'),
+        (TYPE_UPC, 'UPC'),
+        (TYPE_CODE128, 'Code 128'),
+        (TYPE_QR, 'QR'),
+        (TYPE_INTERNE, 'Interne'),
+        (TYPE_AUTRE, 'Autre'),
+    ]
+
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    entreprise = models.ForeignKey(
+        Entreprise,
+        on_delete=models.CASCADE,
+        related_name='codes_barres',
+    )
+    succursale = models.ForeignKey(
+        Succursale,
+        on_delete=models.CASCADE,
+        related_name='codes_barres',
+        null=True,
+        blank=True,
+    )
+    article = models.ForeignKey(
+        Article,
+        on_delete=models.CASCADE,
+        related_name='codes_barres',
+    )
+    conditionnement = models.ForeignKey(
+        ConditionnementArticle,
+        on_delete=models.PROTECT,
+        related_name='codes_barres',
+    )
+    code = models.CharField(max_length=128)
+    type_code = models.CharField(max_length=20, choices=TYPE_CODE_CHOICES, default=TYPE_INTERNE)
+    est_principal = models.BooleanField(
+        default=False,
+        help_text="Code principal du conditionnement.",
+    )
+    est_actif = models.BooleanField(default=True)
+    cree_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='codes_barres_crees',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['article_id', 'conditionnement_id', '-est_principal', 'code']
+        indexes = [
+            models.Index(fields=['entreprise', 'code']),
+            models.Index(fields=['entreprise', 'est_actif']),
+            models.Index(fields=['article', 'conditionnement']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['entreprise', 'code'],
+                name='uniq_code_barres_entreprise_code',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.code} → {self.article_id} / {self.conditionnement.nom}'
+
+    def save(self, *args, **kwargs):
+        self.code = ''.join(str(self.code or '').strip().split())
+        if not self.code:
+            raise ValueError('Le code-barres ne peut pas être vide.')
+        if self.conditionnement_id and self.article_id:
+            if self.conditionnement.article_id != self.article_id:
+                raise ValueError('Le conditionnement doit appartenir à l’article.')
+        if self.est_principal and self.conditionnement_id:
+            CodeBarresArticle.objects.filter(
+                conditionnement_id=self.conditionnement_id,
+                est_principal=True,
+            ).exclude(pk=self.pk).update(est_principal=False)
         super().save(*args, **kwargs)
 
 

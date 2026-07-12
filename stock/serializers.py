@@ -9,6 +9,7 @@ from .models import (
     Unite,
     Article,
     ConditionnementArticle,
+    CodeBarresArticle,
     Entree,
     LigneEntree,
     PrixConditionnementEntree,
@@ -200,6 +201,88 @@ class ConditionnementArticleSerializer(serializers.ModelSerializer):
         model = ConditionnementArticle
         fields = ['id', 'article', 'article_id', 'nom', 'multiplicateur_base', 'est_defaut', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at']
+
+
+class CodeBarresArticleSerializer(serializers.ModelSerializer):
+    article_id = serializers.SlugRelatedField(
+        slug_field='article_id',
+        queryset=Article.objects.all(),
+        source='article',
+        write_only=True,
+    )
+    article = serializers.SlugRelatedField(slug_field='article_id', read_only=True)
+    conditionnement_id = serializers.PrimaryKeyRelatedField(
+        queryset=ConditionnementArticle.objects.all(),
+        source='conditionnement',
+        write_only=True,
+    )
+    conditionnement = ConditionnementArticleSerializer(read_only=True)
+    cree_par = serializers.StringRelatedField(read_only=True)
+
+    class Meta:
+        model = CodeBarresArticle
+        fields = [
+            'id',
+            'uuid',
+            'entreprise',
+            'succursale',
+            'article',
+            'article_id',
+            'conditionnement',
+            'conditionnement_id',
+            'code',
+            'type_code',
+            'est_principal',
+            'est_actif',
+            'cree_par',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'uuid', 'entreprise', 'succursale', 'cree_par', 'created_at', 'updated_at']
+
+    def validate_code(self, value):
+        from stock.services.code_barres_lookup import normalize_code_barres
+
+        code = normalize_code_barres(value)
+        if not code:
+            raise serializers.ValidationError(_('Le code-barres ne peut pas être vide.'))
+        return code
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        tenant_id, ignored_branch = get_tenant_ids(request) if request else (None, None)
+        article = attrs.get('article') or (self.instance.article if self.instance else None)
+        conditionnement = attrs.get('conditionnement') or (
+            self.instance.conditionnement if self.instance else None
+        )
+        code = attrs.get('code') or (self.instance.code if self.instance else None)
+
+        if article is not None and conditionnement is not None:
+            if conditionnement.article_id != article.article_id:
+                raise serializers.ValidationError({
+                    'conditionnement_id': _('Le conditionnement ne correspond pas à l’article.'),
+                })
+
+        if tenant_id and code:
+            qs = CodeBarresArticle.objects.filter(entreprise_id=tenant_id, code=code)
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            existing = qs.select_related('article').first()
+            if existing is not None:
+                other_name = existing.article.nom_commercial or existing.article.nom_scientifique
+                raise serializers.ValidationError({
+                    'code': _(
+                        'Ce code-barres est déjà associé à un autre article (%(article)s).'
+                    ) % {'article': other_name},
+                })
+
+        type_code = attrs.get('type_code')
+        if (not type_code or type_code == CodeBarresArticle.TYPE_INTERNE) and code:
+            from stock.services.code_barres_lookup import infer_type_code
+
+            attrs['type_code'] = infer_type_code(code)
+
+        return attrs
 
 
 class PrixConditionnementEntreeSerializer(serializers.ModelSerializer):

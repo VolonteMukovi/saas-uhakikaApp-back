@@ -17,6 +17,7 @@ from .models import (
     Unite,
     Article,
     ConditionnementArticle,
+    CodeBarresArticle,
     Entree,
     LigneEntree,
     PrixConditionnementEntree,
@@ -1885,6 +1886,231 @@ class PrixConditionnementEntreeViewSet(TenantFilterMixin, BusinessPermissionMixi
                 ligne_entree=instance.ligne_entree,
                 est_prix_principal=True,
             ).exclude(pk=instance.pk).update(est_prix_principal=False)
+
+
+class CodeBarresArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    queryset = CodeBarresArticle.objects.select_related(
+        'article',
+        'conditionnement',
+        'entreprise',
+        'succursale',
+        'cree_par',
+    ).all()
+    serializer_class = CodeBarresArticleSerializer
+    tenant_lookup = 'entreprise_id'
+
+    def get_queryset(self):
+        qs = super().get_queryset().order_by('article_id', 'conditionnement_id', '-est_principal', 'code')
+        article_id = self.request.query_params.get('article_id')
+        if article_id:
+            qs = qs.filter(article_id=article_id)
+        conditionnement_id = self.request.query_params.get('conditionnement_id')
+        if conditionnement_id:
+            qs = qs.filter(conditionnement_id=conditionnement_id)
+        est_actif = self.request.query_params.get('est_actif')
+        if est_actif is not None:
+            qs = qs.filter(est_actif=str(est_actif).lower() in ('1', 'true', 'yes'))
+        return qs
+
+    def perform_create(self, serializer):
+        tenant_id, branch_id = self.get_tenant_ids()
+        if not tenant_id:
+            raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
+        article = serializer.validated_data['article']
+        if article.entreprise_id != tenant_id:
+            raise serializers.ValidationError({'article_id': 'Article hors entreprise courante.'})
+        conditionnement = serializer.validated_data['conditionnement']
+        if conditionnement.article_id != article.article_id:
+            raise serializers.ValidationError({
+                'conditionnement_id': 'Le conditionnement doit appartenir à l’article.',
+            })
+        serializer.save(
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            cree_par=self.request.user if self.request.user.is_authenticated else None,
+        )
+
+    def perform_update(self, serializer):
+        tenant_id, branch_id = self.get_tenant_ids()
+        article = serializer.validated_data.get('article', serializer.instance.article)
+        if tenant_id and article.entreprise_id != tenant_id:
+            raise serializers.ValidationError({'article_id': 'Article hors entreprise courante.'})
+        conditionnement = serializer.validated_data.get('conditionnement', serializer.instance.conditionnement)
+        if conditionnement.article_id != article.article_id:
+            raise serializers.ValidationError({
+                'conditionnement_id': 'Le conditionnement doit appartenir à l’article.',
+            })
+        serializer.save(
+            entreprise_id=tenant_id or serializer.instance.entreprise_id,
+            succursale_id=branch_id if branch_id is not None else serializer.instance.succursale_id,
+        )
+
+    @action(detail=False, methods=['post'], url_path='generer')
+    def generer(self, request):
+        """
+        Génère un code-barres interne Code128 pour un conditionnement.
+        POST { article_id, conditionnement_id, format?: numerique|structure, remplacer?: false }
+        """
+        from stock.services.code_barres_interne import generer_code_barres_interne, normalize_format
+
+        tenant_id, branch_id = self.get_tenant_ids()
+        if not tenant_id:
+            return Response(
+                {'detail': _('Contexte entreprise manquant.')},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        article_id = request.data.get('article_id')
+        conditionnement_id = request.data.get('conditionnement_id')
+        if not article_id or not conditionnement_id:
+            return Response(
+                {'detail': _('article_id et conditionnement_id sont obligatoires.')},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            article = Article.objects.get(article_id=article_id, entreprise_id=tenant_id)
+        except Article.DoesNotExist:
+            return Response(
+                {'article_id': _('Article introuvable.')},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            conditionnement = ConditionnementArticle.objects.get(
+                pk=conditionnement_id,
+                article=article,
+            )
+        except ConditionnementArticle.DoesNotExist:
+            return Response(
+                {'conditionnement_id': _('Conditionnement introuvable pour cet article.')},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        format_code = request.data.get('format', 'numerique')
+        try:
+            normalize_format(format_code)
+        except serializers.ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        remplacer = str(request.data.get('remplacer', False)).lower() in ('1', 'true', 'yes')
+
+        try:
+            instance = generer_code_barres_interne(
+                entreprise_id=tenant_id,
+                succursale_id=branch_id,
+                article=article,
+                conditionnement=conditionnement,
+                utilisateur=request.user,
+                format_code=format_code,
+                remplacer=remplacer,
+            )
+        except serializers.ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        data = CodeBarresArticleSerializer(instance, context={'request': request}).data
+        data['etiquette_url'] = request.build_absolute_uri(
+            f'/api/codes-barres-articles/{instance.pk}/etiquette/'
+        )
+        return Response(data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], url_path='generer-manquants')
+    def generer_manquants(self, request):
+        """Génère des codes pour tous les conditionnements actifs sans code-barres."""
+        from stock.services.code_barres_interne import generer_codes_manquants_article, normalize_format
+
+        tenant_id, branch_id = self.get_tenant_ids()
+        if not tenant_id:
+            return Response(
+                {'detail': _('Contexte entreprise manquant.')},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        article_id = request.data.get('article_id')
+        if not article_id:
+            return Response(
+                {'article_id': _('article_id est obligatoire.')},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            article = Article.objects.get(article_id=article_id, entreprise_id=tenant_id)
+        except Article.DoesNotExist:
+            return Response(
+                {'article_id': _('Article introuvable.')},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        format_code = request.data.get('format', 'numerique')
+        try:
+            normalize_format(format_code)
+        except serializers.ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            created = generer_codes_manquants_article(
+                entreprise_id=tenant_id,
+                succursale_id=branch_id,
+                article=article,
+                utilisateur=request.user,
+                format_code=format_code,
+            )
+        except serializers.ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        ser = CodeBarresArticleSerializer(created, many=True, context={'request': request})
+        return Response(
+            {
+                'count': len(created),
+                'codes_barres': ser.data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=['get'], url_path='etiquette')
+    def etiquette(self, request, pk=None):
+        """PDF étiquette Code128 imprimable."""
+        from stock.services.code_barres_interne import build_etiquette_pdf
+
+        instance = self.get_object()
+        entreprise = request.user.get_entreprise(request) if request.user.is_authenticated else instance.entreprise
+        pdf_bytes = build_etiquette_pdf(instance, entreprise=entreprise)
+        filename = f'etiquette_{instance.article_id}_{instance.pk}.pdf'
+        return HttpResponse(
+            pdf_bytes,
+            content_type='application/pdf',
+            headers={'Content-Disposition': f'inline; filename="{filename}"'},
+        )
+
+
+class CodeBarresLookupView(BusinessPermissionMixin, viewsets.ViewSet):
+    """GET /api/stock/code-barres/lookup/?code=..."""
+
+    @swagger_auto_schema(
+        operation_summary='Recherche article par code-barres scanné',
+        manual_parameters=[
+            openapi.Parameter(
+                'code',
+                openapi.IN_QUERY,
+                description='Valeur scannée par le lecteur (EAN, Code128, interne…)',
+                type=openapi.TYPE_STRING,
+                required=True,
+            ),
+        ],
+    )
+    def list(self, request):
+        from stock.services.code_barres_lookup import lookup_code_barres
+
+        tenant_id, branch_id = _get_tenant_ids(request)
+        if tenant_id is None:
+            return Response(
+                {'found': False, 'message': 'Contexte entreprise manquant.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        code = request.query_params.get('code', '')
+        payload = lookup_code_barres(code, tenant_id=tenant_id, branch_id=branch_id)
+        http_status = status.HTTP_200_OK if payload.get('found') else status.HTTP_404_NOT_FOUND
+        return Response(payload, status=http_status)
 
 
 class TypeArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
