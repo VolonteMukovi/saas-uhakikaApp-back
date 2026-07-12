@@ -50,6 +50,7 @@ urlpatterns = [
     path('api/', include('rapports.urls')),
     path('api/', include('abonnements.urls')),
     path('api/', include('inscription.urls')),
+    path('api/', include('chatbot.urls')),
     path('api/i18n-test/', i18n_test, name='i18n_test'),
     path('api/auth/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/auth/refresh/', CustomTokenRefreshView.as_view(), name='token_refresh'),

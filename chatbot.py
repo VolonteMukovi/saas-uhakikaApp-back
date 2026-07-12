@@ -1095,6 +1095,10 @@ Ce document est basé sur le code source du dépôt saas-uhakikaApp-back. Les fo
 """
 
 # 3. Définition des règles strictes (Instructions Système)
+# NOTE : L'API web utilise le module Django `chatbot/` (POST /api/chatbot/ask/).
+# Ce script console reste pour tests locaux avec documentation statique uniquement.
+# Voir docs/CHATBOT_DATABASE_INTEGRATION.md pour l'intégration base de données sécurisée.
+
 SYSTEM_INSTRUCTION = f"""
 Tu es l'assistant virtuel exclusif de l'application UHAKIKAAPP.
 Ton unique rôle est d'aider les utilisateurs en te basant STRICTEMENT sur la documentation officielle fournie ci-dessous.

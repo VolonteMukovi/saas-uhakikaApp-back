@@ -17,6 +17,10 @@ def _chemin_onboarding_autorise(chemin: str) -> bool:
     return chemin.rstrip('/').startswith('/api/onboarding')
 
 
+def _chemin_chatbot_autorise(chemin: str) -> bool:
+    return chemin.rstrip('/').startswith('/api/chatbot')
+
+
 def doit_bloquer_configuration_metier(request) -> tuple[bool, str, str]:
     if not controle_licence_actif():
         return False, '', ''
@@ -26,7 +30,7 @@ def doit_bloquer_configuration_metier(request) -> tuple[bool, str, str]:
         return False, '', ''
 
     chemin = request.path
-    if chemin_exempt(chemin) or _chemin_onboarding_autorise(chemin):
+    if chemin_exempt(chemin) or _chemin_onboarding_autorise(chemin) or _chemin_chatbot_autorise(chemin):
         return False, '', ''
 
     if chemin_setup_autorise(chemin, methode):

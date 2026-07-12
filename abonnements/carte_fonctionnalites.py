@@ -64,6 +64,7 @@ REGLES_FONCTIONNALITES: tuple[RegleFonctionnalite, ...] = (
     RegleFonctionnalite(_p(r'^/api/rapports/clients-dettes-general'), TOUTES, 'rapports_avances', True),
     RegleFonctionnalite(_p(r'^/api/rapports/clients-dettes'), TOUTES, 'dettes', True),
     RegleFonctionnalite(_p(r'^/api/rapports'), TOUTES, 'rapports_simples', True),
+    RegleFonctionnalite(_p(r'^/api/chatbot'), TOUTES, 'chatbot', True),
 )
 
 

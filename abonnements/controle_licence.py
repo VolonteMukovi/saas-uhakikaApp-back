@@ -33,6 +33,7 @@ CHEMINS_EXEMPTES_PREFIXES = (
     '/api/abonnements/paiements/',
     '/api/plateforme/',
     '/api/i18n-test/',
+    '/api/chatbot/',
 )
 
 # GET autorisés même sans licence (consultation profil / entreprise).

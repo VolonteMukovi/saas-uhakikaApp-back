@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     "order",  # Gestion des marchandises en cours de transport
     "abonnements",  # SaaS : formules, licences, paiements
     "inscription",  # SaaS : inscription et onboarding
+    "chatbot",  # Assistant intelligent métier
 ]
 
 MIDDLEWARE = [
@@ -422,6 +423,11 @@ FLEXPAY_WEBHOOK_SECRET = config('FLEXPAY_WEBHOOK_SECRET', default='')
 
 SERDI_PAY_API_KEY = config('SERDI_PAY_API_KEY', default='')
 SERDI_PAY_WEBHOOK_SECRET = config('SERDI_PAY_WEBHOOK_SECRET', default='')
+
+# --- Chatbot / Gemini ---
+GEMINI_API_KEY = config('GEMINI_API_KEY', default='')
+CHATBOT_GEMINI_MODEL = config('CHATBOT_GEMINI_MODEL', default='gemini-2.5-flash')
+CHATBOT_RATE_LIMIT_PER_MINUTE = config('CHATBOT_RATE_LIMIT_PER_MINUTE', default=20, cast=int)
 
 
 
