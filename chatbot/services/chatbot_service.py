@@ -8,8 +8,9 @@ from django.utils.translation import gettext as _
 
 from chatbot.context import ChatbotContext
 from chatbot.services.conversation_responses import build_conversation_answer
+from chatbot.services.business_answer_formatter import format_business_answer
 from chatbot.services.gemini_client import generate_answer
-from chatbot.services.intent_classifier import classify_intent, is_expiration_question
+from chatbot.services.intent_classifier import classify_intent
 from chatbot.services.permission_checker import CONVERSATIONAL_INTENTS, check_domain_permission
 from chatbot.services.rate_limiter import check_rate_limit
 from chatbot.services.tools import fetch_for_intent
@@ -17,6 +18,11 @@ from chatbot.services.tools import fetch_for_intent
 logger = logging.getLogger(__name__)
 
 MAX_MESSAGE_LENGTH = 2000
+
+# Intents où les données backend suffisent — évite Gemini (lenteur / timeouts réseau).
+LOCAL_FIRST_INTENTS = frozenset({
+    'stock', 'caisse', 'ventes', 'dettes', 'clients', 'rapports', 'abonnement', 'platform',
+})
 
 
 class ChatbotError(Exception):
@@ -85,14 +91,6 @@ def ask_chatbot(
             )
 
     donnees = fetch_for_intent(ctx, intent, message)
-    if intent == 'stock' and is_expiration_question(message):
-        donnees = dict(donnees)
-        donnees['note_expiration'] = (
-            'Seules les statistiques d’expiration sont disponibles pour l’instant, '
-            'pas encore la liste détaillée des noms de produits. '
-            'Formule une réponse naturelle avec les chiffres disponibles et explique '
-            'que la liste détaillée pourra être affichée quand le backend la fournira.'
-        )
 
     context_payload = {
         'entreprise': ctx.entreprise_nom,
@@ -102,6 +100,24 @@ def ask_chatbot(
         'question': message,
         'donnees_autorisees': donnees,
     }
+
+    # Réponses métier structurées : formateur local d’abord (rapide, fiable hors ligne Gemini).
+    if intent in LOCAL_FIRST_INTENTS:
+        local = format_business_answer(intent, context_payload)
+        if local:
+            logger.info(
+                'chatbot ask user=%s tenant=%s intent=%s mode=local sources=%s',
+                request.user.pk,
+                ctx.tenant_id,
+                intent,
+                ctx.sources,
+            )
+            return _success_payload(
+                answer=local,
+                intent=intent,
+                ctx=ctx,
+                sources=list(dict.fromkeys(ctx.sources)),
+            )
 
     include_doc = intent == 'aide'
     answer = generate_answer(

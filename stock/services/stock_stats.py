@@ -58,6 +58,52 @@ def _count_articles_expiration_dans_fenetre(
     return int(n), today, date_fin_inclusive
 
 
+def list_articles_expiration_dans_fenetre(
+    *,
+    entreprise_id: int,
+    succursale_id: int | None,
+    date_fin_inclusive: date,
+    today: date | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """
+    Liste les articles (lots non épuisés) dont la date d'expiration tombe
+    dans [aujourd'hui, date_fin_inclusive], triés par date croissante.
+    """
+    if today is None:
+        today = timezone.now().date()
+    le = (
+        LigneEntree.objects.filter(
+            article__entreprise_id=entreprise_id,
+            quantite_restante__gt=0,
+            date_expiration__isnull=False,
+            date_expiration__gte=today,
+            date_expiration__lte=date_fin_inclusive,
+        )
+        .select_related('article')
+        .order_by('date_expiration', 'article__nom_commercial')
+    )
+    if succursale_id is not None:
+        le = le.filter(article__succursale_id=succursale_id)
+
+    seen: set[int] = set()
+    results: list[dict[str, Any]] = []
+    for ligne in le:
+        art = ligne.article
+        if art.pk in seen:
+            continue
+        seen.add(art.pk)
+        results.append({
+            'nom': art.nom_commercial or art.nom_scientifique,
+            'code': art.article_id,
+            'date_expiration': ligne.date_expiration.isoformat() if ligne.date_expiration else None,
+            'quantite_restante': str(ligne.quantite_restante),
+        })
+        if len(results) >= limit:
+            break
+    return results
+
+
 def aggregate_stock_stats(
     *,
     entreprise_id: int,

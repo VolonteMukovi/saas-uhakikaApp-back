@@ -1,7 +1,7 @@
 """Outils métier — données filtrées tenant."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db.models import Count, F, Q, Sum
@@ -11,7 +11,10 @@ from django.utils import timezone
 from chatbot.context import ChatbotContext
 from chatbot.services.intent_classifier import extract_client_hint, extract_product_hint
 from stock.models import Article, DetteClient, LigneSortie, Sortie, Stock
-from stock.services.stock_stats import aggregate_stock_stats
+from stock.services.stock_stats import (
+    aggregate_stock_stats,
+    list_articles_expiration_dans_fenetre,
+)
 
 
 def _money(value) -> str:
@@ -43,6 +46,17 @@ def fetch_stock_data(ctx: ChatbotContext, message: str) -> dict:
     ]
     ctx.sources.append('stocks')
 
+    today = timezone.now().date()
+    fin_30 = today + timedelta(days=30)
+    articles_expiration_30 = list_articles_expiration_dans_fenetre(
+        entreprise_id=ctx.tenant_id,
+        succursale_id=ctx.branch_id,
+        date_fin_inclusive=fin_30,
+        today=today,
+        limit=30,
+    )
+    ctx.sources.append('lignes_entree_expiration')
+
     product_hint = extract_product_hint(message)
     product_detail = None
     if product_hint:
@@ -70,6 +84,8 @@ def fetch_stock_data(ctx: ChatbotContext, message: str) -> dict:
         'articles_en_rupture_total': stats['rupture'],
         'articles_en_alerte_total': stats['alerte'],
         'expiration_sous_30_jours': stats['expiration_sous_30_jours'],
+        'expiration_sous_3_mois': stats['expiration_sous_3_mois'],
+        'articles_expiration_30_jours': articles_expiration_30,
         'exemples_rupture': ruptures,
         'produit_recherche': product_detail,
     }
@@ -236,10 +252,27 @@ def fetch_clients_data(ctx: ChatbotContext) -> dict:
     from stock.models import ClientEntreprise
 
     ctx.sources.append('clients')
-    qs = ClientEntreprise.objects.filter(entreprise_id=ctx.tenant_id)
+    qs = (
+        ClientEntreprise.objects.filter(entreprise_id=ctx.tenant_id)
+        .select_related('client')
+        .order_by('client__nom')
+    )
     if ctx.branch_id is not None:
         qs = qs.filter(succursale_id=ctx.branch_id)
-    return {'nombre_clients': qs.count()}
+
+    total = qs.count()
+    exemples = [
+        {
+            'nom': lien.client.nom,
+            'telephone': getattr(lien.client, 'telephone', None) or '',
+        }
+        for lien in qs[:25]
+    ]
+    return {
+        'nombre_clients': total,
+        'exemples_clients': exemples,
+        'liste_tronquee': total > len(exemples),
+    }
 
 
 def fetch_rapports_data(ctx: ChatbotContext, message: str) -> dict:

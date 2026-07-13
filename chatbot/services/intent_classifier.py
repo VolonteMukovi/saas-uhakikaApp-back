@@ -128,7 +128,9 @@ INTENT_KEYWORDS: dict[str, list[str]] = {
     ],
     'clients': [
         'combien de clients', 'nombre de clients', 'j ai combien de clients',
-        'jai combien de clients', 'clients enregistres',
+        'jai combien de clients', 'clients enregistres', 'nos clients',
+        'mes clients', 'liste des clients', 'quels sont nos clients',
+        'quel sont nos clients', 'quels sont mes clients', 'nos client',
     ],
     'rapports': [
         'rapport', 'synthese', 'resume activite', 'resume du jour', 'bilan', 'point a surveiller',

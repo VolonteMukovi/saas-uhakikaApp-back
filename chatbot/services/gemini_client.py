@@ -7,15 +7,28 @@ import logging
 from django.conf import settings
 
 from chatbot.knowledge import DOCUMENTATION_UHAKIKAAPP, SYSTEM_RULES
+from chatbot.services.business_answer_formatter import format_business_answer
 
 logger = logging.getLogger(__name__)
 
+_GENAI_IMPORT_ERROR: str | None = None
+
 
 def _client():
+    global _GENAI_IMPORT_ERROR  # noqa: PLW0603
+
     api_key = getattr(settings, 'GEMINI_API_KEY', '') or ''
     if not api_key:
         return None
-    from google import genai
+    try:
+        from google import genai
+    except ImportError as exc:
+        _GENAI_IMPORT_ERROR = str(exc)
+        logger.warning(
+            'google-genai non installé — réponses métier en mode local. '
+            'Installez : pip install google-genai'
+        )
+        return None
 
     return genai.Client(api_key=api_key)
 
@@ -35,11 +48,20 @@ def generate_answer(
     history: list[dict] | None = None,
     include_documentation: bool = False,
 ) -> str:
-    client = _client()
+    try:
+        client = _client()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception('Gemini client init error: %s', exc)
+        return _fallback_answer(question, context_payload)
+
     if client is None:
         return _fallback_answer(question, context_payload)
 
-    from google.genai import types
+    try:
+        from google.genai import types
+    except ImportError as exc:
+        logger.warning('google.genai.types unavailable: %s', exc)
+        return _fallback_answer(question, context_payload)
 
     model = getattr(settings, 'CHATBOT_GEMINI_MODEL', 'gemini-2.5-flash')
     user_content = (
@@ -73,9 +95,13 @@ def generate_answer(
 
 
 def _fallback_answer(question: str, context_payload: dict) -> str:
+    intent = context_payload.get('intent')
+    formatted = format_business_answer(intent or '', context_payload)
+    if formatted:
+        return formatted
+
     data = context_payload.get('donnees_autorisees') or {}
     if not data:
-        intent = context_payload.get('intent')
         if intent in ('hors_sujet', 'hors_sujet_sensible', 'question_interdite'):
             return (
                 'Je suis surtout là pour UHAKIKAAPP 😊\n'
@@ -85,6 +111,11 @@ def _fallback_answer(question: str, context_payload: dict) -> str:
             return (
                 'Je peux vous guider sur les modules UHAKIKAAPP (articles, stock, ventes, caisse, dettes). '
                 'Précisez ce que vous souhaitez faire.'
+            )
+        if _GENAI_IMPORT_ERROR and getattr(settings, 'GEMINI_API_KEY', ''):
+            return (
+                'Je peux consulter vos données, mais le module Gemini n’est pas disponible sur ce serveur. '
+                'Contactez l’administrateur pour installer le paquet `google-genai`.'
             )
         return 'Je ne peux pas consulter cette information pour le moment.'
 

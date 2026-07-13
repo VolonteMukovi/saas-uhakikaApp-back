@@ -233,3 +233,64 @@ class ChatbotAskTests(APITestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['metadata']['intent'], 'stock')
+
+    @patch('chatbot.services.gemini_client._client', return_value=None)
+    def test_stock_without_gemini_uses_local_formatter(self, _mock_client):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/chatbot/ask/',
+            {'message': 'consulter le stock'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(data['metadata']['intent'], 'stock')
+        self.assertIn('stock', data['answer'].lower())
+        self.assertNotIn('ImportError', data['answer'])
+
+    def test_expiration_list_includes_product_names(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        entree = Entree.objects.create(libele='appro-exp', entreprise=self.entreprise)
+        LigneEntree.objects.create(
+            article=self.article,
+            quantite=Decimal('5'),
+            quantite_restante=Decimal('5'),
+            prix_unitaire=Decimal('1'),
+            prix_vente=Decimal('2'),
+            entree=entree,
+            devise=self.devise,
+            seuil_alerte=Decimal('0'),
+            date_expiration=timezone.now().date() + timedelta(days=10),
+        )
+        Stock.objects.filter(article=self.article).update(Qte=Decimal('5'))
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/chatbot/ask/',
+            {'message': 'quels sont les articles qui expireront dans les 30 prochains jours ?'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(data['metadata']['intent'], 'stock')
+        self.assertIn('Produit A', data['answer'])
+        self.assertNotIn('pas encore fournie', data['answer'].lower())
+
+    def test_liste_clients_sans_timeout_gemini(self):
+        from stock.models import Client, ClientEntreprise
+
+        client = Client.objects.create(nom='Client Test Chat')
+        ClientEntreprise.objects.create(client=client, entreprise=self.entreprise)
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/chatbot/ask/',
+            {'message': 'quel sont nos client ???'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(data['metadata']['intent'], 'clients')
+        self.assertIn('Client Test Chat', data['answer'])
+        self.assertIn('1 client', data['answer'].lower())
