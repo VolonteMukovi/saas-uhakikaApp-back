@@ -45,6 +45,7 @@ from stock.services.client_lifecycle import (
 )
 from stock.services.currency import (
     CurrencyError,
+    _as_aware_datetime,
     build_conversion_snapshot,
     get_exchange_rate,
     get_principal_devise as get_principal_devise_for_entreprise,
@@ -244,23 +245,28 @@ def _persist_exchange_rates(entreprise, rates, user_id=None):
 
 
 def _serialize_exchange_rate_entry(entry, entreprise):
-    devise_ids = {
-        entry.get('source_devise_id'),
-        entry.get('target_devise_id'),
-    }
+    try:
+        source_id = int(entry.get('source_devise_id')) if entry.get('source_devise_id') is not None else None
+    except (TypeError, ValueError):
+        source_id = None
+    try:
+        target_id = int(entry.get('target_devise_id')) if entry.get('target_devise_id') is not None else None
+    except (TypeError, ValueError):
+        target_id = None
+    devise_ids = {sid for sid in (source_id, target_id) if sid}
     devises = {
         d.id: d
         for d in Devise.objects.filter(
             entreprise=entreprise,
-            id__in=[did for did in devise_ids if did],
+            id__in=devise_ids,
         )
     }
-    source = devises.get(entry.get('source_devise_id'))
-    target = devises.get(entry.get('target_devise_id'))
+    source = devises.get(source_id)
+    target = devises.get(target_id)
     return {
         'id': entry.get('id'),
-        'source_devise_id': entry.get('source_devise_id'),
-        'target_devise_id': entry.get('target_devise_id'),
+        'source_devise_id': source_id,
+        'target_devise_id': target_id,
         'source_devise': DeviseSerializer(source).data if source else None,
         'target_devise': DeviseSerializer(target).data if target else None,
         'taux': str(entry.get('rate')),
@@ -2544,20 +2550,43 @@ def taux_change_collection(request):
     if rate <= 0:
         raise serializers.ValidationError({'taux': _("Le taux de change doit etre superieur a 0.")})
 
-    now_iso = timezone.now().isoformat()
+    now = timezone.now()
+    now_iso = now.isoformat()
+    # Date seule (YYYY-MM-DD) : ancrer à maintenant si c'est aujourd'hui/demain UTC,
+    # pour éviter qu'un taux « jour local client » soit rejeté comme futur.
+    resolved_effective = effective_at or now_iso
+    if effective_at and len(str(effective_at).strip()) == 10:
+        try:
+            from datetime import date as date_cls
+            d = date_cls.fromisoformat(str(effective_at).strip())
+            if abs((d - now.date()).days) <= 1:
+                resolved_effective = now_iso
+        except ValueError:
+            pass
+
     current_rates = _get_entreprise_exchange_rates(entreprise)
     new_entry = {
         'id': max([int(item.get('id') or 0) for item in current_rates] + [0]) + 1,
-        'source_devise_id': source_devise.id,
-        'target_devise_id': target_devise.id,
+        'source_devise_id': int(source_devise.id),
+        'target_devise_id': int(target_devise.id),
         'rate': str(rate),
-        'effective_at': effective_at or now_iso,
+        'effective_at': resolved_effective,
         'is_active': bool(is_active),
         'created_at': now_iso,
         'created_by_user_id': getattr(request.user, 'id', None),
     }
     current_rates.append(new_entry)
     _persist_exchange_rates(entreprise, current_rates, user_id=getattr(request.user, 'id', None))
+
+    # Miroir ORM pour les conversions (sens direct + inverse).
+    TauxChange.objects.create(
+        entreprise=entreprise,
+        devise_source=source_devise,
+        devise_cible=target_devise,
+        taux=rate,
+        date_application=_as_aware_datetime(resolved_effective) or now,
+        is_active=bool(is_active),
+    )
     return Response(_serialize_exchange_rate_entry(new_entry, entreprise), status=status.HTTP_201_CREATED)
 
 

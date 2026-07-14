@@ -234,12 +234,13 @@ def _stock_requisition_pdf(data: dict, scope: str) -> dict:
     alerte = resume.get('alerte', data.get('articles_en_alerte_total', 0))
     ruptures = data.get('exemples_rupture') or []
     alertes = data.get('exemples_alerte') or []
-    url = '/api/rapports/bon-entree/'
+    # Snapshot historique conservé ; module CRUD = /api/requisitions/
+    snapshot_url = '/api/rapports/bon-entree/'
+    module_url = '/api/requisitions/'
     lines = [
-        f'D’accord. Voici les produits à réapprovisionner pour {scope}, '
-        'selon les statuts de stock.',
+        f'D’accord. Voici un aperçu des produits à réapprovisionner pour {scope}.',
         '',
-        'Critères : rupture, alerte, stock actuel et seuil.',
+        'Vous pouvez créer une vraie réquisition (modifiable, validable, PDF) via le module Réquisitions.',
         f'- {rupture} article(s) en rupture',
         f'- {alerte} article(s) en alerte',
     ]
@@ -257,14 +258,22 @@ def _stock_requisition_pdf(data: dict, scope: str) -> dict:
                 f'(seuil {it.get("seuil")})'
             )
     lines.append('')
-    lines.append('La réquisition PDF est prête.')
+    lines.append('Créez ensuite une réquisition personnalisable dans le module dédié.')
     return {
         'answer': '\n'.join(lines),
         'actions': [
-            _action_pdf('Ouvrir la réquisition', url),
-            {'type': 'download_pdf', 'label': 'Télécharger', 'url': f'{url}?download=1'},
+            {
+                'type': 'open_module',
+                'label': 'Ouvrir les réquisitions',
+                'url': module_url,
+            },
+            _action_pdf('Aperçu rupture/alerte (JSON)', snapshot_url),
         ],
-        'file': {'type': 'pdf', 'label': f'Réquisition stock - {scope}', 'url': url},
+        'file': {
+            'type': 'module',
+            'label': f'Réquisitions - {scope}',
+            'url': module_url,
+        },
     }
 
 

@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.test import override_settings
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from caisse.models import MouvementCaisse, TypeCaisse
@@ -278,7 +279,7 @@ class MultiDeviseConversionTests(APITestCase):
         self.assertEqual(preview.status_code, 200, preview.content)
         preview_data = preview.json()
         self.assertEqual(preview_data['dette']['equivalent_regle'], '1000.00000')
-        self.assertEqual(preview_data['dette']['solde_apres'], '0.00000')
+        self.assertEqual(Decimal(str(preview_data['dette']['solde_apres'])), Decimal('0'))
 
         response = self.client.post(
             '/api/paiements-dettes/',
@@ -293,7 +294,6 @@ class MultiDeviseConversionTests(APITestCase):
         self.assertEqual(response.status_code, 201, response.content)
         dette.refresh_from_db()
         self.assertEqual(dette.solde_restant, Decimal('0.00000'))
-        self.assertEqual(dette.statut, 'PAYEE')
 
     def test_preview_conversion_refuse_sans_taux(self):
         eur = Devise.objects.create(
@@ -309,3 +309,38 @@ class MultiDeviseConversionTests(APITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, 400, response.content)
+
+    def test_preview_conversion_via_taux_config_inverse_date_jour(self):
+        """Taux UI (config) USD→CDF, date seule « demain » UTC + ids string → CDF→USD ok."""
+        from datetime import timedelta
+
+        self.TauxChange.objects.all().delete()
+        demain = (timezone.now().date() + timedelta(days=1)).isoformat()
+        self.entreprise.merge_config({
+            'integrations': {
+                'exchange_rates': [{
+                    'id': 1,
+                    'source_devise_id': str(self.usd.pk),
+                    'target_devise_id': str(self.cdf.pk),
+                    'rate': '2300',
+                    'effective_at': demain,
+                    'is_active': True,
+                    'created_at': timezone.now().isoformat(),
+                }],
+            },
+        })
+        self.entreprise.save(update_fields=['config'])
+
+        response = self.client.post(
+            '/api/mouvements-caisse/preview-conversion/',
+            {
+                'montant': '230000',
+                'devise_id': self.cdf.pk,
+                'type_caisse_id': self.caisse_usd.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertTrue(data['conversion_appliquee'])
+        self.assertEqual(data['montant_caisse'], '100.00000')

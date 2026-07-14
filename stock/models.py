@@ -989,6 +989,217 @@ class InventaireLigne(models.Model):
         return self.ecart
 
 
+class Requisition(models.Model):
+    """Document de travail indépendant pour préparer un approvisionnement."""
+
+    STATUT_BROUILLON = 'BROUILLON'
+    STATUT_OUVERTE = 'OUVERTE'
+    STATUT_EN_PREPARATION = 'EN_PREPARATION'
+    STATUT_EN_ATTENTE_VALIDATION = 'EN_ATTENTE_VALIDATION'
+    STATUT_VALIDEE = 'VALIDEE'
+    STATUT_REJETEE = 'REJETEE'
+    STATUT_ANNULEE = 'ANNULEE'
+    STATUT_CLOTUREE = 'CLOTUREE'
+    STATUT_CHOICES = [
+        (STATUT_BROUILLON, 'Brouillon'),
+        (STATUT_OUVERTE, 'Ouverte'),
+        (STATUT_EN_PREPARATION, 'En préparation'),
+        (STATUT_EN_ATTENTE_VALIDATION, 'En attente de validation'),
+        (STATUT_VALIDEE, 'Validée'),
+        (STATUT_REJETEE, 'Rejetée'),
+        (STATUT_ANNULEE, 'Annulée'),
+        (STATUT_CLOTUREE, 'Clôturée'),
+    ]
+    STATUTS_VERROUILLES = {
+        STATUT_VALIDEE,
+        STATUT_ANNULEE,
+        STATUT_CLOTUREE,
+    }
+    STATUTS_MODIFIABLES = {
+        STATUT_BROUILLON,
+        STATUT_OUVERTE,
+        STATUT_EN_PREPARATION,
+        STATUT_EN_ATTENTE_VALIDATION,
+        STATUT_REJETEE,
+    }
+
+    PRIORITE_BASSE = 'BASSE'
+    PRIORITE_NORMALE = 'NORMALE'
+    PRIORITE_HAUTE = 'HAUTE'
+    PRIORITE_URGENTE = 'URGENTE'
+    PRIORITE_CHOICES = [
+        (PRIORITE_BASSE, 'Basse'),
+        (PRIORITE_NORMALE, 'Normale'),
+        (PRIORITE_HAUTE, 'Haute'),
+        (PRIORITE_URGENTE, 'Urgente'),
+    ]
+
+    numero = models.CharField(max_length=32, db_index=True)
+    titre = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default='')
+    observations = models.TextField(blank=True, default='')
+    commentaires = models.TextField(blank=True, default='')
+    priorite = models.CharField(
+        max_length=20, choices=PRIORITE_CHOICES, default=PRIORITE_NORMALE,
+    )
+    statut = models.CharField(
+        max_length=32, choices=STATUT_CHOICES, default=STATUT_BROUILLON,
+    )
+    entreprise = models.ForeignKey(
+        Entreprise, on_delete=models.CASCADE, related_name='requisitions',
+    )
+    succursale = models.ForeignKey(
+        Succursale, on_delete=models.CASCADE, related_name='requisitions',
+        null=True, blank=True,
+    )
+    cree_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='requisitions_creees',
+    )
+    valide_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='requisitions_validees',
+    )
+    rejete_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='requisitions_rejetees',
+    )
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_modification = models.DateTimeField(auto_now=True)
+    date_validation = models.DateTimeField(null=True, blank=True)
+    date_rejet = models.DateTimeField(null=True, blank=True)
+    date_cloture = models.DateTimeField(null=True, blank=True)
+    motif_rejet = models.TextField(blank=True, default='')
+    archived = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-date_creation']
+        verbose_name = 'Réquisition'
+        verbose_name_plural = 'Réquisitions'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['entreprise', 'numero'],
+                name='uniq_requisition_entreprise_numero',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['entreprise_id', 'statut']),
+            models.Index(fields=['entreprise_id', 'succursale_id']),
+            models.Index(fields=['entreprise_id', 'priorite']),
+            models.Index(fields=['entreprise_id', 'cree_par_id']),
+            models.Index(fields=['entreprise_id', 'date_creation']),
+        ]
+
+    def __str__(self):
+        return f'{self.numero} — {self.titre} ({self.get_statut_display()})'
+
+    @property
+    def est_modifiable(self) -> bool:
+        return self.statut in self.STATUTS_MODIFIABLES and not self.archived
+
+
+class RequisitionLigne(models.Model):
+    """Ligne de réquisition : article catalogue ou ligne libre (hors stock)."""
+
+    TYPE_ARTICLE = 'ARTICLE'
+    TYPE_LIBRE = 'LIBRE'
+    TYPE_CHOICES = [
+        (TYPE_ARTICLE, 'Article existant'),
+        (TYPE_LIBRE, 'Ligne libre'),
+    ]
+
+    PRIX_SOURCE_DERNIER_ACHAT = 'DERNIER_ACHAT'
+    PRIX_SOURCE_MANUEL = 'MANUEL'
+    PRIX_SOURCE_CHOICES = [
+        (PRIX_SOURCE_DERNIER_ACHAT, 'Dernier prix d\'achat'),
+        (PRIX_SOURCE_MANUEL, 'Saisie manuelle'),
+    ]
+
+    requisition = models.ForeignKey(
+        Requisition, on_delete=models.CASCADE, related_name='lignes',
+    )
+    type_ligne = models.CharField(max_length=16, choices=TYPE_CHOICES, default=TYPE_ARTICLE)
+    article = models.ForeignKey(
+        Article,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='lignes_requisition',
+    )
+    designation = models.CharField(max_length=255)
+    quantite = models.DecimalField(max_digits=12, decimal_places=5, default=0)
+    unite = models.CharField(max_length=100, blank=True, default='')
+    # Null = jamais approvisionné → afficher « ..... » côté UI / PDF.
+    prix_estime = models.DecimalField(max_digits=14, decimal_places=5, null=True, blank=True)
+    prix_source = models.CharField(
+        max_length=20, choices=PRIX_SOURCE_CHOICES, default=PRIX_SOURCE_MANUEL,
+    )
+    remarque = models.TextField(blank=True, default='')
+    ordre = models.PositiveIntegerField(default=0)
+    statut_stock = models.CharField(max_length=32, blank=True, default='')
+    stock_actuel = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
+    seuil_alerte = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
+
+    class Meta:
+        ordering = ['ordre', 'id']
+        indexes = [
+            models.Index(fields=['requisition_id', 'ordre']),
+            models.Index(fields=['requisition_id', 'article_id']),
+        ]
+
+    def __str__(self):
+        return f'{self.designation} x{self.quantite}'
+
+    @property
+    def prix_manquant(self) -> bool:
+        return self.prix_estime is None
+
+    @property
+    def montant_ligne(self):
+        if self.prix_estime is None:
+            return None
+        return (self.quantite or Decimal('0')) * self.prix_estime
+
+
+class RequisitionHistorique(models.Model):
+    """Trace des changements importants sur une réquisition."""
+
+    requisition = models.ForeignKey(
+        Requisition, on_delete=models.CASCADE, related_name='historique',
+    )
+    action = models.CharField(max_length=64)
+    detail = models.TextField(blank=True, default='')
+    ancien_statut = models.CharField(max_length=32, blank=True, default='')
+    nouveau_statut = models.CharField(max_length=32, blank=True, default='')
+    utilisateur = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='requisitions_historique',
+    )
+    date_action = models.DateTimeField(auto_now_add=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-date_action', '-id']
+        indexes = [
+            models.Index(fields=['requisition_id', 'date_action']),
+        ]
+
+    def __str__(self):
+        return f'{self.requisition_id} · {self.action}'
+
+
 # Compatibilité imports historiques (modèles définis dans l'app ``caisse``).
 from caisse.models import (  # noqa: E402, F401
     DetailMouvementCaisse,

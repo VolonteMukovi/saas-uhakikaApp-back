@@ -36,6 +36,7 @@ REGLES_FONCTIONNALITES: tuple[RegleFonctionnalite, ...] = (
     RegleFonctionnalite(_p(r'^/api/articles'), ECRITURE, 'articles'),
     RegleFonctionnalite(_p(r'^/api/stocks'), ECRITURE, 'stock'),
     RegleFonctionnalite(_p(r'^/api/inventaires'), ECRITURE, 'stock'),
+    RegleFonctionnalite(_p(r'^/api/requisitions'), ECRITURE, 'stock'),
     RegleFonctionnalite(_p(r'^/api/typearticles'), ECRITURE, 'articles'),
     RegleFonctionnalite(_p(r'^/api/soustypearticles'), ECRITURE, 'articles'),
     RegleFonctionnalite(_p(r'^/api/unites'), ECRITURE, 'articles'),
