@@ -291,6 +291,8 @@ class RapportsViewSet(viewsets.ViewSet):
 
     @staticmethod
     def _inventaire_stats_session(lignes_qs):
+        from decimal import Decimal, ROUND_DOWN
+
         lignes = list(lignes_qs)
         total = len(lignes)
         comptees = sum(1 for l in lignes if l.stock_physique is not None)
@@ -309,6 +311,16 @@ class RapportsViewSet(viewsets.ViewSet):
             1 for l in lignes
             if _stock_statut_code(l.stock_theorique, _seuil_article(l.article)) == 'NORMAL'
         )
+        capital_logiciel = sum((l.montant_logiciel for l in lignes), Decimal('0'))
+        capital_physique = sum(
+            (l.montant_physique for l in lignes if l.montant_physique is not None),
+            Decimal('0'),
+        )
+        ecart_financier = capital_physique - capital_logiciel
+
+        def _money(value: Decimal) -> str:
+            return str(value.quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
+
         return {
             'total_articles': total,
             'en_alerte': en_alerte,
@@ -320,6 +332,12 @@ class RapportsViewSet(viewsets.ViewSet):
             'ecarts_negatifs': ecarts_neg,
             'ecarts_nuls': ecarts_nuls,
             'conformes': ecarts_nuls,
+            'capital_logiciel': _money(capital_logiciel),
+            'capital_physique': _money(capital_physique),
+            'ecart_financier': _money(ecart_financier),
+            'capital_reel_stock': _money(capital_physique),
+            'total_montant_logiciel': _money(capital_logiciel),
+            'total_montant_physique': _money(capital_physique),
         }
 
     def _serialize_inventaire_session(self, request, session, *, force_complet: bool = False):
@@ -394,6 +412,13 @@ class RapportsViewSet(viewsets.ViewSet):
             },
             'statuts': INVENTAIRE_STATUTS_REFERENCE,
             'statistiques': stats,
+            # Bloc totaux financiers pour le PDF / affichage FE.
+            'totaux_financiers': {
+                'total_logiciel': stats.get('capital_logiciel'),
+                'total_physique': stats.get('capital_physique'),
+                'ecart_financier': stats.get('ecart_financier'),
+                'capital_reel_stock': stats.get('capital_reel_stock'),
+            },
             'complet': complet,
         }
 

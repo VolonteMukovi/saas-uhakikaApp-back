@@ -969,6 +969,13 @@ class InventaireLigne(models.Model):
     stock_theorique = models.DecimalField(max_digits=12, decimal_places=5, default=0)
     stock_physique = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
     ecart = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
+    # Snapshot du dernier PU d'achat au démarrage de l'inventaire (photographie).
+    dernier_prix_unitaire = models.DecimalField(
+        max_digits=14,
+        decimal_places=5,
+        default=Decimal('0'),
+        help_text="Dernier prix unitaire d'achat figé à la création des lignes d'inventaire.",
+    )
     motif_ligne = models.TextField(blank=True, default='')
 
     class Meta:
@@ -987,6 +994,22 @@ class InventaireLigne(models.Model):
         else:
             self.ecart = self.stock_physique - self.stock_theorique
         return self.ecart
+
+    @property
+    def montant_logiciel(self) -> Decimal:
+        return (
+            (self.stock_theorique or Decimal('0'))
+            * (self.dernier_prix_unitaire or Decimal('0'))
+        ).quantize(Decimal('0.00001'))
+
+    @property
+    def montant_physique(self) -> Decimal | None:
+        if self.stock_physique is None:
+            return None
+        return (
+            (self.stock_physique or Decimal('0'))
+            * (self.dernier_prix_unitaire or Decimal('0'))
+        ).quantize(Decimal('0.00001'))
 
 
 class Requisition(models.Model):

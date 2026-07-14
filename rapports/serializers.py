@@ -252,6 +252,9 @@ class RapportInventaireSessionLigneSerializer(serializers.ModelSerializer):
     statut_ligne_code = serializers.SerializerMethodField()
     prix_unitaire = serializers.SerializerMethodField()
     pu = serializers.SerializerMethodField()
+    dernier_prix_unitaire = serializers.SerializerMethodField()
+    montant_logiciel = serializers.SerializerMethodField()
+    montant_physique = serializers.SerializerMethodField()
     prix_total = serializers.SerializerMethodField()
     total = serializers.SerializerMethodField()
     motif_ligne = serializers.CharField(read_only=True)
@@ -265,7 +268,9 @@ class RapportInventaireSessionLigneSerializer(serializers.ModelSerializer):
             'quantite', 'quantite_stock', 'Qte', 'seuil_alerte',
             'statut', 'statut_code', 'statut_stock', 'statut_stock_code',
             'statut_ligne', 'statut_ligne_code',
-            'prix_unitaire', 'pu', 'prix_total', 'total', 'motif_ligne',
+            'prix_unitaire', 'pu', 'dernier_prix_unitaire',
+            'montant_logiciel', 'montant_physique',
+            'prix_total', 'total', 'motif_ligne',
         ]
 
     def _fmt(self, value):
@@ -313,25 +318,9 @@ class RapportInventaireSessionLigneSerializer(serializers.ModelSerializer):
         return str(_statut_ligne_label(self.get_statut_ligne_code(obj)))
 
     def _resolve_prix_unitaire(self, obj):
-        agg = LigneEntree.objects.filter(
-            article=obj.article,
-            quantite_restante__gt=0,
-        ).aggregate(
-            total_val=Sum(F('prix_unitaire') * F('quantite_restante')),
-            total_qty=Sum('quantite_restante'),
-        )
-        total_qty = agg.get('total_qty') or 0
-        total_val = agg.get('total_val')
-        if total_qty and total_val is not None and total_val > 0:
-            return total_val / Decimal(str(total_qty))
-        last = (
-            LigneEntree.objects.filter(article=obj.article)
-            .order_by('-date_entree')
-            .values('prix_unitaire')
-            .first()
-        )
-        if last and last.get('prix_unitaire') is not None:
-            return Decimal(str(last['prix_unitaire']))
+        """PU figé de la ligne d'inventaire (photographie) ; fallback 0."""
+        if getattr(obj, 'dernier_prix_unitaire', None) is not None:
+            return Decimal(str(obj.dernier_prix_unitaire or 0))
         return Decimal('0')
 
     def get_prix_unitaire(self, obj):
@@ -340,10 +329,20 @@ class RapportInventaireSessionLigneSerializer(serializers.ModelSerializer):
     def get_pu(self, obj):
         return self.get_prix_unitaire(obj)
 
+    def get_dernier_prix_unitaire(self, obj):
+        return self.get_prix_unitaire(obj)
+
+    def get_montant_logiciel(self, obj):
+        return _fmt_money(obj.montant_logiciel)
+
+    def get_montant_physique(self, obj):
+        if obj.montant_physique is None:
+            return None
+        return _fmt_money(obj.montant_physique)
+
     def get_prix_total(self, obj):
-        pu = self._resolve_prix_unitaire(obj)
-        qte = obj.stock_physique if obj.stock_physique is not None else obj.stock_theorique
-        return _fmt_money(pu * _dec(qte))
+        # Alias historique : montant logiciel (qté théorique × PU figé).
+        return self.get_montant_logiciel(obj)
 
     def get_total(self, obj):
         return self.get_prix_total(obj)

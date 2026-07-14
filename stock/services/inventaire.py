@@ -50,7 +50,8 @@ def _dernier_prix_article(article: Article) -> tuple[Decimal, Decimal]:
     """Retourne (prix_achat, prix_vente) du dernier lot ou zéros."""
     last = (
         LigneEntree.objects.filter(article=article)
-        .order_by('-date_entree', '-id')
+        .select_related('entree')
+        .order_by('-entree__date_op', '-date_entree', '-id')
         .values('prix_unitaire', 'prix_vente')
         .first()
     )
@@ -61,6 +62,23 @@ def _dernier_prix_article(article: Article) -> tuple[Decimal, Decimal]:
     if pv <= 0:
         pv = pu
     return pu, pv
+
+
+def _map_derniers_prix_achat(article_ids: list[str]) -> dict[str, Decimal]:
+    """Dernier PU d'achat par article (0 si jamais approvisionné)."""
+    if not article_ids:
+        return {}
+    prices: dict[str, Decimal] = {}
+    qs = (
+        LigneEntree.objects.filter(article_id__in=article_ids)
+        .order_by('article_id', '-entree__date_op', '-date_entree', '-id')
+        .values_list('article_id', 'prix_unitaire')
+    )
+    for article_id, prix in qs:
+        if article_id in prices:
+            continue
+        prices[article_id] = _dec(prix)
+    return prices
 
 
 def _articles_queryset(
@@ -102,18 +120,32 @@ def _articles_queryset(
 
 
 def resume_session(session: InventaireSession) -> dict[str, Any]:
-    lignes = session.lignes.all()
-    total = lignes.count()
-    comptees = lignes.filter(stock_physique__isnull=False).count()
-    avec_ecart = lignes.filter(ecart__isnull=False).exclude(ecart=0)
+    lignes = list(session.lignes.all())
+    total = len(lignes)
+    comptees = sum(1 for l in lignes if l.stock_physique is not None)
+    avec_ecart = [l for l in lignes if l.ecart is not None and l.ecart != 0]
+    capital_logiciel = sum((l.montant_logiciel for l in lignes), Decimal('0'))
+    capital_physique = sum(
+        (l.montant_physique for l in lignes if l.montant_physique is not None),
+        Decimal('0'),
+    )
+    ecart_financier = capital_physique - capital_logiciel
     return {
         'total_lignes': total,
         'lignes_comptees': comptees,
         'lignes_non_comptees': total - comptees,
-        'ecarts_positifs': avec_ecart.filter(ecart__gt=0).count(),
-        'ecarts_negatifs': avec_ecart.filter(ecart__lt=0).count(),
-        'ecarts_nuls': lignes.filter(ecart=0).count(),
-        'lignes_avec_ecart': avec_ecart.count(),
+        'ecarts_positifs': sum(1 for l in avec_ecart if l.ecart > 0),
+        'ecarts_negatifs': sum(1 for l in avec_ecart if l.ecart < 0),
+        'ecarts_nuls': sum(1 for l in lignes if l.ecart is not None and l.ecart == 0),
+        'lignes_avec_ecart': len(avec_ecart),
+        # Valorisation au dernier PU d'achat figé (photographie).
+        'capital_logiciel': _fmt(capital_logiciel),
+        'capital_physique': _fmt(capital_physique),
+        'ecart_financier': _fmt(ecart_financier),
+        # Alias métier pour tableaux de bord / rapports.
+        'capital_reel_stock': _fmt(capital_physique),
+        'total_montant_logiciel': _fmt(capital_logiciel),
+        'total_montant_physique': _fmt(capital_physique),
     }
 
 
@@ -138,10 +170,12 @@ def demarrer_session(
     if not articles:
         raise ValidationError('Aucun article ne correspond au périmètre choisi.')
 
+    article_ids = [a.article_id for a in articles]
     stock_map = {
         s.article_id: s
-        for s in Stock.objects.filter(article_id__in=[a.article_id for a in articles])
+        for s in Stock.objects.filter(article_id__in=article_ids)
     }
+    prix_map = _map_derniers_prix_achat(article_ids)
 
     with transaction.atomic():
         session.lignes.all().delete()
@@ -156,6 +190,7 @@ def demarrer_session(
                     session=session,
                     article=article,
                     stock_theorique=qte,
+                    dernier_prix_unitaire=prix_map.get(article.article_id, Decimal('0')),
                 )
             )
         if not lignes:
@@ -307,9 +342,12 @@ def _creer_entree_ajustement(
     for ligne in lignes_pos:
         qte = _dec(ligne.ecart)
         article = ligne.article
-        pu, pv = _dernier_prix_article(article)
+        # Préférer le PU figé de l'inventaire (photographie) pour l'ajustement +.
+        pu_fige = _dec(ligne.dernier_prix_unitaire)
+        pu_actuel, pv = _dernier_prix_article(article)
+        pu = pu_fige if pu_fige > 0 else pu_actuel
         if pv <= 0:
-            pv = Decimal('0.00001')
+            pv = Decimal('0.00001') if pu <= 0 else pu
 
         stock_obj, created = Stock.objects.get_or_create(
             article=article,
