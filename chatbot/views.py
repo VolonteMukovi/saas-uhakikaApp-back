@@ -26,6 +26,8 @@ class ChatbotAskView(APIView):
                 request=request,
                 message=serializer.validated_data['message'],
                 history=serializer.validated_data.get('history'),
+                selected_entity=serializer.validated_data.get('selected_entity'),
+                conversation_context=serializer.validated_data.get('conversation_context'),
             )
         except ChatbotError as exc:
             return problem_response(

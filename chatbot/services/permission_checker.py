@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from django.utils.translation import gettext as _
 
 from chatbot.context import ChatbotContext
+from chatbot.services.intent_classifier import INTENT_DOMAIN
 
 
 @dataclass
@@ -36,9 +37,6 @@ DOMAIN_FEATURE_KEYS = {
     'clients': 'clients',
     'rapports': 'rapports_simples',
     'abonnement': None,
-    'aide': None,
-    'platform': None,
-    'security_bypass': None,
 }
 
 
@@ -69,7 +67,17 @@ def check_domain_permission(ctx: ChatbotContext, intent: str) -> PermissionResul
             )
         return PermissionResult(allowed=True)
 
-    if intent in ('stock', 'caisse', 'ventes', 'dettes', 'clients', 'rapports', 'abonnement'):
+    domain = INTENT_DOMAIN.get(intent, intent)
+    # Alias domaines fins → domaine permission
+    if domain in DOMAIN_FEATURE_KEYS or intent in DOMAIN_FEATURE_KEYS:
+        domain_key = domain if domain in DOMAIN_FEATURE_KEYS else intent
+    elif domain is None:
+        return PermissionResult(allowed=True)
+    else:
+        domain_key = domain
+
+    business_domains = set(DOMAIN_FEATURE_KEYS.keys())
+    if domain_key in business_domains or intent in business_domains:
         if not ctx.user.is_authenticated:
             return _auth_required()
         if ctx.is_superadmin and ctx.tenant_id is None:
@@ -103,7 +111,7 @@ def check_domain_permission(ctx: ChatbotContext, intent: str) -> PermissionResul
                 detail=_('Votre compte ne dispose pas des droits nécessaires pour consulter ces informations.'),
             )
 
-        feature = DOMAIN_FEATURE_KEYS.get(intent)
+        feature = DOMAIN_FEATURE_KEYS.get(domain_key)
         if feature and ctx.tenant_id:
             from abonnements.services.licence import fonctionnalite_autorisee
 

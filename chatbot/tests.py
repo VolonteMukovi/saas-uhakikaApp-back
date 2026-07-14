@@ -98,7 +98,7 @@ class ChatbotAskTests(APITestCase):
         self.assertEqual(response.status_code, 200, response.content)
         data = response.json()
         self.assertIn('answer', data)
-        self.assertEqual(data['metadata']['intent'], 'stock')
+        self.assertEqual(data['metadata']['intent'], 'stock_rupture_list')
         self.assertIn('stocks', ''.join(data.get('sources', [])))
 
     @patch('chatbot.services.chatbot_service.generate_answer', return_value='Réponse aide.')
@@ -232,7 +232,7 @@ class ChatbotAskTests(APITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()['metadata']['intent'], 'stock')
+        self.assertEqual(response.json()['metadata']['intent'], 'stock_article_detail')
 
     @patch('chatbot.services.gemini_client._client', return_value=None)
     def test_stock_without_gemini_uses_local_formatter(self, _mock_client):
@@ -244,7 +244,7 @@ class ChatbotAskTests(APITestCase):
         )
         self.assertEqual(response.status_code, 200, response.content)
         data = response.json()
-        self.assertEqual(data['metadata']['intent'], 'stock')
+        self.assertEqual(data['metadata']['intent'], 'stock_summary')
         self.assertIn('stock', data['answer'].lower())
         self.assertNotIn('ImportError', data['answer'])
 
@@ -274,7 +274,7 @@ class ChatbotAskTests(APITestCase):
         )
         self.assertEqual(response.status_code, 200, response.content)
         data = response.json()
-        self.assertEqual(data['metadata']['intent'], 'stock')
+        self.assertEqual(data['metadata']['intent'], 'stock_expiration_30_days')
         self.assertIn('Produit A', data['answer'])
         self.assertNotIn('pas encore fournie', data['answer'].lower())
 
@@ -291,6 +291,182 @@ class ChatbotAskTests(APITestCase):
         )
         self.assertEqual(response.status_code, 200, response.content)
         data = response.json()
-        self.assertEqual(data['metadata']['intent'], 'clients')
+        self.assertEqual(data['metadata']['intent'], 'client_list')
         self.assertIn('Client Test Chat', data['answer'])
         self.assertIn('1 client', data['answer'].lower())
+
+    def test_expiration_90_days_list(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        art2 = Article.objects.create(
+            nom_scientifique='Produit B',
+            nom_commercial='Produit B',
+            sous_type_article=self.sous_type,
+            unite=self.unite,
+            emplacement='A2',
+            entreprise=self.entreprise,
+        )
+        Stock.objects.create(article=art2, Qte=3, seuilAlert=1)
+        entree = Entree.objects.create(libele='appro-90', entreprise=self.entreprise)
+        LigneEntree.objects.create(
+            article=self.article,
+            quantite=Decimal('5'),
+            quantite_restante=Decimal('5'),
+            prix_unitaire=Decimal('1'),
+            prix_vente=Decimal('2'),
+            entree=entree,
+            devise=self.devise,
+            seuil_alerte=Decimal('0'),
+            date_expiration=timezone.now().date() + timedelta(days=10),
+        )
+        LigneEntree.objects.create(
+            article=art2,
+            quantite=Decimal('3'),
+            quantite_restante=Decimal('3'),
+            prix_unitaire=Decimal('1'),
+            prix_vente=Decimal('2'),
+            entree=entree,
+            devise=self.devise,
+            seuil_alerte=Decimal('0'),
+            date_expiration=timezone.now().date() + timedelta(days=60),
+        )
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/chatbot/ask/',
+            {'message': 'donne ce qui expire dans les 3 prochain mois'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(data['metadata']['intent'], 'stock_expiration_90_days')
+        self.assertIn('Produit A', data['answer'])
+        self.assertIn('Produit B', data['answer'])
+
+    def test_client_situation(self):
+        from stock.models import Client, ClientEntreprise
+
+        client = Client.objects.create(nom='CSAL')
+        ClientEntreprise.objects.create(client=client, entreprise=self.entreprise)
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/chatbot/ask/',
+            {'message': 'dit moi la situation du client CSAL'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(data['metadata']['intent'], 'client_situation')
+        self.assertIn('CSAL', data['answer'])
+
+    def test_history_too_long_is_truncated_not_400(self):
+        self.client.force_authenticate(user=self.user)
+        long_content = 'x' * 2500
+        response = self.client.post(
+            '/api/chatbot/ask/',
+            {
+                'message': 'bonjour',
+                'history': [
+                    {'role': 'user', 'content': long_content},
+                    {'role': 'assistant', 'content': long_content},
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()['metadata']['intent'], 'salutation')
+
+    def test_credit_sales_today_intent(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/chatbot/ask/',
+            {'message': "esque aujourd'huit j'ai vendus en credit ???"},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()['metadata']['intent'], 'credit_sales_today')
+        self.assertIn('credit', response.json()['answer'].lower().replace('é', 'e'))
+
+    def test_top_selling_all_time(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/chatbot/ask/',
+            {'message': 'en general donne le produit le plus vendus top 5'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()['metadata']['intent'], 'top_selling_products')
+
+    def test_approvisionnements_intent(self):
+        Entree.objects.create(libele='Appro test', entreprise=self.entreprise)
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/chatbot/ask/',
+            {'message': 'quel sont mes approvisionnement ????'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(data['metadata']['intent'], 'approvisionnement_list')
+        self.assertIn('Appro test', data['answer'])
+
+    def test_subscription_plans_list(self):
+        from abonnements.models import FormuleAbonnement
+
+        FormuleAbonnement.objects.create(
+            code='essentiel_test_chat',
+            nom='Essentiel Test',
+            description='Plan test',
+            prix_mensuel=Decimal('30'),
+            prix_annuel=Decimal('300'),
+            est_visible_catalogue=True,
+            est_active=True,
+        )
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/chatbot/ask/',
+            {'message': "quel sont d'autres abonnements avec tout les detaille ?"},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(data['metadata']['intent'], 'subscription_plans_list')
+        self.assertIn('Essentiel Test', data['answer'])
+
+    def test_pronoun_client_from_history(self):
+        from stock.models import Client, ClientEntreprise
+
+        client = Client.objects.create(nom='BLESSING')
+        ClientEntreprise.objects.create(client=client, entreprise=self.entreprise)
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/chatbot/ask/',
+            {
+                'message': 'il est parmi mes client de ce systeme uhakikaapp',
+                'history': [
+                    {'role': 'user', 'content': "aujourd'hui blessing a acheté quoi ?"},
+                    {'role': 'model', 'content': 'Aucun achat de BLESSING aujourd hui.'},
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertIn(data['metadata']['intent'], ('client_search', 'client_situation'))
+        self.assertIn('BLESSING', data['answer'])
+
+    def test_stock_sheet_pdf_actions(self):
+        Stock.objects.filter(article=self.article).update(Qte=Decimal('10'))
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/chatbot/ask/',
+            {'message': "donne moi en pdf la fiche de stock de l'article Produit A"},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(data['metadata']['intent'], 'stock_sheet_pdf')
+        self.assertTrue(data.get('actions') or data.get('file'))
+        self.assertIn('fiche-stock', str(data.get('file') or data.get('actions')))
+

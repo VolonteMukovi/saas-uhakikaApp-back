@@ -88,6 +88,13 @@ def build_conversation_answer(intent: str, message: str, ctx: ChatbotContext) ->
         )
 
     if intent == 'petite_conversation':
+        if any(w in text for w in ('parle', 'parler', 'discut')):
+            return (
+                'Bien sûr 😊\n'
+                'Je vous écoute. On peut parler de votre entreprise, de vos ventes, '
+                'de votre stock, de vos clients, de votre caisse ou de ce que vous voulez '
+                'comprendre dans UHAKIKAAPP.'
+            )
         if any(w in text for w in ('comment ca va', 'comment ça va', 'allez vous bien', 'allez-vous bien', 'ca va')):
             return (
                 'Je vais très bien, merci 😊\n'
