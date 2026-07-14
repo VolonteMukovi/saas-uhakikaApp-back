@@ -103,6 +103,12 @@ def _client_base_querysets(*, client: Client, entreprise_id: int, succursale_id:
     sorties = _period_lookup(sorties, "date_creation__date", date_debut, date_fin)
     dettes = _period_lookup(dettes, "date_creation__date", date_debut, date_fin)
 
+    # Les ventes EN_CREDIT dont la dette a été supprimée ne doivent plus
+    # apparaître dans les stats / mouvements (évite CA & total_credit fantômes).
+    sorties = sorties.filter(
+        Q(statut="PAYEE") | Q(statut="EN_CREDIT", dette__isnull=False)
+    )
+
     line_total_expr = ExpressionWrapper(
         F("quantite") * F("prix_unitaire"),
         output_field=DecimalField(max_digits=14, decimal_places=5),
@@ -151,16 +157,16 @@ def build_client_dashboard(*, client: Client, entreprise_id: int, succursale_id:
     paiements = qs["paiements"]
 
     ventes_agg = lignes.aggregate(
-        total_montant=Sum("line_total"),
         total_comptant=Sum("line_total", filter=Q(sortie__statut="PAYEE")),
-        total_credit=Sum("line_total", filter=Q(sortie__statut="EN_CREDIT")),
     )
 
-    total_montant = _amount(ventes_agg["total_montant"])
-    total_comptant = _amount(ventes_agg["total_comptant"])
-    total_credit = _amount(ventes_agg["total_credit"])
-    total_paye = _amount(paiements.aggregate(total=Sum("montant"))["total"])
+    # Crédit / dettes : toujours dérivés des DetteClient encore en base
+    # (pas des sorties orphelines après suppression de dette).
     total_dettes = _amount(dettes.aggregate(total=Sum("montant_total"))["total"])
+    total_credit = total_dettes
+    total_comptant = _amount(ventes_agg["total_comptant"])
+    total_montant = _amount(total_comptant + total_credit)
+    total_paye = _amount(paiements.aggregate(total=Sum("montant"))["total"])
     solde_restant = _amount(total_dettes - total_paye)
 
     last_sortie = sorties.order_by("-date_creation", "-id").select_related("devise").first()

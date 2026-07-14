@@ -622,6 +622,64 @@ class CreditSaleDebtTests(APITestCase):
         self.assertFalse(DetteClient.objects.filter(pk=dette.pk).exists())
         self.assertFalse(MouvementCaisse.objects.filter(pk=paiement.pk).exists())
 
+    def test_dashboard_credit_stats_reset_after_dette_deletion(self):
+        """Après suppression des dettes, total_credit / CA crédit ne restent pas fantômes."""
+        r1 = self.client.post(
+            '/api/sorties/', self._credit_sortie_payload(montant='20.00000'), format='json',
+        )
+        self.assertEqual(r1.status_code, 201, r1.content)
+        r2 = self.client.post(
+            '/api/sorties/', self._credit_sortie_payload(montant='15.00000'), format='json',
+        )
+        self.assertEqual(r2.status_code, 201, r2.content)
+
+        dash = self.client.get(f'/api/clients/{self.client_fiche.pk}/dashboard/')
+        resume = dash.json()['resume']
+        self.assertEqual(resume['nombre_dettes'], 2)
+        self.assertEqual(resume['total_credit'], '105.00000')  # 3*20 + 3*15
+        self.assertEqual(resume['total_dettes'], '105.00000')
+        self.assertEqual(resume['chiffre_affaires_total'], '105.00000')
+
+        dette_a = DetteClient.objects.get(sortie_id=r1.json()['id'])
+        del_a = self.client.delete(
+            f'/api/dettes/{dette_a.pk}/',
+            {'confirm': True, 'reason': 'Suppression dette A'},
+            format='json',
+        )
+        self.assertEqual(del_a.status_code, 200, del_a.content)
+
+        dash2 = self.client.get(f'/api/clients/{self.client_fiche.pk}/dashboard/')
+        resume2 = dash2.json()['resume']
+        self.assertEqual(resume2['nombre_dettes'], 1)
+        self.assertEqual(resume2['total_credit'], '45.00000')
+        self.assertEqual(resume2['total_dettes'], '45.00000')
+        self.assertEqual(resume2['solde_restant'], '45.00000')
+        self.assertEqual(resume2['chiffre_affaires_total'], '45.00000')
+        self.assertEqual(dash2.json()['repartition']['credit'], '45.00000')
+
+        cleanup = self.client.post(
+            '/api/dettes/cleanup-client/',
+            {
+                'client_id': self.client_fiche.pk,
+                'confirm': True,
+                'reason': 'Nettoyage final',
+            },
+            format='json',
+        )
+        self.assertEqual(cleanup.status_code, 200, cleanup.content)
+
+        dash3 = self.client.get(f'/api/clients/{self.client_fiche.pk}/dashboard/')
+        resume3 = dash3.json()['resume']
+        self.assertEqual(resume3['nombre_dettes'], 0)
+        self.assertEqual(resume3['total_credit'], '0.00000')
+        self.assertEqual(resume3['total_dettes'], '0.00000')
+        self.assertEqual(resume3['solde_restant'], '0.00000')
+        self.assertEqual(resume3['chiffre_affaires_total'], '0.00000')
+        self.assertEqual(resume3['nombre_ventes'], 0)
+        self.assertEqual(resume3['nombre_paiements'], 0)
+        self.assertEqual(resume3['nombre_operations'], 0)
+        self.assertEqual(dash3.json()['repartition']['credit'], '0.00000')
+
     def test_cleanup_client_deletes_all_dettes_and_related_payments(self):
         for idx, montant in enumerate(['10.00000', '15.00000'], start=1):
             response = self.client.post('/api/sorties/', self._credit_sortie_payload(montant=montant), format='json')
