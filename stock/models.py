@@ -328,12 +328,22 @@ class Entree(models.Model):
     date_op = models.DateTimeField(auto_now_add=True)
     entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='entrees', null=True, blank=True)
     succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='entrees', null=True, blank=True)
+    # Traçabilité workflow Réquisition → Approvisionnement
+    source_requisition = models.ForeignKey(
+        'Requisition',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='approvisionnements',
+    )
+    source_requisition_numero = models.CharField(max_length=32, blank=True, default='')
 
     class Meta:
         indexes = [
             models.Index(fields=['entreprise_id']),
             models.Index(fields=['succursale_id']),
             models.Index(fields=['entreprise_id', 'succursale_id']),
+            models.Index(fields=['source_requisition_id']),
         ]
 
     def __str__(self):
@@ -1057,6 +1067,13 @@ class Requisition(models.Model):
         (PRIORITE_URGENTE, 'Urgente'),
     ]
 
+    TRANSFO_NON = 'NON_TRANSFORMEE'
+    TRANSFO_OUI = 'TRANSFORMEE'
+    TRANSFO_CHOICES = [
+        (TRANSFO_NON, 'Non transformée'),
+        (TRANSFO_OUI, 'Transformée en approvisionnement'),
+    ]
+
     numero = models.CharField(max_length=32, db_index=True)
     titre = models.CharField(max_length=200)
     description = models.TextField(blank=True, default='')
@@ -1068,6 +1085,10 @@ class Requisition(models.Model):
     statut = models.CharField(
         max_length=32, choices=STATUT_CHOICES, default=STATUT_BROUILLON,
     )
+    transformation_status = models.CharField(
+        max_length=32, choices=TRANSFO_CHOICES, default=TRANSFO_NON,
+    )
+    transformed_at = models.DateTimeField(null=True, blank=True)
     entreprise = models.ForeignKey(
         Entreprise, on_delete=models.CASCADE, related_name='requisitions',
     )
@@ -1158,10 +1179,24 @@ class RequisitionLigne(models.Model):
         blank=True,
         related_name='lignes_requisition',
     )
+    conditionnement = models.ForeignKey(
+        ConditionnementArticle,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='lignes_requisition',
+        help_text='Conditionnement d\'achat (quantité exprimée dans ce packing).',
+    )
     designation = models.CharField(max_length=255)
-    quantite = models.DecimalField(max_digits=12, decimal_places=5, default=0)
+    quantite = models.DecimalField(
+        max_digits=12,
+        decimal_places=5,
+        default=0,
+        help_text='Quantité à commander dans le conditionnement choisi.',
+    )
     unite = models.CharField(max_length=100, blank=True, default='')
     # Null = jamais approvisionné → afficher « ..... » côté UI / PDF.
+    # Pour une ligne ARTICLE : prix estimé = dernier prix d'achat du conditionnement.
     prix_estime = models.DecimalField(max_digits=14, decimal_places=5, null=True, blank=True)
     prix_source = models.CharField(
         max_length=20, choices=PRIX_SOURCE_CHOICES, default=PRIX_SOURCE_MANUEL,

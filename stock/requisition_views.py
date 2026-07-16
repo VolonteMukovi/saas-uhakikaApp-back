@@ -15,10 +15,15 @@ from stock.requisition_serializers import (
     RequisitionReorderSerializer,
     RequisitionStatutSerializer,
     RequisitionSuggestionsSerializer,
+    RequisitionTransformSerializer,
     RequisitionUpdateSerializer,
 )
 from stock.services import requisition as requisition_service
 from stock.services.requisition_document import build_requisition_document
+from stock.services.requisition_transform import (
+    build_entree_prefill_from_requisition,
+    transform_requisition_to_approvisionnement,
+)
 from stock.views import TenantFilterMixin
 
 
@@ -44,7 +49,12 @@ class RequisitionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
             super()
             .get_queryset()
             .select_related('cree_par', 'valide_par', 'rejete_par', 'succursale', 'entreprise')
-            .prefetch_related('lignes__article__unite', 'historique__utilisateur')
+            .prefetch_related(
+                'lignes__article__unite',
+                'lignes__conditionnement',
+                'historique__utilisateur',
+                'approvisionnements',
+            )
             .order_by('-date_creation')
         )
 
@@ -213,6 +223,7 @@ class RequisitionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
                 unite=data.get('unite'),
                 prix_estime=data.get('prix_estime'),
                 remarque=data.get('remarque') or '',
+                conditionnement_id=data.get('conditionnement_id'),
                 utilisateur=user,
             )
         return self._detail(requisition)
@@ -297,6 +308,48 @@ class RequisitionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='reouvrir')
     def reouvrir(self, request, pk=None):
         return self._transition(request, Requisition.STATUT_BROUILLON)
+
+    @action(detail=True, methods=['get'], url_path='transformation-preview')
+    def transformation_preview(self, request, pk=None):
+        """Prévisualise le payload d'approvisionnement sans créer l'Entree."""
+        requisition = self.get_object()
+        if requisition.statut != Requisition.STATUT_VALIDEE:
+            return Response(
+                {'detail': 'Seule une réquisition validée peut être transformée.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        prefill = build_entree_prefill_from_requisition(requisition)
+        return Response({
+            'cree': False,
+            'prefill': prefill,
+            'requisition_id': requisition.pk,
+            'requisition_numero': requisition.numero,
+        })
+
+    @action(detail=True, methods=['post'], url_path='transform-to-approvisionnement')
+    def transform_to_approvisionnement(self, request, pk=None):
+        """
+        Transforme une réquisition VALIDEE en approvisionnement (Entree).
+
+        Body optionnel : { "force": false, "creer": true }
+        - creer=true : crée l'Entree (stock/lots via pipeline existant)
+        - creer=false : retourne uniquement le pré-remplissage
+        """
+        requisition = self.get_object()
+        ser = RequisitionTransformSerializer(data=request.data or {})
+        ser.is_valid(raise_exception=True)
+        result = transform_requisition_to_approvisionnement(
+            requisition,
+            utilisateur=request.user if request.user.is_authenticated else None,
+            force=bool(ser.validated_data.get('force')),
+            creer=bool(ser.validated_data.get('creer', True)),
+        )
+        if result.get('cree'):
+            detail = RequisitionDetailSerializer(
+                self.get_queryset().get(pk=requisition.pk),
+            ).data
+            result['requisition'] = detail
+        return Response(result, status=status.HTTP_201_CREATED if result.get('cree') else status.HTTP_200_OK)
 
     @action(detail=True, methods=['get'], url_path='document')
     def document(self, request, pk=None):

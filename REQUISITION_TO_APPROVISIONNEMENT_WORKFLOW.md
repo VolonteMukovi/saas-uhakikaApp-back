@@ -1,198 +1,168 @@
-# Refonte Workflow Réquisition → Approvisionnement
+# Workflow Réquisition → Approvisionnement (implémenté)
+
+La réquisition exprime le **besoin d’achat**. L’approvisionnement (`Entree`) matérialise la **réception réelle**. Aucune logique stock / lots / prix n’est dupliquée : la transformation pré-remplit puis réutilise le pipeline `Entree` existant.
+
+```text
+Analyse du stock
+        ↓
+Création de la réquisition (+ conditionnement par ligne)
+        ↓
+Validation de la réquisition
+        ↓
+Transformation / pré-remplissage → Approvisionnement
+        ↓
+Ajustement livraison (qty / suppressions / ajouts)
+        ↓
+Entrée en stock (pipeline Entree actuel)
+```
 
-Ce document formalise l'évolution du module `Réquisitions` vers un workflow d'achat complet, en conservant la logique métier existante et en évitant toute régression sur les modules `Approvisionnements`, `Stock`, `Inventaire`, `Ventes` et `Rapports`.
+---
 
-## Objectif métier
+## 1. Conditionnement sur les lignes de réquisition
 
-Transformer la réquisition en point d'entrée du cycle d'achat :
+Chaque ligne `ARTICLE` porte un `conditionnement_id`. La quantité est exprimée **dans ce packing**.
 
-1. Analyse du stock
-2. Création de la réquisition
-3. Validation de la réquisition
-4. Transformation en approvisionnement
-5. Réception réelle fournisseur
-6. Entrée en stock (workflow approvisionnement existant)
+| Champ API | Description |
+| --------- | ----------- |
+| `conditionnement_id` | FK packing (écriture create/update ligne) |
+| `conditionnement_nom` | Libellé (lecture) |
+| `conditionnement_multiplicateur` | Unités de base / packing (lecture) |
+| `quantite` | Qté à commander dans le packing |
 
-La réquisition reste une intention d'achat, l'approvisionnement représente la réalité de livraison.
+Unicité ligne : même `article` + même `conditionnement` = doublon ; packings différents autorisés.
 
-## Principes non négociables
+---
 
-- Ne pas dupliquer la logique d'approvisionnement existante.
-- Une réquisition transformée doit devenir un approvisionnement standard.
-- Les validations, lots, conversions, dates d'expiration, calculs de coûts et impacts stock restent gérés par les services actuels d'approvisionnement.
-- Le pré-remplissage doit être intelligent mais toujours éditable.
+## 2. Endpoints de transformation
 
-## 1) Conditionnement obligatoire dans les lignes de réquisition
+### Preview (sans créer l’Entree)
 
-### Nouveau besoin
+```http
+GET /api/requisitions/{id}/transformation-preview/
+```
 
-Chaque ligne de réquisition doit porter un `conditionnement` explicite :
+Prérequis : statut `VALIDEE`.
 
-- article
-- conditionnement choisi
-- quantité demandée dans ce conditionnement
+Réponse :
 
-Exemple : `Coca` / `Carton 24` / `5`.
+```json
+{
+  "cree": false,
+  "requisition_id": 12,
+  "requisition_numero": "REQ-2026-00012",
+  "prefill": {
+    "libele": "Approvisionnement — REQ-2026-00012 — …",
+    "description": "Issu de la réquisition …",
+    "source_requisition_id": 12,
+    "source_requisition_numero": "REQ-2026-00012",
+    "succursale_id": null,
+    "lignes": [
+      {
+        "article_id": "…",
+        "conditionnement_id": 5,
+        "conditionnement_nom": "Carton 24",
+        "quantite_saisie": "5.00000",
+        "prix_achat_conditionnement": "18.00000",
+        "prix_vente_conditionnement": "24.00000",
+        "seuil_alerte": "10",
+        "remarque_source": "",
+        "requisition_ligne_id": 3
+      }
+    ],
+    "lignes_ignorees": []
+  }
+}
+```
 
-### Contrat métier
+### Transformer
 
-- La quantité demandée est exprimée dans le conditionnement sélectionné.
-- Les lignes libres peuvent garder un mode texte si aucun article n'existe encore.
-- Pour une ligne liée à un article existant, le conditionnement doit être sélectionnable parmi les conditionnements actifs de l'article.
+```http
+POST /api/requisitions/{id}/transform-to-approvisionnement/
+Content-Type: application/json
 
-## 2) Action "Transformer en approvisionnement"
+{ "creer": true, "force": false }
+```
 
-### Règle d'affichage
+| Paramètre | Défaut | Effet |
+| --------- | ------ | ----- |
+| `creer` | `true` | `true` : crée l’`Entree` (stock via pipeline existant). `false` : retourne uniquement le `prefill` (comme la preview). |
+| `force` | `false` | Si déjà transformée, `true` autorise une nouvelle `Entree` liée. |
 
-Le bouton `Transformer en approvisionnement` apparaît uniquement quand :
+Bouton UI : action `transformer_approvisionnement` dans `actions_disponibles` quand statut = `VALIDEE`.
 
-- réquisition `VALIDEE`
-- non encore transformée (ou partiellement transformée selon stratégie choisie)
-- utilisateur autorisé à créer un approvisionnement
+---
 
-### Résultat attendu
+## 3. Deux flux frontend recommandés
 
-L'action crée un brouillon d'approvisionnement pré-rempli avec :
+### A — Bouton « Transformer » (création immédiate)
 
-- en-tête (entreprise, succursale, référence, commentaire)
-- lignes issues de la réquisition
-- conditionnement, quantités, prix suggérés
+1. `POST …/transform-to-approvisionnement/` avec `{ "creer": true }`
+2. Rediriger vers l’édition de l’`Entree` créée (`entree_id`)
+3. Ajuster quantités / lignes via `PUT/PATCH /api/entrees/{id}/` (service d’update existant)
 
-## 3) Gestion des écarts de livraison (réalité fournisseur)
+### B — Pré-remplir le formulaire puis confirmer (recommandé si écarts fournisseur avant stock)
 
-Une fois le brouillon d'approvisionnement créé depuis réquisition, l'utilisateur peut :
+1. `GET …/transformation-preview/` **ou** `POST …` avec `{ "creer": false }`
+2. Ouvrir le **même** formulaire Approvisionnement avec le `prefill`
+3. Modifier / supprimer / ajouter des lignes
+4. `POST /api/entrees/` en passant `source_requisition_id` + lignes éditées
 
-- modifier les quantités reçues
-- supprimer les lignes non livrées
-- ajouter des lignes oubliées
+Le backend marque alors la réquisition `TRANSFORMEE` et journalise l’historique.
 
-Le document final d'approvisionnement reflète la livraison réelle.
+---
 
-## 4) Pré-remplissage intelligent des prix
+## 4. Prix par conditionnement
 
-### Prix d'achat
+Suggestions (réquisition + prefill) :
 
-Par défaut, proposer le dernier prix d'achat du couple :
+- **Prix d’achat** : dernier `prix_achat_conditionnement` (ou dérivé unitaire × multiplicateur) pour le couple article + packing
+- **Prix de vente** : même logique sur `prix_vente_conditionnement`
 
-- article
-- conditionnement
+Toujours modifiables avant / après création de l’`Entree`.
 
-### Prix de vente
+---
 
-Par défaut, proposer le dernier prix de vente du même couple :
+## 5. Traçabilité
 
-- article
-- conditionnement
+### Sur l’approvisionnement (`Entree`)
 
-L'utilisateur peut modifier ces prix avant validation.
+| Champ | Rôle |
+| ----- | ---- |
+| `source_requisition` | ID réquisition (lecture) |
+| `source_requisition_id` | Écriture optionnelle au `POST /api/entrees/` |
+| `source_requisition_numero` | Copie figée du numéro (`REQ-…`) |
 
-## 5) Historique de prix par conditionnement
+### Sur la réquisition
 
-Le système doit considérer chaque conditionnement comme une référence prix distincte :
+| Champ | Rôle |
+| ----- | ---- |
+| `transformation_status` | `NON_TRANSFORMEE` \| `TRANSFORMEE` |
+| `transformed_at` | Horodatage |
+| `approvisionnements[]` | Liste `{ id, libele, date_op, source_requisition_numero }` |
 
-- `Coca` + `Carton 24` != `Coca` + `Pack 6` != `Coca` + `Unité`
+---
 
-Les suggestions de prix doivent donc venir de l'historique au niveau conditionnement, pas uniquement article.
+## 6. Cas limites
 
-## 6) Héritage strict du workflow approvisionnement existant
+| Cas | Comportement |
+| --- | ------------ |
+| Ligne `LIBRE` sans article | Listée dans `lignes_ignorees` ; non reprise dans l’Entree |
+| Aucune ligne article | Erreur 400 |
+| Déjà transformée + `force=false` | Erreur 400 + liste des `approvisionnements` existants |
+| Prix packing inconnu | Fallback unitaire × multiplicateur, sinon `0` / min vente |
 
-Après transformation, l'approvisionnement suit exactement le flux manuel déjà en production :
+---
 
-- validations backend
-- création / mise à jour lots
-- gestion expirations
-- valorisation coûts
-- mouvements de stock
-- historique et rapports
+## 7. Migration
 
-La réquisition ne remplace pas ce flux, elle l'initialise.
+`stock/migrations/0042_requisition_to_approvisionnement.py`
 
-## 7) Traçabilité bidirectionnelle
+- `Entree.source_requisition` / `source_requisition_numero`
+- `Requisition.transformation_status` / `transformed_at`
+- `RequisitionLigne.conditionnement`
 
-### Lien de filiation
+---
 
-Chaque approvisionnement issu de réquisition doit conserver :
+## 8. Principe non négociable
 
-- `source_requisition_id`
-- `source_requisition_numero`
-
-Et chaque réquisition doit exposer :
-
-- la/les références d'approvisionnement créées
-- statut de transformation (`non_transformee`, `partiellement_transformee`, `transformee`)
-
-### Exemples
-
-- Réquisition `REQ-2026-00012`
-- Approvisionnement `APP-2026-00035`
-- relation : `APP-2026-00035` issu de `REQ-2026-00012`
-
-## 8) Réutilisation composants/services existants
-
-Le formulaire approvisionnement ouvert depuis réquisition réutilise :
-
-- mêmes composants UI d'approvisionnement
-- mêmes serializers/backend validations
-- mêmes services métier de calcul
-
-La différence : les champs arrivent pré-remplis.
-
-## Architecture technique recommandée (backend)
-
-### Endpoints
-
-- `POST /api/requisitions/{id}/transform-to-approvisionnement/`
-  - crée un approvisionnement brouillon pré-rempli
-  - retourne l'identifiant + payload de redirection édition
-- `GET /api/requisitions/{id}/transformation-preview/` (optionnel)
-  - retourne le draft calculé sans persistance (validation amont UI)
-
-### Modélisation minimale
-
-- Ajouter sur approvisionnement :
-  - `source_requisition` (FK nullable)
-  - `source_requisition_numero` (copie lisible)
-- Ajouter sur réquisition :
-  - `transformation_status`
-  - `transformed_at`
-  - compteur ou relation vers approvisionnements générés
-
-### Service métier
-
-Créer un service unique, ex. `transform_requisition_to_approvisionnement(...)` :
-
-1. vérifie statut réquisition
-2. mappe les lignes réquisition vers lignes approvisionnement
-3. résout conditionnement et prix par historique conditionnement
-4. crée le brouillon approvisionnement
-5. journalise l'action (historique réquisition + audit approvisionnement)
-
-## Règles de sécurité et cohérence
-
-- opération atomique (`transaction.atomic`)
-- idempotence (éviter doublons si double clic)
-- contrôle permissions tenant/succursale
-- messages clairs en cas de conditionnement manquant
-
-## Cas limites à traiter
-
-- ligne article sans conditionnement valide
-- ligne libre sans article réel (conserver en ligne libre approvisionnement ou ignorer avec avertissement selon règle)
-- historique prix inexistant pour conditionnement (mettre 0 ou vide selon logique actuelle approvisionnement)
-- réquisition déjà transformée
-
-## Plan de tests (minimum)
-
-1. Transformation d'une réquisition validée avec 3 lignes et conditionnements distincts.
-2. Vérification pré-remplissage prix achat/vente par conditionnement.
-3. Modification des quantités reçues avant validation approvisionnement.
-4. Suppression d'une ligne non livrée.
-5. Ajout d'une ligne oubliée.
-6. Vérification impact stock identique au flux manuel.
-7. Vérification traçabilité bidirectionnelle.
-8. Vérification permissions et isolation multi-tenant.
-
-## Résultat cible
-
-`Réquisitions` devient le module d'expression du besoin d'achat, et `Approvisionnements` reste le module d'exécution réelle fournisseur, avec continuité complète et traçabilité native de bout en bout.
-
+> Une réquisition transformée devient un **approvisionnement standard**. Validations, lots, expirations, coûts, stock et rapports restent ceux du module Approvisionnements.

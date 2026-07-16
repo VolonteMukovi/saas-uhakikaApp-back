@@ -161,7 +161,7 @@ Liste ordonnée des **ids de lignes**.
 | `POST` | `.../valider/` | `VALIDEE` |
 | `POST` | `.../rejeter/` | `REJETEE` (body `motif` **obligatoire**) |
 | `POST` | `.../annuler/` | `ANNULEE` |
-| `POST` | `.../cloturer/` | `CLOTUREE` (+ `archived=true`) |
+| `POST` | `.../cloturer/` | `CLOTUREE` (reste visible, **ne plus archiver**) |
 | `POST` | `.../reouvrir/` | `BROUILLON` (depuis `REJETEE`) |
 
 Body optionnel (sauf rejet) :
@@ -169,6 +169,42 @@ Body optionnel (sauf rejet) :
 ```json
 { "motif": "...", "commentaires": "..." }
 ```
+
+### Affichage liste (frontend) — clôturées visibles
+
+**Ne pas** appeler la liste avec `?archived=false` si tu veux voir les clôturées (anciennes données pouvaient être archivées ; désormais `cloturer` ne touche plus `archived`).
+
+Appels recommandés :
+
+```http
+GET /api/requisitions/
+```
+
+Sans filtre `archived` → toutes les réquisitions du tenant (y compris `CLOTUREE`).
+
+Filtres utiles :
+
+```http
+GET /api/requisitions/?statut=CLOTUREE
+GET /api/requisitions/?statut=VALIDEE
+```
+
+Affichage badge :
+
+| `statut` | Libellé API | Badge UI suggéré |
+|----------|-------------|------------------|
+| `BROUILLON` | Brouillon | gris |
+| `OUVERTE` | Ouverte | bleu |
+| `EN_PREPARATION` | En préparation | bleu clair |
+| `EN_ATTENTE_VALIDATION` | En attente de validation | orange |
+| `VALIDEE` | Validée | vert |
+| `REJETEE` | Rejetée | rouge |
+| `ANNULEE` | Annulée | gris foncé |
+| `CLOTUREE` | Clôturée | violet / neutre |
+
+Utiliser `statut_libelle` renvoyé par l’API pour le texte du badge.
+
+`archived` reste un champ séparé (archivage manuel éventuel), **indépendant** de `CLOTUREE`.
 
 ### Document d'impression (JSON → PDF côté frontend)
 

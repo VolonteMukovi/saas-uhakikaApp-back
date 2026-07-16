@@ -998,14 +998,25 @@ class EntreeSerializer(serializers.ModelSerializer):
 
     Entrée issue de la clôture d'un lot : ``lot_id`` renseigné, ``libele`` imposé côté serveur
     (non modifiable).
+
+    Traçabilité réquisition : ``source_requisition_id`` (écriture optionnelle) + numéro figé.
     """
     lignes = LigneEntreeSerializer(many=True)
     lot_id = serializers.SerializerMethodField(read_only=True)
+    source_requisition_id = serializers.IntegerField(
+        required=False, allow_null=True, write_only=True,
+    )
+    source_requisition = serializers.IntegerField(
+        source='source_requisition_id', read_only=True,
+    )
 
     class Meta:
         model = Entree
-        fields = ['id', 'libele', 'description', 'date_op', 'lignes', 'lot_id']
-        read_only_fields = ['lot_id']
+        fields = [
+            'id', 'libele', 'description', 'date_op', 'lignes', 'lot_id',
+            'source_requisition', 'source_requisition_id', 'source_requisition_numero',
+        ]
+        read_only_fields = ['lot_id', 'source_requisition', 'source_requisition_numero']
 
     def validate_date_op(self, value):
         if value is not None and timezone.is_naive(value):
@@ -1047,6 +1058,7 @@ class EntreeSerializer(serializers.ModelSerializer):
             libele = validated_data.pop('libele', '')
             description = validated_data.pop('description', '')
             date_op = validated_data.pop('date_op', None)
+            source_requisition_id = validated_data.pop('source_requisition_id', None)
 
             entree_kwargs = {
                 'libele': libele,
@@ -1056,6 +1068,28 @@ class EntreeSerializer(serializers.ModelSerializer):
             }
             if date_op is not None:
                 entree_kwargs['date_op'] = date_op
+
+            source_req = None
+            if source_requisition_id:
+                from stock.models import Requisition
+
+                source_req = Requisition.objects.filter(
+                    pk=source_requisition_id,
+                    entreprise_id=entreprise_id,
+                ).first()
+                if source_req is None:
+                    raise serializers.ValidationError({
+                        'source_requisition_id': _('Réquisition introuvable pour cette entreprise.'),
+                    })
+                if source_req.statut != Requisition.STATUT_VALIDEE:
+                    raise serializers.ValidationError({
+                        'source_requisition_id': _(
+                            'Seule une réquisition validée peut être liée à un approvisionnement.'
+                        ),
+                    })
+                entree_kwargs['source_requisition'] = source_req
+                entree_kwargs['source_requisition_numero'] = source_req.numero
+
             entree = Entree.objects.create(**entree_kwargs)
 
             devise_principale = None
@@ -1127,6 +1161,30 @@ class EntreeSerializer(serializers.ModelSerializer):
                 stock_obj.Qte += quantite
                 stock_obj.seuilAlert = ligne.get('seuil_alerte', 0)
                 stock_obj.save(update_fields=['Qte', 'seuilAlert'])
+
+            if source_req is not None:
+                from stock.models import Requisition
+                from stock.services import requisition as requisition_service
+
+                if source_req.transformation_status != Requisition.TRANSFO_OUI:
+                    source_req.transformation_status = Requisition.TRANSFO_OUI
+                    source_req.transformed_at = timezone.now()
+                    source_req.save(
+                        update_fields=[
+                            'transformation_status',
+                            'transformed_at',
+                            'date_modification',
+                        ],
+                    )
+                request = self.context.get('request')
+                user = getattr(request, 'user', None) if request else None
+                requisition_service.log_historique(
+                    source_req,
+                    action='TRANSFORMAT_APPROVISIONNEMENT',
+                    utilisateur=user if user and user.is_authenticated else None,
+                    detail=f'Approvisionnement #{entree.pk} créé depuis {source_req.numero}',
+                    metadata={'entree_id': entree.pk, 'via': 'POST /api/entrees/'},
+                )
 
             return entree
 

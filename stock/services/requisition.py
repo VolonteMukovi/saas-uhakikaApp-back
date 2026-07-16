@@ -20,6 +20,7 @@ from stock.models import (
     RequisitionLigne,
     Stock,
 )
+from stock.services.conditionnement_pricing import get_or_create_conditionnement_defaut
 from stock.services.stock_stats import list_articles_expiration_dans_fenetre
 
 PRIX_PLACEHOLDER = '.....'
@@ -115,7 +116,7 @@ def generate_numero(entreprise_id: int) -> str:
 
 
 def dernier_prix_achat(article: Article | None) -> Decimal | None:
-    """Dernier PU d'achat ; None si jamais approvisionné."""
+    """Dernier PU d'achat (unité de base) ; None si jamais approvisionné."""
     if article is None:
         return None
     last = (
@@ -128,6 +129,68 @@ def dernier_prix_achat(article: Article | None) -> Decimal | None:
         return None
     prix = _dec(last.prix_unitaire)
     return prix if prix > 0 else None
+
+
+def dernier_prix_achat_conditionnement(article, conditionnement=None) -> Decimal | None:
+    """Dernier prix d'achat du packing ; None si absent."""
+    if article is None:
+        return None
+    qs = LigneEntree.objects.filter(article=article).select_related('entree')
+    if conditionnement is not None:
+        qs = qs.filter(conditionnement=conditionnement)
+    last = qs.order_by('-entree__date_op', '-date_entree', '-id').first()
+    if last is None:
+        last = (
+            LigneEntree.objects.filter(article=article)
+            .select_related('entree')
+            .order_by('-entree__date_op', '-date_entree', '-id')
+            .first()
+        )
+        if last is None:
+            return None
+        if conditionnement is not None and last.prix_unitaire is not None:
+            mult = _dec(getattr(conditionnement, 'multiplicateur_base', 1) or 1)
+            if mult > 0:
+                return (_dec(last.prix_unitaire) * mult).quantize(Decimal('0.00001'))
+        return _dec(last.prix_achat_conditionnement or last.prix_unitaire) or None
+    prix = last.prix_achat_conditionnement
+    if prix is None:
+        prix = last.prix_unitaire
+    if prix is None:
+        return None
+    val = _dec(prix)
+    return val if val > 0 else None
+
+
+def dernier_prix_vente_conditionnement(article, conditionnement=None) -> Decimal | None:
+    """Dernier prix de vente du packing ; None si absent."""
+    if article is None:
+        return None
+    qs = LigneEntree.objects.filter(article=article).select_related('entree')
+    if conditionnement is not None:
+        qs = qs.filter(conditionnement=conditionnement)
+    last = qs.order_by('-entree__date_op', '-date_entree', '-id').first()
+    if last is None:
+        last = (
+            LigneEntree.objects.filter(article=article)
+            .select_related('entree')
+            .order_by('-entree__date_op', '-date_entree', '-id')
+            .first()
+        )
+        if last is None:
+            return None
+        if conditionnement is not None and last.prix_vente is not None:
+            mult = _dec(getattr(conditionnement, 'multiplicateur_base', 1) or 1)
+            if mult > 0:
+                return (_dec(last.prix_vente) * mult).quantize(Decimal('0.00001'))
+        return _dec(last.prix_vente_conditionnement or last.prix_vente) or None
+    prix = last.prix_vente_conditionnement
+    if prix is None:
+        prix = last.prix_vente
+    if prix is None:
+        return None
+    val = _dec(prix)
+    return val if val > 0 else None
 
 
 def stock_snapshot(article: Article) -> tuple[str, Decimal, Decimal]:
@@ -236,17 +299,20 @@ def build_ligne_from_article(
     quantite: Decimal | None = None,
     ordre: int | None = None,
     remarque: str = '',
+    conditionnement=None,
 ) -> RequisitionLigne:
     statut, qte, seuil = stock_snapshot(article)
-    prix = dernier_prix_achat(article)
+    cond = conditionnement or get_or_create_conditionnement_defaut(article)
+    prix = dernier_prix_achat_conditionnement(article, cond)
     qty = quantite if quantite is not None else quantite_suggeree(qte, seuil)
-    unite = ''
-    if getattr(article, 'unite', None):
+    unite = (cond.nom if cond else '') or ''
+    if not unite and getattr(article, 'unite', None):
         unite = article.unite.libelle or ''
     return RequisitionLigne(
         requisition=requisition,
         type_ligne=RequisitionLigne.TYPE_ARTICLE,
         article=article,
+        conditionnement=cond,
         designation=designation_article(article),
         quantite=_dec(qty),
         unite=unite,
@@ -272,25 +338,48 @@ def add_ligne_article(
     unite: str | None = None,
     prix_estime=None,
     remarque: str = '',
+    conditionnement_id=None,
     utilisateur=None,
 ) -> RequisitionLigne:
     assert_requisition_editable(requisition)
-    if requisition.lignes.filter(article=article, type_ligne=RequisitionLigne.TYPE_ARTICLE).exists():
-        raise ValidationError({'article_id': 'Cet article est déjà présent sur la réquisition.'})
+
+    cond = None
+    if conditionnement_id:
+        from stock.models import ConditionnementArticle
+        try:
+            cond = ConditionnementArticle.objects.get(pk=conditionnement_id, article=article)
+        except ConditionnementArticle.DoesNotExist as exc:
+            raise ValidationError({
+                'conditionnement_id': 'Conditionnement introuvable pour cet article.',
+            }) from exc
+    else:
+        cond = get_or_create_conditionnement_defaut(article)
+
+    # Même article + même packing = doublon ; packings différents autorisés.
+    if requisition.lignes.filter(
+        article=article,
+        type_ligne=RequisitionLigne.TYPE_ARTICLE,
+        conditionnement=cond,
+    ).exists():
+        raise ValidationError({
+            'article_id': 'Cet article avec ce conditionnement est déjà présent.',
+        })
 
     ligne = build_ligne_from_article(
         requisition,
         article,
         quantite=_dec(quantite) if quantite is not None else None,
         remarque=remarque,
+        conditionnement=cond,
     )
     if unite is not None and str(unite).strip():
         ligne.unite = str(unite).strip()
+    elif cond:
+        ligne.unite = cond.nom
     if prix_estime is not None and not is_prix_placeholder(prix_estime):
         ligne.prix_estime = _dec(prix_estime)
         ligne.prix_source = RequisitionLigne.PRIX_SOURCE_MANUEL
     elif is_prix_placeholder(prix_estime) and prix_estime is not None:
-        # force placeholder explicit
         ligne.prix_estime = None
         ligne.prix_source = RequisitionLigne.PRIX_SOURCE_MANUEL
     ligne.save()
@@ -298,8 +387,12 @@ def add_ligne_article(
         requisition,
         action='AJOUT_LIGNE',
         utilisateur=utilisateur,
-        detail=f'Ajout article {ligne.designation}',
-        metadata={'ligne_id': ligne.pk, 'article_id': article.article_id},
+        detail=f'Ajout article {ligne.designation} ({ligne.unite})',
+        metadata={
+            'ligne_id': ligne.pk,
+            'article_id': article.article_id,
+            'conditionnement_id': cond.pk if cond else None,
+        },
     )
     return ligne
 
@@ -407,6 +500,32 @@ def update_ligne(
             ligne.ordre = ordre
             changed.append('ordre')
 
+    if 'conditionnement_id' in data and ligne.type_ligne == RequisitionLigne.TYPE_ARTICLE:
+        from stock.models import ConditionnementArticle
+        cid = data['conditionnement_id']
+        if cid in (None, ''):
+            cond = get_or_create_conditionnement_defaut(ligne.article) if ligne.article else None
+        else:
+            try:
+                cond = ConditionnementArticle.objects.get(pk=cid, article=ligne.article)
+            except ConditionnementArticle.DoesNotExist as exc:
+                raise ValidationError({
+                    'conditionnement_id': 'Conditionnement introuvable pour cet article.',
+                }) from exc
+        if ligne.conditionnement_id != (cond.pk if cond else None):
+            ligne.conditionnement = cond
+            ligne.unite = cond.nom if cond else ligne.unite
+            # Recalculer prix estimé au packing sauf override manuel récent
+            if ligne.prix_source != RequisitionLigne.PRIX_SOURCE_MANUEL or ligne.prix_estime is None:
+                prix = dernier_prix_achat_conditionnement(ligne.article, cond)
+                ligne.prix_estime = prix
+                ligne.prix_source = (
+                    RequisitionLigne.PRIX_SOURCE_DERNIER_ACHAT
+                    if prix is not None
+                    else RequisitionLigne.PRIX_SOURCE_MANUEL
+                )
+            changed.append('conditionnement')
+
     if changed:
         ligne.save()
         log_historique(
@@ -440,6 +559,7 @@ def dupliquer_ligne(ligne: RequisitionLigne, *, utilisateur=None) -> Requisition
         requisition=ligne.requisition,
         type_ligne=ligne.type_ligne,
         article=ligne.article,
+        conditionnement=ligne.conditionnement,
         designation=f'{ligne.designation} (copie)',
         quantite=ligne.quantite,
         unite=ligne.unite,
@@ -717,7 +837,6 @@ def changer_statut(
             requisition.motif_rejet = motif.strip()
         elif nouveau_statut == Requisition.STATUT_CLOTUREE:
             requisition.date_cloture = timezone.now()
-            requisition.archived = True
         elif nouveau_statut in (
             Requisition.STATUT_BROUILLON,
             Requisition.STATUT_OUVERTE,
@@ -738,10 +857,16 @@ def changer_statut(
 
 def ligne_to_api_dict(ligne: RequisitionLigne) -> dict[str, Any]:
     montant = ligne.montant_ligne
+    cond = ligne.conditionnement
     return {
         'id': ligne.pk,
         'type_ligne': ligne.type_ligne,
         'article_id': ligne.article_id,
+        'conditionnement_id': cond.pk if cond else None,
+        'conditionnement_nom': cond.nom if cond else None,
+        'conditionnement_multiplicateur': (
+            str(cond.multiplicateur_base) if cond else None
+        ),
         'designation': ligne.designation,
         'quantite': _fmt_qty(ligne.quantite),
         'unite': ligne.unite,

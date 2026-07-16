@@ -45,6 +45,7 @@ class RequisitionLigneWriteSerializer(serializers.Serializer):
     designation = serializers.CharField(required=False, allow_blank=True, max_length=255)
     quantite = serializers.DecimalField(max_digits=12, decimal_places=5, required=False, min_value=Decimal('0.00001'))
     unite = serializers.CharField(required=False, allow_blank=True, default='')
+    conditionnement_id = serializers.IntegerField(required=False, allow_null=True)
     prix_estime = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     remarque = serializers.CharField(required=False, allow_blank=True, default='')
 
@@ -65,6 +66,7 @@ class RequisitionLigneUpdateSerializer(serializers.Serializer):
     designation = serializers.CharField(required=False, allow_blank=False, max_length=255)
     quantite = serializers.DecimalField(max_digits=12, decimal_places=5, required=False, min_value=Decimal('0.00001'))
     unite = serializers.CharField(required=False, allow_blank=True)
+    conditionnement_id = serializers.IntegerField(required=False, allow_null=True)
     prix_estime = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     remarque = serializers.CharField(required=False, allow_blank=True)
     ordre = serializers.IntegerField(required=False, min_value=0)
@@ -91,6 +93,15 @@ class RequisitionStatutSerializer(serializers.Serializer):
     commentaires = serializers.CharField(required=False, allow_blank=True, default='')
 
 
+class RequisitionTransformSerializer(serializers.Serializer):
+    force = serializers.BooleanField(required=False, default=False)
+    creer = serializers.BooleanField(
+        required=False,
+        default=True,
+        help_text='True = crée l\'Entree ; False = preview payload uniquement.',
+    )
+
+
 class RequisitionListSerializer(serializers.ModelSerializer):
     cree_par_nom = serializers.SerializerMethodField()
     valide_par_nom = serializers.SerializerMethodField()
@@ -110,6 +121,8 @@ class RequisitionListSerializer(serializers.ModelSerializer):
             'priorite_libelle',
             'statut',
             'statut_libelle',
+            'transformation_status',
+            'transformed_at',
             'date_creation',
             'date_modification',
             'date_validation',
@@ -149,6 +162,7 @@ class RequisitionDetailSerializer(RequisitionListSerializer):
     lignes = RequisitionLigneSerializer(many=True, read_only=True)
     historique = RequisitionHistoriqueSerializer(many=True, read_only=True)
     actions_disponibles = serializers.SerializerMethodField()
+    approvisionnements = serializers.SerializerMethodField()
 
     class Meta(RequisitionListSerializer.Meta):
         fields = RequisitionListSerializer.Meta.fields + [
@@ -161,6 +175,18 @@ class RequisitionDetailSerializer(RequisitionListSerializer):
             'lignes',
             'historique',
             'actions_disponibles',
+            'approvisionnements',
+        ]
+
+    def get_approvisionnements(self, obj):
+        return [
+            {
+                'id': e.pk,
+                'libele': e.libele,
+                'date_op': e.date_op.isoformat() if e.date_op else None,
+                'source_requisition_numero': e.source_requisition_numero or obj.numero,
+            }
+            for e in obj.approvisionnements.all().order_by('-id')
         ]
 
     def get_actions_disponibles(self, obj):
@@ -180,7 +206,7 @@ class RequisitionDetailSerializer(RequisitionListSerializer):
         elif s == Requisition.STATUT_EN_ATTENTE_VALIDATION:
             actions.extend(['valider', 'rejeter', 'annuler', 'preparer'])
         elif s == Requisition.STATUT_VALIDEE:
-            actions.extend(['cloturer', 'annuler'])
+            actions.extend(['cloturer', 'annuler', 'transformer_approvisionnement'])
         elif s == Requisition.STATUT_REJETEE:
             actions.extend(['reouvrir', 'annuler'])
         return sorted(set(actions))
