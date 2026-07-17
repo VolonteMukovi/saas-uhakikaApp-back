@@ -43,6 +43,7 @@ Toutes calculées / figées côté backend. **Ne jamais** les rendre éditables.
 | `dernier_prix_unitaire` | PU figé au démarrage | `"0.33000"` |
 | `montant_logiciel` | `stock_theorique × dernier_prix_unitaire` | `152 × 0.33 = 50.16` |
 | `montant_physique` | `stock_physique × dernier_prix_unitaire` | `150 × 0.33 = 49.50` |
+| `ecart_montant` | `ecart × dernier_prix_unitaire` | `-2 × 0.33 = -0.66` |
 
 Notes :
 
@@ -60,7 +61,8 @@ Notes :
   "ecart": "-2.00000",
   "dernier_prix_unitaire": "0.33000",
   "montant_logiciel": "50.16000",
-  "montant_physique": "49.50000"
+  "montant_physique": "49.50000",
+  "ecart_montant": "-0.66000"
 }
 ```
 
@@ -77,6 +79,11 @@ En plus des compteurs existants (`total_lignes`, `lignes_comptees`, écarts…),
 | `ecart_financier` | `capital_physique − capital_logiciel` |
 | `capital_reel_stock` | Alias de `capital_physique` (**à mettre en évidence**) |
 | `total_montant_logiciel` / `total_montant_physique` | Alias des totaux |
+| `total_ecart_positif` | Σ `ecart_montant > 0` (surplus) |
+| `total_ecart_negatif` | Σ \|`ecart_montant < 0`\| (manques, valeur ≥ 0) |
+| `total_ecart_montant` | Σ tous les `ecart_montant` (net) |
+
+> Guide d’affichage frontend détaillé : **`INVENTAIRE_FRONTEND.md`**.
 
 ### Exemple
 

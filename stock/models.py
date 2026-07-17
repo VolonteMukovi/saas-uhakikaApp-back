@@ -1021,6 +1021,16 @@ class InventaireLigne(models.Model):
             * (self.dernier_prix_unitaire or Decimal('0'))
         ).quantize(Decimal('0.00001'))
 
+    @property
+    def ecart_montant(self) -> Decimal | None:
+        """Écart financier ligne : (physique − théorique) × PU figé. None si non compté."""
+        if self.ecart is None:
+            return None
+        return (
+            (self.ecart or Decimal('0'))
+            * (self.dernier_prix_unitaire or Decimal('0'))
+        ).quantize(Decimal('0.00001'))
+
 
 class Requisition(models.Model):
     """Document de travail indépendant pour préparer un approvisionnement."""

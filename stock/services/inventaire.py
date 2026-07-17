@@ -130,6 +130,20 @@ def resume_session(session: InventaireSession) -> dict[str, Any]:
         Decimal('0'),
     )
     ecart_financier = capital_physique - capital_logiciel
+
+    ecarts_montant = [
+        l.ecart_montant for l in lignes if l.ecart_montant is not None
+    ]
+    total_ecart_positif = sum(
+        (m for m in ecarts_montant if m > 0),
+        Decimal('0'),
+    )
+    total_ecart_negatif = sum(
+        (-m for m in ecarts_montant if m < 0),
+        Decimal('0'),
+    )
+    total_ecart_montant = sum(ecarts_montant, Decimal('0'))
+
     return {
         'total_lignes': total,
         'lignes_comptees': comptees,
@@ -146,6 +160,11 @@ def resume_session(session: InventaireSession) -> dict[str, Any]:
         'capital_reel_stock': _fmt(capital_physique),
         'total_montant_logiciel': _fmt(capital_logiciel),
         'total_montant_physique': _fmt(capital_physique),
+        # Synthèse des écarts financiers (lignes comptées).
+        # total_ecart_negatif = somme des valeurs absolues des manques (toujours ≥ 0).
+        'total_ecart_montant': _fmt(total_ecart_montant),
+        'total_ecart_positif': _fmt(total_ecart_positif),
+        'total_ecart_negatif': _fmt(total_ecart_negatif),
     }
 
 

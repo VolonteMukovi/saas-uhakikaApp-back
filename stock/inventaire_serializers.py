@@ -18,6 +18,7 @@ class InventaireLigneSerializer(serializers.ModelSerializer):
     dernier_prix_unitaire = serializers.SerializerMethodField()
     montant_logiciel = serializers.SerializerMethodField()
     montant_physique = serializers.SerializerMethodField()
+    ecart_montant = serializers.SerializerMethodField()
 
     class Meta:
         model = InventaireLigne
@@ -33,6 +34,7 @@ class InventaireLigneSerializer(serializers.ModelSerializer):
             'dernier_prix_unitaire',
             'montant_logiciel',
             'montant_physique',
+            'ecart_montant',
             'motif_ligne',
         ]
         read_only_fields = fields
@@ -59,6 +61,9 @@ class InventaireLigneSerializer(serializers.ModelSerializer):
 
     def get_montant_physique(self, obj):
         return self._fmt(obj.montant_physique)
+
+    def get_ecart_montant(self, obj):
+        return self._fmt(obj.ecart_montant)
 
 
 class InventaireLigneUpdateSerializer(serializers.Serializer):

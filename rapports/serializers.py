@@ -255,6 +255,7 @@ class RapportInventaireSessionLigneSerializer(serializers.ModelSerializer):
     dernier_prix_unitaire = serializers.SerializerMethodField()
     montant_logiciel = serializers.SerializerMethodField()
     montant_physique = serializers.SerializerMethodField()
+    ecart_montant = serializers.SerializerMethodField()
     prix_total = serializers.SerializerMethodField()
     total = serializers.SerializerMethodField()
     motif_ligne = serializers.CharField(read_only=True)
@@ -269,7 +270,7 @@ class RapportInventaireSessionLigneSerializer(serializers.ModelSerializer):
             'statut', 'statut_code', 'statut_stock', 'statut_stock_code',
             'statut_ligne', 'statut_ligne_code',
             'prix_unitaire', 'pu', 'dernier_prix_unitaire',
-            'montant_logiciel', 'montant_physique',
+            'montant_logiciel', 'montant_physique', 'ecart_montant',
             'prix_total', 'total', 'motif_ligne',
         ]
 
@@ -339,6 +340,11 @@ class RapportInventaireSessionLigneSerializer(serializers.ModelSerializer):
         if obj.montant_physique is None:
             return None
         return _fmt_money(obj.montant_physique)
+
+    def get_ecart_montant(self, obj):
+        if obj.ecart_montant is None:
+            return None
+        return _fmt_money(obj.ecart_montant)
 
     def get_prix_total(self, obj):
         # Alias historique : montant logiciel (qté théorique × PU figé).

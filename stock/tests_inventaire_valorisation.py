@@ -108,9 +108,13 @@ class InventaireValorisationTests(APITestCase):
         body = detail.json()
         ligne2 = body['lignes'][0]
         self.assertEqual(ligne2['montant_physique'], '49.50000')
+        self.assertEqual(ligne2['ecart_montant'], '-0.66000')
         self.assertEqual(body['resume']['capital_physique'], '49.50000')
         self.assertEqual(body['resume']['ecart_financier'], '-0.66000')
         self.assertEqual(body['resume']['capital_reel_stock'], '49.50000')
+        self.assertEqual(body['resume']['total_ecart_montant'], '-0.66000')
+        self.assertEqual(body['resume']['total_ecart_positif'], '0.00000')
+        self.assertEqual(body['resume']['total_ecart_negatif'], '0.66000')
 
         # Le PU reste figé même si un nouvel appro arrive.
         entree2 = Entree.objects.create(libele='Appro 2', entreprise=self.entreprise)
@@ -149,3 +153,60 @@ class InventaireValorisationTests(APITestCase):
         ligne = create.json()['lignes'][0]
         self.assertEqual(ligne['dernier_prix_unitaire'], '0.00000')
         self.assertEqual(ligne['montant_logiciel'], '0.00000')
+
+    def test_totaux_ecarts_positifs_et_negatifs(self):
+        art_surplus = Article.objects.create(
+            nom_scientifique='Oignon',
+            nom_commercial='Oignon',
+            sous_type_article=self.sous,
+            unite=self.unite,
+            entreprise=self.entreprise,
+        )
+        Stock.objects.create(article=art_surplus, Qte=Decimal('10'), seuilAlert=Decimal('2'))
+        entree = Entree.objects.create(libele='Appro oignon', entreprise=self.entreprise)
+        LigneEntree.objects.create(
+            article=art_surplus,
+            entree=entree,
+            quantite=Decimal('20'),
+            quantite_restante=Decimal('10'),
+            prix_unitaire=Decimal('3.00000'),
+            prix_vente=Decimal('4.00000'),
+        )
+
+        create = self.client.post(
+            '/api/inventaires/',
+            {
+                'libelle': 'Inv écarts ±',
+                'date_inventaire': timezone.now().date().isoformat(),
+                'perimetre': 'PARTIEL',
+                'article_ids': [self.article.article_id, art_surplus.article_id],
+                'demarrer': True,
+            },
+            format='json',
+        )
+        self.assertEqual(create.status_code, 201, create.content)
+        inv_id = create.json()['id']
+        lignes = {l['article_id']: l for l in create.json()['lignes']}
+
+        # Tomate : 152 → 150 → écart montant -0.66
+        self.client.patch(
+            f"/api/inventaires/{inv_id}/lignes/{lignes[self.article.article_id]['id']}/",
+            {'stock_physique': '150'},
+            format='json',
+        )
+        # Oignon : 10 → 14 → écart montant +12
+        self.client.patch(
+            f"/api/inventaires/{inv_id}/lignes/{lignes[art_surplus.article_id]['id']}/",
+            {'stock_physique': '14'},
+            format='json',
+        )
+
+        detail = self.client.get(f'/api/inventaires/{inv_id}/').json()
+        by_id = {l['article_id']: l for l in detail['lignes']}
+        self.assertEqual(by_id[self.article.article_id]['ecart_montant'], '-0.66000')
+        self.assertEqual(by_id[art_surplus.article_id]['ecart_montant'], '12.00000')
+
+        resume = detail['resume']
+        self.assertEqual(resume['total_ecart_positif'], '12.00000')
+        self.assertEqual(resume['total_ecart_negatif'], '0.66000')
+        self.assertEqual(resume['total_ecart_montant'], '11.34000')

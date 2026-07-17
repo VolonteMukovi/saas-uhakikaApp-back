@@ -317,6 +317,12 @@ class RapportsViewSet(viewsets.ViewSet):
             Decimal('0'),
         )
         ecart_financier = capital_physique - capital_logiciel
+        ecarts_montant = [
+            l.ecart_montant for l in lignes if l.ecart_montant is not None
+        ]
+        total_ecart_positif = sum((m for m in ecarts_montant if m > 0), Decimal('0'))
+        total_ecart_negatif = sum((-m for m in ecarts_montant if m < 0), Decimal('0'))
+        total_ecart_montant = sum(ecarts_montant, Decimal('0'))
 
         def _money(value: Decimal) -> str:
             return str(value.quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
@@ -338,6 +344,9 @@ class RapportsViewSet(viewsets.ViewSet):
             'capital_reel_stock': _money(capital_physique),
             'total_montant_logiciel': _money(capital_logiciel),
             'total_montant_physique': _money(capital_physique),
+            'total_ecart_montant': _money(total_ecart_montant),
+            'total_ecart_positif': _money(total_ecart_positif),
+            'total_ecart_negatif': _money(total_ecart_negatif),
         }
 
     def _serialize_inventaire_session(self, request, session, *, force_complet: bool = False):
@@ -418,6 +427,9 @@ class RapportsViewSet(viewsets.ViewSet):
                 'total_physique': stats.get('capital_physique'),
                 'ecart_financier': stats.get('ecart_financier'),
                 'capital_reel_stock': stats.get('capital_reel_stock'),
+                'total_ecart_montant': stats.get('total_ecart_montant'),
+                'total_ecart_positif': stats.get('total_ecart_positif'),
+                'total_ecart_negatif': stats.get('total_ecart_negatif'),
             },
             'complet': complet,
         }
