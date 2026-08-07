@@ -11,7 +11,7 @@ from django.utils import timezone
 from stock.models import Devise, Succursale
 
 
-def _devise_to_dict(devise: Devise | None) -> dict | None:
+def serialize_devise(devise: Devise | None) -> dict | None:
     if not devise:
         return None
     return {
@@ -29,7 +29,7 @@ def get_devise_principale(entreprise) -> dict | None:
     dev = Devise.objects.filter(entreprise=entreprise, est_principal=True).first()
     if not dev:
         dev = Devise.objects.filter(entreprise=entreprise).first()
-    return _devise_to_dict(dev)
+    return serialize_devise(dev)
 
 
 def serialize_entreprise(entreprise, request=None) -> dict | None:

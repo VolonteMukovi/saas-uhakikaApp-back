@@ -1102,6 +1102,17 @@ class Requisition(models.Model):
     entreprise = models.ForeignKey(
         Entreprise, on_delete=models.CASCADE, related_name='requisitions',
     )
+    devise = models.ForeignKey(
+        'Devise',
+        on_delete=models.SET_NULL,
+        related_name='requisitions',
+        null=True,
+        blank=True,
+        help_text=(
+            'Devise retenue pour les prix estimatifs de la réquisition. '
+            'Les documents historiques sans devise utilisent la devise principale de l’entreprise.'
+        ),
+    )
     succursale = models.ForeignKey(
         Succursale, on_delete=models.CASCADE, related_name='requisitions',
         null=True, blank=True,

@@ -14,6 +14,7 @@ from rest_framework.exceptions import ValidationError
 
 from stock.models import (
     Article,
+    Devise,
     LigneEntree,
     Requisition,
     RequisitionHistorique,
@@ -254,10 +255,23 @@ def create_requisition(
     observations: str = '',
     commentaires: str = '',
     priorite: str = Requisition.PRIORITE_NORMALE,
+    devise_id: int | None = None,
     avec_suggestions: bool = False,
     sources: Iterable[str] | None = None,
 ) -> Requisition:
     with transaction.atomic():
+        devise = None
+        if devise_id is not None:
+            devise = Devise.objects.filter(pk=devise_id, entreprise_id=entreprise_id).first()
+            if devise is None:
+                raise ValidationError({'devise_id': 'Devise invalide pour cette entreprise.'})
+        else:
+            # Fige la devise par défaut pour les nouvelles réquisitions. Les anciennes
+            # réquisitions sans valeur conservent un repli côté document.
+            devise = (
+                Devise.objects.filter(entreprise_id=entreprise_id, est_principal=True).first()
+                or Devise.objects.filter(entreprise_id=entreprise_id).first()
+            )
         req = Requisition.objects.create(
             numero=generate_numero(entreprise_id),
             titre=titre.strip() or 'Nouvelle réquisition',
@@ -267,6 +281,7 @@ def create_requisition(
             priorite=priorite or Requisition.PRIORITE_NORMALE,
             statut=Requisition.STATUT_BROUILLON,
             entreprise_id=entreprise_id,
+            devise=devise,
             succursale_id=succursale_id,
             cree_par=cree_par,
         )
@@ -858,6 +873,9 @@ def changer_statut(
 def ligne_to_api_dict(ligne: RequisitionLigne) -> dict[str, Any]:
     montant = ligne.montant_ligne
     cond = ligne.conditionnement
+    unite_stock_base = ''
+    if ligne.article_id and getattr(ligne.article, 'unite_id', None):
+        unite_stock_base = ligne.article.unite.libelle or ''
     return {
         'id': ligne.pk,
         'type_ligne': ligne.type_ligne,
@@ -870,6 +888,9 @@ def ligne_to_api_dict(ligne: RequisitionLigne) -> dict[str, Any]:
         'designation': ligne.designation,
         'quantite': _fmt_qty(ligne.quantite),
         'unite': ligne.unite,
+        # Distincte de ``unite`` : cette dernière décrit la quantité commandée
+        # (conditionnement ou unité choisie), pas le stock physique.
+        'unite_stock_base': unite_stock_base,
         'prix_estime': _fmt_price(ligne.prix_estime),
         'prix_estime_affiche': (
             PRIX_PLACEHOLDER if ligne.prix_estime is None else _fmt_price(ligne.prix_estime)

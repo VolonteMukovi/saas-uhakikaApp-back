@@ -48,7 +48,7 @@ class RequisitionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
         return (
             super()
             .get_queryset()
-            .select_related('cree_par', 'valide_par', 'rejete_par', 'succursale', 'entreprise')
+            .select_related('cree_par', 'valide_par', 'rejete_par', 'succursale', 'entreprise', 'devise')
             .prefetch_related(
                 'lignes__article__unite',
                 'lignes__conditionnement',

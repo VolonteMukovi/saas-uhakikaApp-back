@@ -207,6 +207,62 @@ class RequisitionModuleTests(APITestCase):
         self.assertEqual(alias.status_code, 200)
         self.assertEqual(alias.json()['rapport'], 'requisition')
 
+    def test_document_exposes_stock_unit_currency_and_signature_contract(self):
+        """Le document distingue le stock de l'unité de commande."""
+        devise_cdf = Devise.objects.create(
+            sigle='CDF', nom='Franc congolais', symbole='FC',
+            est_principal=False, entreprise=self.entreprise,
+        )
+        Stock.objects.filter(article=self.article).update(Qte=Decimal('98'))
+        create = self.client.post(
+            '/api/requisitions/',
+            {
+                'titre': 'Commande cartons',
+                'devise_id': devise_cdf.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(create.status_code, 201, create.content)
+        req_id = create.json()['id']
+        self.assertEqual(create.json()['devise']['sigle'], 'CDF')
+
+        add = self.client.post(
+            f'/api/requisitions/{req_id}/lignes/',
+            {
+                'type_ligne': 'ARTICLE',
+                'article_id': self.article.article_id,
+                'conditionnement_id': self.cond_carton.pk,
+                'quantite': '5',
+                'remarque': 'Cartons intacts uniquement.',
+            },
+            format='json',
+        )
+        self.assertEqual(add.status_code, 200, add.content)
+        ligne_api = add.json()['lignes'][0]
+        self.assertEqual(ligne_api['unite'], 'Carton 24')
+        self.assertEqual(ligne_api['unite_stock_base'], 'pcs')
+
+        document = self.client.get(f'/api/requisitions/{req_id}/document/').json()
+        ligne = document['lignes'][0]
+        self.assertEqual(document['devise']['sigle'], 'CDF')
+        self.assertEqual(document['requisition']['devise_id'], devise_cdf.pk)
+        self.assertEqual(ligne['stock_actuel'], '98.00000')
+        self.assertEqual(ligne['unite_stock_base'], 'pcs')
+        self.assertEqual(ligne['unite'], 'Carton 24')
+        self.assertEqual(ligne['remarque'], 'Cartons intacts uniquement.')
+        self.assertEqual(
+            document['instructions_frontend']['sections_signatures_obligatoires'],
+            ['prepare_par', 'visa_intendance', 'approbation_service_finance'],
+        )
+        self.assertEqual(
+            document['sections_impression']['visa_intendance']['titre'],
+            "Visa de l’intendance",
+        )
+        self.assertEqual(
+            document['sections_impression']['approbation_service_finance']['titre'],
+            'Approbation — Service Finance',
+        )
+
     def test_list_filters(self):
         self.client.post('/api/requisitions/', {'titre': 'A'}, format='json')
         self.client.post(

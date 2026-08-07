@@ -13,6 +13,7 @@ from django.utils import timezone
 from rapports.utils.report_envelope import (
     build_metadata,
     get_devise_principale,
+    serialize_devise,
     serialize_agence,
     serialize_entreprise,
 )
@@ -53,9 +54,17 @@ def _user_block(user) -> dict[str, Any]:
     }
 
 
-def _signature_block(*, nom: str = '', date: str | None = None) -> dict[str, Any]:
+def _signature_block(
+    *,
+    titre: str,
+    sous_titre: str = '',
+    nom: str = '',
+    date: str | None = None,
+) -> dict[str, Any]:
     """Bloc prêt pour le rendu FE (zones manuscrites après impression)."""
     return {
+        'titre': titre,
+        'sous_titre': sous_titre,
         'nom': nom or '',
         'signature': None,
         'signature_placeholder': True,
@@ -108,7 +117,10 @@ def _ligne_document(ligne, *, statut_requisition: str) -> dict[str, Any]:
         else None
     )
     article = ligne.article
+    unite_stock_base = ''
     if article is not None:
+        if getattr(article, 'unite_id', None):
+            unite_stock_base = article.unite.libelle or ''
         article_payload = {
             'code': ligne.article_id,
             'nom': (article.nom_commercial or article.nom_scientifique or ligne.designation),
@@ -132,6 +144,9 @@ def _ligne_document(ligne, *, statut_requisition: str) -> dict[str, Any]:
         'designation': ligne.designation,
         'categorie': _categorie_article(article),
         'unite': ligne.unite or '',
+        # L'unité commandée et l'unité de stock sont volontairement séparées.
+        # Exemple : « 5 cartons » commandés, « 98 bouteilles » en stock.
+        'unite_stock_base': unite_stock_base,
         'quantite_demandee': quantite_demandee,
         'quantite_validee': quantite_validee,
         'quantite': quantite_demandee,
@@ -214,7 +229,7 @@ def build_requisition_document(requisition, *, request=None) -> dict[str, Any]:
         'rendu': 'frontend',
         'entreprise': serialize_entreprise(entreprise, request=request),
         'agence': serialize_agence(requisition.succursale_id, entreprise=entreprise),
-        'devise': get_devise_principale(entreprise),
+        'devise': serialize_devise(requisition.devise) or get_devise_principale(entreprise),
         'requisition': {
             'id': requisition.pk,
             'numero': requisition.numero,
@@ -234,6 +249,7 @@ def build_requisition_document(requisition, *, request=None) -> dict[str, Any]:
             'motif_rejet': requisition.motif_rejet or '',
             'archived': bool(requisition.archived),
             'succursale_id': requisition.succursale_id,
+            'devise_id': requisition.devise_id,
             'dates': {
                 'creation': _iso(requisition.date_creation),
                 'modification': _iso(requisition.date_modification),
@@ -272,14 +288,22 @@ def build_requisition_document(requisition, *, request=None) -> dict[str, Any]:
         'historique': _historique_document(requisition),
         'sections_impression': {
             'prepare_par': _signature_block(
+                titre='Préparé par',
                 nom=auteur.get('display_name') or '',
                 date=_display_dt(requisition.date_creation),
             ),
-            'valide_par': _signature_block(
+            'visa_intendance': _signature_block(
+                titre="Visa de l’intendance",
+                sous_titre="Pour visa / validation de l’intendance",
+                nom='',
+                date=None,
+            ),
+            'approbation_service_finance': _signature_block(
+                titre='Approbation — Service Finance',
+                sous_titre='Pour approbation du service finance',
                 nom=validateur.get('display_name') or '',
                 date=_display_dt(requisition.date_validation),
             ),
-            'reception': _signature_block(nom='', date=None),
             'observations_finales': {
                 'texte_prerempli': requisition.observations or '',
                 'zone_manuscrite': True,
@@ -297,8 +321,8 @@ def build_requisition_document(requisition, *, request=None) -> dict[str, Any]:
             'afficher_placeholder_prix': PRIX_PLACEHOLDER,
             'sections_signatures_obligatoires': [
                 'prepare_par',
-                'valide_par',
-                'reception',
+                'visa_intendance',
+                'approbation_service_finance',
             ],
         },
         'metadata': build_metadata(user, request=request),

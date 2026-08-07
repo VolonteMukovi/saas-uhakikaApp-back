@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
-from stock.models import Requisition, RequisitionHistorique, RequisitionLigne, Succursale
+from stock.models import Devise, Requisition, RequisitionHistorique, RequisitionLigne, Succursale
 from stock.services import requisition as requisition_service
 from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
 
@@ -110,6 +110,7 @@ class RequisitionListSerializer(serializers.ModelSerializer):
     statut_libelle = serializers.CharField(source='get_statut_display', read_only=True)
     priorite_libelle = serializers.CharField(source='get_priorite_display', read_only=True)
     est_modifiable = serializers.BooleanField(read_only=True)
+    devise = serializers.SerializerMethodField()
 
     class Meta:
         model = Requisition
@@ -130,6 +131,7 @@ class RequisitionListSerializer(serializers.ModelSerializer):
             'valide_par_nom',
             'succursale',
             'succursale_nom',
+            'devise',
             'archived',
             'est_modifiable',
             'resume',
@@ -147,6 +149,18 @@ class RequisitionListSerializer(serializers.ModelSerializer):
 
     def get_succursale_nom(self, obj):
         return obj.succursale.nom if obj.succursale_id else None
+
+    def get_devise(self, obj):
+        devise = obj.devise
+        if not devise:
+            return None
+        return {
+            'id': devise.pk,
+            'sigle': devise.sigle,
+            'nom': devise.nom,
+            'symbole': devise.symbole,
+            'est_principal': bool(devise.est_principal),
+        }
 
     def get_resume(self, obj):
         return requisition_service.resume_requisition(obj)
@@ -223,6 +237,7 @@ class RequisitionCreateSerializer(serializers.Serializer):
         default=Requisition.PRIORITE_NORMALE,
     )
     succursale_id = serializers.IntegerField(required=False, allow_null=True)
+    devise_id = serializers.IntegerField(required=False, allow_null=True)
     avec_suggestions = serializers.BooleanField(required=False, default=False)
     sources = serializers.ListField(
         child=serializers.CharField(),
@@ -241,6 +256,11 @@ class RequisitionCreateSerializer(serializers.Serializer):
         if succursale_id is not None:
             if not Succursale.objects.filter(pk=succursale_id, entreprise_id=tenant_id).exists():
                 raise serializers.ValidationError({'succursale_id': 'Succursale invalide.'})
+        devise_id = validated_data.get('devise_id')
+        if devise_id is not None and not Devise.objects.filter(
+            pk=devise_id, entreprise_id=tenant_id,
+        ).exists():
+            raise serializers.ValidationError({'devise_id': 'Devise invalide pour cette entreprise.'})
         user = request.user if request.user.is_authenticated else None
         return requisition_service.create_requisition(
             entreprise_id=tenant_id,
@@ -251,6 +271,7 @@ class RequisitionCreateSerializer(serializers.Serializer):
             observations=validated_data.get('observations') or '',
             commentaires=validated_data.get('commentaires') or '',
             priorite=validated_data.get('priorite') or Requisition.PRIORITE_NORMALE,
+            devise_id=devise_id,
             avec_suggestions=bool(validated_data.get('avec_suggestions')),
             sources=validated_data.get('sources') or ['rupture', 'alerte'],
         )
