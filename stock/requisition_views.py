@@ -48,10 +48,14 @@ class RequisitionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
         return (
             super()
             .get_queryset()
-            .select_related('cree_par', 'valide_par', 'rejete_par', 'succursale', 'entreprise', 'devise')
+            .select_related(
+                'cree_par', 'valide_par', 'rejete_par', 'succursale',
+                'entreprise', 'devise',
+            )
             .prefetch_related(
                 'lignes__article__unite',
                 'lignes__conditionnement',
+                'lignes__fournisseur',
                 'historique__utilisateur',
                 'approvisionnements',
             )
@@ -83,6 +87,9 @@ class RequisitionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
         succursale = params.get('succursale') or params.get('succursale_id')
         if succursale:
             qs = qs.filter(succursale_id=succursale)
+        fournisseur = params.get('fournisseur') or params.get('fournisseur_id')
+        if fournisseur:
+            qs = qs.filter(lignes__fournisseur_id=fournisseur).distinct()
         archived = params.get('archived')
         if archived is not None:
             flag = str(archived).lower() in ('1', 'true', 'yes', 'oui')
@@ -103,6 +110,8 @@ class RequisitionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
                 | Q(description__icontains=search)
                 | Q(observations__icontains=search)
                 | Q(lignes__designation__icontains=search)
+                | Q(lignes__fournisseur__nom__icontains=search)
+                | Q(lignes__fournisseur__code__icontains=search)
             ).distinct()
 
         page = self.paginate_queryset(qs)
@@ -208,6 +217,7 @@ class RequisitionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
                 unite=data.get('unite') or '',
                 prix_estime=data.get('prix_estime'),
                 remarque=data.get('remarque') or '',
+                fournisseur_id=data.get('fournisseur_id'),
                 utilisateur=user,
             )
         else:
@@ -224,6 +234,7 @@ class RequisitionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
                 prix_estime=data.get('prix_estime'),
                 remarque=data.get('remarque') or '',
                 conditionnement_id=data.get('conditionnement_id'),
+                fournisseur_id=data.get('fournisseur_id'),
                 utilisateur=user,
             )
         return self._detail(requisition)

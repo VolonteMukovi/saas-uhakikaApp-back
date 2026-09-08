@@ -245,6 +245,48 @@ def resume_requisition(requisition: Requisition) -> dict[str, Any]:
     }
 
 
+def serialize_fournisseur(fournisseur) -> dict[str, Any] | None:
+    """Bloc fournisseur pour API détail / document d'impression (null si absent)."""
+    if fournisseur is None:
+        return None
+    return {
+        'id': fournisseur.pk,
+        'code': fournisseur.code or '',
+        'nom': fournisseur.nom or '',
+        'telephone': fournisseur.telephone or None,
+        'email': fournisseur.email or None,
+        'adresse': fournisseur.adresse or None,
+        'ville': fournisseur.ville or None,
+        'pays': fournisseur.pays or None,
+        'nif': fournisseur.nif or None,
+        'is_active': bool(fournisseur.is_active),
+    }
+
+
+def resolve_fournisseur_for_entreprise(
+    *,
+    entreprise_id: int,
+    fournisseur_id: int | None,
+    allow_null: bool = True,
+):
+    """Valide un fournisseur du tenant. ``None`` autorisé (fournisseur inconnu)."""
+    if fournisseur_id is None:
+        if allow_null:
+            return None
+        raise ValidationError({'fournisseur_id': 'Fournisseur requis.'})
+    from order.models import Fournisseur
+
+    fournisseur = Fournisseur.objects.filter(
+        pk=fournisseur_id,
+        entreprise_id=entreprise_id,
+    ).first()
+    if fournisseur is None:
+        raise ValidationError({
+            'fournisseur_id': 'Fournisseur invalide pour cette entreprise.',
+        })
+    return fournisseur
+
+
 def create_requisition(
     *,
     entreprise_id: int,
@@ -354,6 +396,7 @@ def add_ligne_article(
     prix_estime=None,
     remarque: str = '',
     conditionnement_id=None,
+    fournisseur_id=None,
     utilisateur=None,
 ) -> RequisitionLigne:
     assert_requisition_editable(requisition)
@@ -380,6 +423,11 @@ def add_ligne_article(
             'article_id': 'Cet article avec ce conditionnement est déjà présent.',
         })
 
+    fournisseur = resolve_fournisseur_for_entreprise(
+        entreprise_id=requisition.entreprise_id,
+        fournisseur_id=fournisseur_id,
+    )
+
     ligne = build_ligne_from_article(
         requisition,
         article,
@@ -387,6 +435,7 @@ def add_ligne_article(
         remarque=remarque,
         conditionnement=cond,
     )
+    ligne.fournisseur = fournisseur
     if unite is not None and str(unite).strip():
         ligne.unite = str(unite).strip()
     elif cond:
@@ -407,6 +456,7 @@ def add_ligne_article(
             'ligne_id': ligne.pk,
             'article_id': article.article_id,
             'conditionnement_id': cond.pk if cond else None,
+            'fournisseur_id': fournisseur.pk if fournisseur else None,
         },
     )
     return ligne
@@ -420,6 +470,7 @@ def add_ligne_libre(
     unite: str = '',
     prix_estime=None,
     remarque: str = '',
+    fournisseur_id=None,
     utilisateur=None,
 ) -> RequisitionLigne:
     assert_requisition_editable(requisition)
@@ -434,10 +485,16 @@ def add_ligne_libre(
     if not is_prix_placeholder(prix_estime):
         prix = _dec(prix_estime)
 
+    fournisseur = resolve_fournisseur_for_entreprise(
+        entreprise_id=requisition.entreprise_id,
+        fournisseur_id=fournisseur_id,
+    )
+
     ligne = RequisitionLigne.objects.create(
         requisition=requisition,
         type_ligne=RequisitionLigne.TYPE_LIBRE,
         article=None,
+        fournisseur=fournisseur,
         designation=nom,
         quantite=qty,
         unite=(unite or '').strip(),
@@ -451,7 +508,10 @@ def add_ligne_libre(
         action='AJOUT_LIGNE_LIBRE',
         utilisateur=utilisateur,
         detail=f'Ajout ligne libre « {nom} »',
-        metadata={'ligne_id': ligne.pk},
+        metadata={
+            'ligne_id': ligne.pk,
+            'fournisseur_id': fournisseur.pk if fournisseur else None,
+        },
     )
     return ligne
 
@@ -541,6 +601,16 @@ def update_ligne(
                 )
             changed.append('conditionnement')
 
+    if 'fournisseur_id' in data:
+        fournisseur = resolve_fournisseur_for_entreprise(
+            entreprise_id=ligne.requisition.entreprise_id,
+            fournisseur_id=data.get('fournisseur_id'),
+        )
+        new_id = fournisseur.pk if fournisseur else None
+        if ligne.fournisseur_id != new_id:
+            ligne.fournisseur = fournisseur
+            changed.append('fournisseur')
+
     if changed:
         ligne.save()
         log_historique(
@@ -575,6 +645,7 @@ def dupliquer_ligne(ligne: RequisitionLigne, *, utilisateur=None) -> Requisition
         type_ligne=ligne.type_ligne,
         article=ligne.article,
         conditionnement=ligne.conditionnement,
+        fournisseur=ligne.fournisseur,
         designation=f'{ligne.designation} (copie)',
         quantite=ligne.quantite,
         unite=ligne.unite,
@@ -903,6 +974,8 @@ def ligne_to_api_dict(ligne: RequisitionLigne) -> dict[str, Any]:
         ),
         'remarque': ligne.remarque,
         'ordre': ligne.ordre,
+        'fournisseur_id': ligne.fournisseur_id,
+        'fournisseur': serialize_fournisseur(ligne.fournisseur),
         'statut_stock': ligne.statut_stock or None,
         'stock_actuel': _fmt_qty(ligne.stock_actuel),
         'seuil_alerte': _fmt_qty(ligne.seuil_alerte),

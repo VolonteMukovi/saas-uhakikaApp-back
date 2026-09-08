@@ -2,6 +2,8 @@ from rest_framework import routers
 from .views import *
 from .inventaire_views import InventaireSessionViewSet
 from .requisition_views import RequisitionViewSet
+from .tarification_views import TarificationViewSet
+from .benefices_views import BeneficePerformanceViewSet
 from django.urls import path, include
 
 router = routers.DefaultRouter()
@@ -28,6 +30,8 @@ router.register(r'client-entreprises', ClientEntrepriseViewSet, basename='client
 router.register(r'dettes', DetteClientViewSet)
 router.register(r'inventaires', InventaireSessionViewSet, basename='inventaire')
 router.register(r'requisitions', RequisitionViewSet, basename='requisition')
+router.register(r'tarification', TarificationViewSet, basename='tarification')
+router.register(r'benefices', BeneficePerformanceViewSet, basename='benefices')
 
 
 urlpatterns = [

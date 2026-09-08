@@ -2,7 +2,11 @@
 from django.core.management.base import BaseCommand
 
 from abonnements.models import FormuleAbonnement
-from abonnements.services.licence import _fonctionnalites_essai_complet, get_formule_essai
+from abonnements.services.licence import (
+    _fonctionnalites_essai_complet,
+    get_formule_a_vie,
+    get_formule_essai,
+)
 
 
 FORMULES = [
@@ -15,6 +19,7 @@ FORMULES = [
         ),
         'prix_mensuel': 30,
         'prix_annuel': 342,
+        'prix_a_vie': 0,
         'ordre_affichage': 1,
         'fonctionnalites': {
             'articles': True,
@@ -51,6 +56,7 @@ FORMULES = [
         ),
         'prix_mensuel': 60,
         'prix_annuel': 684,
+        'prix_a_vie': 0,
         'ordre_affichage': 2,
         'fonctionnalites': {
             'articles': True,
@@ -87,7 +93,22 @@ FORMULES = [
         ),
         'prix_mensuel': 120,
         'prix_annuel': 1296,
+        'prix_a_vie': 0,
         'ordre_affichage': 3,
+        'fonctionnalites': _fonctionnalites_essai_complet(),
+        'limites': {'utilisateurs_max': None, 'succursales_max': None},
+    },
+    {
+        'code': FormuleAbonnement.CODE_A_VIE,
+        'nom': 'À vie',
+        'description': (
+            'Accès permanent à toutes les fonctionnalités UHAKIKAAPP, '
+            'sans date d\'expiration — un seul paiement.'
+        ),
+        'prix_mensuel': 0,
+        'prix_annuel': 0,
+        'prix_a_vie': 1999,
+        'ordre_affichage': 4,
         'fonctionnalites': _fonctionnalites_essai_complet(),
         'limites': {'utilisateurs_max': None, 'succursales_max': None},
     },
@@ -117,6 +138,8 @@ class Command(BaseCommand):
 
         get_formule_essai()
         self.stdout.write(self.style.SUCCESS('Formule Découverte Pro OK'))
+        get_formule_a_vie()
+        self.stdout.write(self.style.SUCCESS('Formule À vie OK'))
 
         for data in FORMULES:
             code = data.pop('code')

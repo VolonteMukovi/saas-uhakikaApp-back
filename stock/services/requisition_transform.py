@@ -50,7 +50,7 @@ def build_entree_prefill_from_requisition(requisition: Requisition) -> dict[str,
     lignes_ignorees: list[dict] = []
 
     for ligne in requisition.lignes.select_related(
-        'article', 'article__unite', 'conditionnement',
+        'article', 'article__unite', 'conditionnement', 'fournisseur',
     ).order_by('ordre', 'id'):
         if ligne.type_ligne == RequisitionLigne.TYPE_LIBRE or not ligne.article_id:
             lignes_ignorees.append({
@@ -84,6 +84,8 @@ def build_entree_prefill_from_requisition(requisition: Requisition) -> dict[str,
             'seuil_alerte': str(seuil or 0),
             'remarque_source': ligne.remarque or '',
             'requisition_ligne_id': ligne.pk,
+            'fournisseur_id': ligne.fournisseur_id,
+            'fournisseur': requisition_service.serialize_fournisseur(ligne.fournisseur),
         })
 
     libele = f"Approvisionnement — {requisition.numero}"

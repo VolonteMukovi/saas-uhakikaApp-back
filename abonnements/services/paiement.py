@@ -4,7 +4,6 @@ Service paiement en ligne : initiation, webhooks, activation automatique.
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
@@ -20,7 +19,11 @@ from abonnements.models import (
 )
 from abonnements.paiements import get_gateway
 from abonnements.paiements.gateways.base import NotificationPaiement
-from abonnements.services.licence import get_abonnement_courant, _journaliser
+from abonnements.services.licence import (
+    calculer_date_fin_abonnement,
+    get_abonnement_courant,
+    _journaliser,
+)
 
 
 class ErreurPaiement(Exception):
@@ -41,6 +44,8 @@ def _code_gateway(fournisseur: str) -> str:
 
 
 def _montant_formule(formule: FormuleAbonnement, periode: str) -> Decimal:
+    if periode == AbonnementEntreprise.PERIODE_A_VIE:
+        return Decimal(formule.prix_a_vie)
     if periode == AbonnementEntreprise.PERIODE_ANNUEL:
         return Decimal(formule.prix_annuel)
     return Decimal(formule.prix_mensuel)
@@ -119,9 +124,18 @@ def initier_paiement_en_ligne(
     ):
         raise ErreurPaiement(_('Fournisseur de paiement invalide.'), code='fournisseur_invalide')
 
+    if formule.code == FormuleAbonnement.CODE_A_VIE:
+        periode = AbonnementEntreprise.PERIODE_A_VIE
+    elif periode == AbonnementEntreprise.PERIODE_A_VIE and formule.code != FormuleAbonnement.CODE_A_VIE:
+        raise ErreurPaiement(
+            _('La période « à vie » est réservée à la formule À vie.'),
+            code='periode_invalide',
+        )
+
     if periode not in (
         AbonnementEntreprise.PERIODE_MENSUEL,
         AbonnementEntreprise.PERIODE_ANNUEL,
+        AbonnementEntreprise.PERIODE_A_VIE,
     ):
         raise ErreurPaiement(_('Période invalide.'), code='periode_invalide')
 
@@ -178,10 +192,7 @@ def activer_abonnement_apres_paiement_confirme(
 
     now = timezone.now()
     abonnement = paiement.abonnement
-    if abonnement.periode == AbonnementEntreprise.PERIODE_ANNUEL:
-        date_fin = now + timedelta(days=365)
-    else:
-        date_fin = now + timedelta(days=30)
+    date_fin = calculer_date_fin_abonnement(abonnement.periode, maintenant=now)
 
     abonnement.statut = AbonnementEntreprise.STATUT_ACTIF
     abonnement.date_debut = now
@@ -210,7 +221,8 @@ def activer_abonnement_apres_paiement_confirme(
         reference_externe=paiement.reference_externe,
         montant=str(paiement.montant),
         fournisseur=paiement.fournisseur,
-        date_fin=date_fin.isoformat(),
+        date_fin=date_fin.isoformat() if date_fin else None,
+        a_vie=abonnement.periode == AbonnementEntreprise.PERIODE_A_VIE,
     )
     return abonnement
 

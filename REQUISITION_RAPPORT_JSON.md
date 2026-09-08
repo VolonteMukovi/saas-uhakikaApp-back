@@ -92,6 +92,7 @@ Le document d’impression ajoute l’enveloppe entreprise, les sections signatu
 | `auteur` / `cree_par` | `{ id, username, full_name, display_name }` |
 | `valide_par`, `rejete_par` | Idem |
 | `motif_rejet`, `archived`, `succursale_id` | — |
+| `devise_id` | Devise des prix estimatifs |
 | `dates.*` | ISO : `creation`, `modification`, `preparation`, `validation`, `rejet`, `cloture` |
 | `dates_affichees.*` | Formats `dd/mm/YYYY HH:MM` pour affichage |
 
@@ -110,6 +111,7 @@ Le document d’impression ajoute l’enveloppe entreprise, les sections signatu
 | `origine_suggestion` | `RUPTURE`, `ALERTE`, `CATALOGUE`, `MANUEL` |
 | `statut_ligne` / `statut_stock` | Snapshot stock |
 | `stock_actuel`, `seuil_alerte` | Contexte |
+| `fournisseur_id`, `fournisseur` | Fournisseur de **cette ligne** (`order.Fournisseur`) — **optionnel** (`null` si inconnu). Bloc : `{ id, code, nom, telephone, email, adresse, ville, pays, nif, is_active }` |
 
 ### 3.4 Résumé (`resume`)
 

@@ -12,7 +12,7 @@ from abonnements.models import (
 
 @admin.register(FormuleAbonnement)
 class FormuleAbonnementAdmin(admin.ModelAdmin):
-    list_display = ('nom', 'code', 'prix_mensuel', 'prix_annuel', 'est_active', 'ordre_affichage')
+    list_display = ('nom', 'code', 'prix_mensuel', 'prix_annuel', 'prix_a_vie', 'est_active', 'ordre_affichage')
     list_filter = ('est_active', 'est_visible_catalogue')
     search_fields = ('nom', 'code')
 

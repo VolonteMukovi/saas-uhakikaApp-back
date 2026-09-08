@@ -21,6 +21,7 @@ class FormuleAbonnement(models.Model):
     CODE_ESSENTIEL = 'essentiel'
     CODE_CROISSANCE = 'croissance'
     CODE_PREMIUM_ENTREPRISE = 'premium_entreprise'
+    CODE_A_VIE = 'a_vie'
 
     # Alias legacy pour compatibilité rétroactive
     CODE_ESSAI = CODE_DECOUVERTE_PRO
@@ -34,6 +35,12 @@ class FormuleAbonnement(models.Model):
     description = models.TextField(blank=True)
     prix_mensuel = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     prix_annuel = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    prix_a_vie = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        help_text=_('Prix unique (paiement unique) pour la formule à vie.'),
+    )
     devise = models.CharField(max_length=3, default='USD')
     duree_essai_jours = models.PositiveIntegerField(
         default=0,
@@ -89,11 +96,13 @@ class AbonnementEntreprise(models.Model):
     PERIODE_ESSAI = 'essai'
     PERIODE_MENSUEL = 'mensuel'
     PERIODE_ANNUEL = 'annuel'
+    PERIODE_A_VIE = 'a_vie'
 
     PERIODE_CHOICES = (
         (PERIODE_ESSAI, _('Essai')),
         (PERIODE_MENSUEL, _('Mensuel')),
         (PERIODE_ANNUEL, _('Annuel')),
+        (PERIODE_A_VIE, _('À vie')),
     )
 
     entreprise = models.ForeignKey(
@@ -140,12 +149,20 @@ class AbonnementEntreprise(models.Model):
         return f'{self.entreprise_id} — {self.formule.nom} ({self.statut})'
 
     @property
+    def est_a_vie(self) -> bool:
+        """Licence permanente : période à vie ou actif sans date de fin."""
+        if self.periode == self.PERIODE_A_VIE:
+            return True
+        return self.statut == self.STATUT_ACTIF and self.date_fin is None
+
+    @property
     def est_actif(self):
         now = timezone.now()
         if self.statut in (self.STATUT_SUSPENDU, self.STATUT_ANNULE):
             return False
         if self.statut == self.STATUT_EN_ATTENTE:
             return False
+        # date_fin=None ⇒ jamais d'expiration (plan à vie)
         if self.date_fin and self.date_fin < now:
             return False
         return self.statut in (self.STATUT_ESSAI, self.STATUT_ACTIF)
@@ -153,7 +170,7 @@ class AbonnementEntreprise(models.Model):
     @property
     def jours_restants(self):
         if not self.date_fin:
-            return None
+            return None  # illimité (à vie)
         delta = self.date_fin - timezone.now()
         return max(0, delta.days)
 

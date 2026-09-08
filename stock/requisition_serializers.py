@@ -48,6 +48,7 @@ class RequisitionLigneWriteSerializer(serializers.Serializer):
     conditionnement_id = serializers.IntegerField(required=False, allow_null=True)
     prix_estime = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     remarque = serializers.CharField(required=False, allow_blank=True, default='')
+    fournisseur_id = serializers.IntegerField(required=False, allow_null=True)
 
     def validate(self, attrs):
         type_ligne = attrs.get('type_ligne') or RequisitionLigne.TYPE_ARTICLE
@@ -70,6 +71,7 @@ class RequisitionLigneUpdateSerializer(serializers.Serializer):
     prix_estime = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     remarque = serializers.CharField(required=False, allow_blank=True)
     ordre = serializers.IntegerField(required=False, min_value=0)
+    fournisseur_id = serializers.IntegerField(required=False, allow_null=True)
 
 
 class RequisitionReorderSerializer(serializers.Serializer):

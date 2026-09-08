@@ -20,8 +20,25 @@ from abonnements.models import (
 DUREE_ESSAI_JOURS = 60  # 2 mois
 
 
+def calculer_date_fin_abonnement(periode: str, *, maintenant=None):
+    """
+    Calcule la date de fin selon la période.
+    ``None`` = licence permanente (plan à vie).
+    """
+    now = maintenant or timezone.now()
+    if periode == AbonnementEntreprise.PERIODE_A_VIE:
+        return None
+    if periode == AbonnementEntreprise.PERIODE_ANNUEL:
+        return now + timedelta(days=365)
+    if periode == AbonnementEntreprise.PERIODE_MENSUEL:
+        return now + timedelta(days=30)
+    if periode == AbonnementEntreprise.PERIODE_ESSAI:
+        return now + timedelta(days=DUREE_ESSAI_JOURS)
+    return now + timedelta(days=30)
+
+
 def _fonctionnalites_essai_complet():
-    """Pendant l'essai, toutes les fonctionnalités sont ouvertes."""
+    """Pendant l'essai / plan à vie : toutes les fonctionnalités sont ouvertes."""
     return {
         'articles': True,
         'stock': True,
@@ -46,6 +63,29 @@ def _fonctionnalites_essai_complet():
         'chatbot': True,
         'accompagnement_personnalisation': True,
     }
+
+
+def get_formule_a_vie() -> FormuleAbonnement:
+    """Formule catalogue : paiement unique, accès permanent, toutes les features."""
+    formule, _ = FormuleAbonnement.objects.get_or_create(
+        code=FormuleAbonnement.CODE_A_VIE,
+        defaults={
+            'nom': 'À vie',
+            'description': (
+                'Accès permanent à toutes les fonctionnalités UHAKIKAAPP, '
+                'sans date d\'expiration — un seul paiement.'
+            ),
+            'prix_mensuel': 0,
+            'prix_annuel': 0,
+            'prix_a_vie': 1999,
+            'duree_essai_jours': 0,
+            'fonctionnalites': _fonctionnalites_essai_complet(),
+            'limites': {'utilisateurs_max': None, 'succursales_max': None},
+            'est_visible_catalogue': True,
+            'ordre_affichage': 4,
+        },
+    )
+    return formule
 
 
 def get_formule_essai() -> FormuleAbonnement:
@@ -148,6 +188,7 @@ def build_etat_licence(entreprise_id: int) -> dict:
                 'statut': 'sans_abonnement',
                 'est_actif': False,
                 'est_essai': False,
+                'est_a_vie': False,
                 'a_jamais_eu_abonnement': True,
                 'formule_code': None,
                 'formule_nom': None,
@@ -162,6 +203,7 @@ def build_etat_licence(entreprise_id: int) -> dict:
             'statut': 'aucun',
             'est_actif': False,
             'est_essai': False,
+            'est_a_vie': False,
             'a_jamais_eu_abonnement': False,
             'formule_code': None,
             'formule_nom': None,
@@ -179,8 +221,8 @@ def build_etat_licence(entreprise_id: int) -> dict:
     fonctionnalites = dict(abonnement.formule.fonctionnalites or {})
     limites = dict(abonnement.formule.limites or {})
 
-    # Pendant l'essai : accès complet
-    if est_essai and est_actif:
+    # Pendant l'essai ou plan à vie : accès complet
+    if est_actif and (est_essai or abonnement.est_a_vie):
         fonctionnalites = _fonctionnalites_essai_complet()
         limites = {'utilisateurs_max': None, 'succursales_max': None}
 
@@ -192,6 +234,8 @@ def build_etat_licence(entreprise_id: int) -> dict:
             message = _('Votre demande d\'abonnement est en attente de validation.')
         elif abonnement.statut == AbonnementEntreprise.STATUT_SUSPENDU:
             message = _('Votre accès a été suspendu. Contactez le support.')
+    elif abonnement.est_a_vie:
+        message = _('Licence à vie active — accès permanent à toutes les fonctionnalités.')
 
     return {
         'a_licence': True,
@@ -199,6 +243,7 @@ def build_etat_licence(entreprise_id: int) -> dict:
         'statut': abonnement.statut,
         'est_actif': est_actif,
         'est_essai': est_essai,
+        'est_a_vie': bool(abonnement.est_a_vie),
         'a_jamais_eu_abonnement': False,
         'formule_code': abonnement.formule.code,
         'formule_nom': abonnement.formule.nom,
@@ -238,19 +283,30 @@ def demander_abonnement(entreprise, formule_code: str, periode: str, user=None) 
     if formule.code in (FormuleAbonnement.CODE_ESSAI, 'essai_gratuit'):
         raise ValueError(_('La formule essai ne peut pas être souscrite manuellement.'))
 
-    if periode not in (
+    periodes_ok = (
         AbonnementEntreprise.PERIODE_MENSUEL,
         AbonnementEntreprise.PERIODE_ANNUEL,
-    ):
+        AbonnementEntreprise.PERIODE_A_VIE,
+    )
+    if periode not in periodes_ok:
         raise ValueError(_('Période invalide.'))
 
     courant = get_abonnement_courant(entreprise.id)
     if courant and courant.statut == AbonnementEntreprise.STATUT_EN_ATTENTE:
         raise ValueError(_('Une demande est déjà en attente de validation.'))
 
-    montant = (
-        formule.prix_mensuel if periode == AbonnementEntreprise.PERIODE_MENSUEL else formule.prix_annuel
-    )
+    # Formule à vie ⇒ période forcée à « a_vie »
+    if formule.code == FormuleAbonnement.CODE_A_VIE:
+        periode = AbonnementEntreprise.PERIODE_A_VIE
+    elif periode == AbonnementEntreprise.PERIODE_A_VIE and formule.code != FormuleAbonnement.CODE_A_VIE:
+        raise ValueError(_('La période « à vie » est réservée à la formule À vie.'))
+
+    if periode == AbonnementEntreprise.PERIODE_A_VIE:
+        montant = formule.prix_a_vie
+    elif periode == AbonnementEntreprise.PERIODE_MENSUEL:
+        montant = formule.prix_mensuel
+    else:
+        montant = formule.prix_annuel
 
     # Marquer l'ancien comme non courant si on remplace par une demande
     if courant:
@@ -294,12 +350,7 @@ def activer_abonnement_manuellement(
         raise ValueError(_('Seul un abonnement en attente peut être activé manuellement.'))
 
     now = timezone.now()
-    if abonnement.periode == AbonnementEntreprise.PERIODE_ANNUEL:
-        date_fin = now + timedelta(days=365)
-    elif abonnement.periode == AbonnementEntreprise.PERIODE_MENSUEL:
-        date_fin = now + timedelta(days=30)
-    else:
-        date_fin = now + timedelta(days=30)
+    date_fin = calculer_date_fin_abonnement(abonnement.periode, maintenant=now)
 
     abonnement.statut = AbonnementEntreprise.STATUT_ACTIF
     abonnement.date_debut = now
@@ -322,7 +373,44 @@ def activer_abonnement_manuellement(
         JournalActivationLicence.ACTION_ACTIVATION_MANUELLE,
         abonnement=abonnement,
         user=admin_user,
-        date_fin=date_fin.isoformat(),
+        date_fin=date_fin.isoformat() if date_fin else None,
+        notes=notes,
+        a_vie=abonnement.periode == AbonnementEntreprise.PERIODE_A_VIE,
+    )
+    return abonnement
+
+
+@transaction.atomic
+def activer_acces_a_vie(entreprise, admin_user=None, notes: str = '') -> AbonnementEntreprise:
+    """
+    Active immédiatement une licence permanente (toutes fonctionnalités, sans date_fin).
+    Remplace l'abonnement courant. Utile pour clients VIP / activation manuelle plateforme.
+    """
+    formule = get_formule_a_vie()
+    now = timezone.now()
+    courant = get_abonnement_courant(entreprise.id)
+    if courant:
+        courant.est_courant = False
+        courant.save(update_fields=['est_courant', 'updated_at'])
+
+    abonnement = AbonnementEntreprise.objects.create(
+        entreprise=entreprise,
+        formule=formule,
+        statut=AbonnementEntreprise.STATUT_ACTIF,
+        periode=AbonnementEntreprise.PERIODE_A_VIE,
+        date_debut=now,
+        date_fin=None,
+        activation_manuelle=True,
+        active_par=admin_user,
+        notes=notes or 'Activation licence à vie',
+        est_courant=True,
+    )
+    _journaliser(
+        entreprise.id,
+        JournalActivationLicence.ACTION_ACTIVATION_MANUELLE,
+        abonnement=abonnement,
+        user=admin_user,
+        a_vie=True,
         notes=notes,
     )
     return abonnement

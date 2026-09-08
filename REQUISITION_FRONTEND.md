@@ -31,6 +31,7 @@ Ce document décrit l’API backend livrée pour le **nouveau module métier Ré
 - `priorite` : `BASSE` \| `NORMALE` \| `HAUTE` \| `URGENTE`
 - `statut` : voir section États
 - `entreprise`, `succursale` (optionnelle)
+- `devise` (optionnelle, défaut = devise principale)
 - `cree_par`, `valide_par`, `rejete_par`
 - `date_creation`, `date_modification`, `date_validation`, `date_rejet`, `date_cloture`
 - `motif_rejet`, `archived`
@@ -39,6 +40,7 @@ Ce document décrit l’API backend livrée pour le **nouveau module métier Ré
 
 - `type_ligne` : `ARTICLE` (FK `article`) ou `LIBRE` (nom libre)
 - `designation`, `quantite`, `unite`
+- `fournisseur` (optionnel, FK `order.Fournisseur`) — **par ligne / article** ; `null` si inconnu
 - `prix_estime` : `null` = jamais approvisionné → afficher `.....`
 - `prix_source` : `DERNIER_ACHAT` \| `MANUEL`
 - `remarque`, `ordre`
@@ -71,9 +73,10 @@ Auth : JWT + contexte entreprise.
 
 - `statut`, `priorite`, `cree_par` / `utilisateur`
 - `succursale` / `succursale_id`
+- `fournisseur` / `fournisseur_id` (filtre les réquisitions ayant **au moins une ligne** avec ce fournisseur)
 - `date_from` / `date_debut`, `date_to` / `date_fin`
 - `archived=true|false`
-- `search` / `q` (n°, titre, description, désignation lignes)
+- `search` / `q` (n°, titre, description, désignation lignes, nom/code fournisseur des lignes)
 
 #### Body création
 
@@ -85,12 +88,36 @@ Auth : JWT + contexte entreprise.
   "commentaires": "",
   "priorite": "NORMALE",
   "succursale_id": null,
+  "devise_id": null,
   "avec_suggestions": true,
   "sources": ["rupture", "alerte"]
 }
 ```
 
 `sources` possibles : `rupture`, `alerte`, `expiration_30`, `expiration_90`, `tous`.
+
+### Lignes — fournisseur par article
+
+Le fournisseur **n’est plus** au niveau document. Il se saisit **ligne par ligne** (optionnel) :
+
+```json
+POST /api/requisitions/{id}/lignes/
+{
+  "type_ligne": "ARTICLE",
+  "article_id": "ART-001",
+  "conditionnement_id": 3,
+  "quantite": "10",
+  "fournisseur_id": 12
+}
+```
+
+```json
+PATCH /api/requisitions/{id}/lignes/{ligne_id}/
+{ "fournisseur_id": null }
+```
+
+Chaque ligne dans le détail / document contient `fournisseur_id` + objet `fournisseur` (`id`, `code`, `nom`, `telephone`, …) ou `null`.
+Le fournisseur doit appartenir à l’entreprise du JWT.
 
 ### Suggestions
 

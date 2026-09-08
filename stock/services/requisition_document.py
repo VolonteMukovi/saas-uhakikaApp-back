@@ -17,7 +17,7 @@ from rapports.utils.report_envelope import (
     serialize_agence,
     serialize_entreprise,
 )
-from stock.services.requisition import PRIX_PLACEHOLDER, resume_requisition
+from stock.services.requisition import PRIX_PLACEHOLDER, resume_requisition, serialize_fournisseur
 
 
 def _iso(value) -> str | None:
@@ -167,6 +167,8 @@ def _ligne_document(ligne, *, statut_requisition: str) -> dict[str, Any]:
         'statut_stock': ligne.statut_stock or None,
         'stock_actuel': str(ligne.stock_actuel) if ligne.stock_actuel is not None else None,
         'seuil_alerte': str(ligne.seuil_alerte) if ligne.seuil_alerte is not None else None,
+        'fournisseur_id': ligne.fournisseur_id,
+        'fournisseur': serialize_fournisseur(ligne.fournisseur),
     }
 
 
@@ -211,6 +213,7 @@ def build_requisition_document(requisition, *, request=None) -> dict[str, Any]:
             'article__sous_type_article',
             'article__sous_type_article__type_article',
             'article__unite',
+            'fournisseur',
         ).order_by('ordre', 'id')
     )
     lignes = [

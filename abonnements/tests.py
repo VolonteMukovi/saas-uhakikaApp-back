@@ -9,6 +9,7 @@ from rest_framework.test import APIClient
 from abonnements.models import AbonnementEntreprise, FormuleAbonnement
 from abonnements.services.licence import (
     activer_abonnement_manuellement,
+    activer_acces_a_vie,
     build_etat_licence,
     demander_abonnement,
     demarrer_essai_gratuit,
@@ -100,6 +101,76 @@ class EssaiGratuitTests(TestCase):
         self.assertIn('entreprises', resp.data)
         self.assertIn('licences', resp.data)
         self.assertIn('plans', resp.data)
+
+
+class PlanAVieTests(TestCase):
+    """Licence permanente : date_fin=null, toutes les fonctionnalités."""
+
+    def setUp(self):
+        FormuleAbonnement.objects.get_or_create(
+            code=FormuleAbonnement.CODE_ESSAI,
+            defaults={'nom': 'Essai', 'duree_essai_jours': 60},
+        )
+        FormuleAbonnement.objects.update_or_create(
+            code=FormuleAbonnement.CODE_A_VIE,
+            defaults={
+                'nom': 'À vie',
+                'prix_a_vie': 1999,
+                'prix_mensuel': 0,
+                'prix_annuel': 0,
+                'fonctionnalites': {
+                    'articles': True, 'stock': True, 'vente_credit': True,
+                    'rapports_avances': True, 'chatbot': True, 'multi_succursales': True,
+                },
+                'limites': {'utilisateurs_max': None, 'succursales_max': None},
+                'est_visible_catalogue': True,
+                'est_active': True,
+            },
+        )
+
+    def test_activer_acces_a_vie_permanent(self):
+        ent = Entreprise.objects.create(nom='Client VIP')
+        abo = activer_acces_a_vie(ent, notes='Offre fondateur')
+        self.assertEqual(abo.statut, AbonnementEntreprise.STATUT_ACTIF)
+        self.assertEqual(abo.periode, AbonnementEntreprise.PERIODE_A_VIE)
+        self.assertIsNone(abo.date_fin)
+        self.assertTrue(abo.est_actif)
+        self.assertTrue(abo.est_a_vie)
+        self.assertIsNone(abo.jours_restants)
+
+        etat = build_etat_licence(ent.id)
+        self.assertTrue(etat['est_actif'])
+        self.assertTrue(etat['est_a_vie'])
+        self.assertFalse(etat['est_essai'])
+        self.assertIsNone(etat['date_fin'])
+        self.assertIsNone(etat['jours_restants'])
+        self.assertTrue(etat['fonctionnalites'].get('vente_credit'))
+        self.assertTrue(etat['fonctionnalites'].get('chatbot'))
+
+    def test_demande_a_vie_puis_activation(self):
+        user = User.objects.create_user(username='vipuser', password='testpass123', role='admin')
+        admin = User.objects.create_superuser(username='supersa', password='superpass123', email='sa@t.com')
+        ent = Entreprise.objects.create(nom='PME À vie')
+        abo = demander_abonnement(
+            ent, FormuleAbonnement.CODE_A_VIE, AbonnementEntreprise.PERIODE_A_VIE, user=user,
+        )
+        self.assertEqual(abo.periode, AbonnementEntreprise.PERIODE_A_VIE)
+        paiement = abo.paiements.first()
+        self.assertEqual(paiement.montant, abo.formule.prix_a_vie)
+
+        abo = activer_abonnement_manuellement(abo, admin, notes='Paiement unique OK')
+        self.assertIsNone(abo.date_fin)
+        etat = build_etat_licence(ent.id)
+        self.assertTrue(etat['est_a_vie'])
+        self.assertTrue(etat['est_actif'])
+
+    def test_a_vie_ne_expire_pas(self):
+        """Sans date_fin, synchroniser_statut_expiration ne passe jamais en expire."""
+        ent = Entreprise.objects.create(nom='Never Expire')
+        activer_acces_a_vie(ent)
+        etat = build_etat_licence(ent.id)
+        self.assertEqual(etat['statut'], AbonnementEntreprise.STATUT_ACTIF)
+        self.assertTrue(etat['est_actif'])
 
 
 class InscriptionApiTests(TestCase):

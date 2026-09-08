@@ -1208,6 +1208,17 @@ class RequisitionLigne(models.Model):
         related_name='lignes_requisition',
         help_text='Conditionnement d\'achat (quantité exprimée dans ce packing).',
     )
+    fournisseur = models.ForeignKey(
+        'order.Fournisseur',
+        on_delete=models.SET_NULL,
+        related_name='lignes_requisition',
+        null=True,
+        blank=True,
+        help_text=(
+            'Fournisseur pressenti pour cet article (optionnel : '
+            'peut rester vide si le fournisseur n’est pas encore connu).'
+        ),
+    )
     designation = models.CharField(max_length=255)
     quantite = models.DecimalField(
         max_digits=12,
@@ -1233,6 +1244,10 @@ class RequisitionLigne(models.Model):
         indexes = [
             models.Index(fields=['requisition_id', 'ordre']),
             models.Index(fields=['requisition_id', 'article_id']),
+            models.Index(
+                fields=['requisition_id', 'fournisseur_id'],
+                name='stock_reqligne_fou_idx',
+            ),
         ]
 
     def __str__(self):

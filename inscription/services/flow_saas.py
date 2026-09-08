@@ -53,6 +53,8 @@ def _statut_licence_frontend(etat_licence: dict | None) -> str | None:
     if statut == AbonnementEntreprise.STATUT_ESSAI:
         return 'essai_actif'
     if statut == AbonnementEntreprise.STATUT_ACTIF:
+        if etat_licence.get('est_a_vie') or etat_licence.get('periode') == AbonnementEntreprise.PERIODE_A_VIE:
+            return 'a_vie'
         return 'actif'
     if statut == AbonnementEntreprise.STATUT_SUSPENDU:
         return 'suspendu'

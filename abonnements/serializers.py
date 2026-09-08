@@ -14,7 +14,7 @@ class FormuleAbonnementSerializer(serializers.ModelSerializer):
         model = FormuleAbonnement
         fields = [
             'id', 'code', 'nom', 'description',
-            'prix_mensuel', 'prix_annuel', 'devise',
+            'prix_mensuel', 'prix_annuel', 'prix_a_vie', 'devise',
             'fonctionnalites', 'limites', 'ordre_affichage',
         ]
 
@@ -35,6 +35,7 @@ class AbonnementEntrepriseSerializer(serializers.ModelSerializer):
     formule_code = serializers.SlugField(write_only=True, required=False)
     paiements = PaiementAbonnementSerializer(many=True, read_only=True)
     est_actif = serializers.BooleanField(read_only=True)
+    est_a_vie = serializers.BooleanField(read_only=True)
     jours_restants = serializers.IntegerField(read_only=True, allow_null=True)
 
     class Meta:
@@ -42,7 +43,7 @@ class AbonnementEntrepriseSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'formule', 'formule_code', 'statut', 'periode',
             'date_debut', 'date_fin', 'renouvellement_auto',
-            'activation_manuelle', 'est_courant', 'est_actif',
+            'activation_manuelle', 'est_courant', 'est_actif', 'est_a_vie',
             'jours_restants', 'paiements', 'created_at',
         ]
         read_only_fields = [
@@ -101,6 +102,7 @@ class DemandeAbonnementSerializer(serializers.Serializer):
         choices=[
             AbonnementEntreprise.PERIODE_MENSUEL,
             AbonnementEntreprise.PERIODE_ANNUEL,
+            AbonnementEntreprise.PERIODE_A_VIE,
         ],
     )
 
@@ -111,6 +113,7 @@ class EtatLicenceSerializer(serializers.Serializer):
     statut = serializers.CharField()
     est_actif = serializers.BooleanField()
     est_essai = serializers.BooleanField()
+    est_a_vie = serializers.BooleanField(required=False)
     formule_code = serializers.CharField(allow_null=True)
     formule_nom = serializers.CharField(allow_null=True)
     periode = serializers.CharField(required=False, allow_null=True)
@@ -169,6 +172,7 @@ class InitierPaiementSerializer(serializers.Serializer):
         choices=[
             'mensuel',
             'annuel',
+            'a_vie',
         ],
     )
     fournisseur = serializers.ChoiceField(
