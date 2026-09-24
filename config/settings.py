@@ -435,3 +435,8 @@ CHATBOT_RATE_LIMIT_PER_MINUTE = config('CHATBOT_RATE_LIMIT_PER_MINUTE', default=
 USE_X_FORWARDED_HOST = True
 USE_X_FORWARDED_PORT = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+_csrf_origins = config(
+    "CSRF_TRUSTED_ORIGINS",
+    default="https://api.uhakikaapp.store,https://uhakikaapp.store",
+)
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in _csrf_origins.split(",") if o.strip()]
