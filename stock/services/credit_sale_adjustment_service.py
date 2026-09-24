@@ -95,9 +95,7 @@ def sync_dette_for_credit_sortie(
     dette.client_id = sortie.client_id
 
     solde = new_total - montant_paye
-    if solde <= 0:
-        dette.statut = 'PAYEE'
-    else:
-        dette.statut = 'EN_COURS'
+    from stock.services.dette_statut import compute_statut_dette
+    dette.statut = compute_statut_dette(dette, solde=solde)
     dette.save()
     return dette

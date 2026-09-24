@@ -380,7 +380,7 @@ class PaiementDetteWriteSerializer(serializers.Serializer):
             f"Paiement dette - {dette.client.nom if dette.client else ''} - {montant}"
         )
 
-        return creer_mouvement_caisse(
+        mc = creer_mouvement_caisse(
             montant=montant,
             devise=devise,
             type_mouvement='ENTREE',
@@ -396,6 +396,10 @@ class PaiementDetteWriteSerializer(serializers.Serializer):
             montant_applique=validated_data['montant_applique_dette'],
             devise_applique=dette.devise,
         )
+        # Solde à 0 → PAYEE immédiatement (y compris paiement anticipé avant échéance)
+        from stock.services.dette_statut import appliquer_statut_dette
+        appliquer_statut_dette(dette.pk)
+        return mc
 
 
 class PaiementDetteGroupedWriteSerializer(serializers.Serializer):
@@ -470,12 +474,8 @@ class PaiementDetteGroupedWriteSerializer(serializers.Serializer):
         return qs
 
     def _compute_status(self, dette, new_solde):
-        if new_solde <= 0:
-            return 'PAYEE'
-        today = timezone.now().date()
-        if dette.date_echeance and dette.date_echeance < today:
-            return 'RETARD'
-        return 'EN_COURS'
+        from stock.services.dette_statut import compute_statut_dette
+        return compute_statut_dette(dette, solde=new_solde)
 
     def validate(self, attrs):
         client = attrs['client']

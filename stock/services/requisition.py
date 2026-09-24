@@ -437,7 +437,21 @@ def add_ligne_article(
     )
     ligne.fournisseur = fournisseur
     if unite is not None and str(unite).strip():
-        ligne.unite = str(unite).strip()
+        u = str(unite).strip()
+        base_unite = ''
+        if getattr(article, 'unite_id', None) and article.unite:
+            base_unite = (article.unite.libelle or '').strip()
+        # Le front préremplit parfois l'unité de stock alors que le conditionnement diffère.
+        if (
+            cond
+            and cond.nom
+            and base_unite
+            and u.casefold() == base_unite.casefold()
+            and u.casefold() != cond.nom.strip().casefold()
+        ):
+            ligne.unite = cond.nom
+        else:
+            ligne.unite = u
     elif cond:
         ligne.unite = cond.nom
     if prix_estime is not None and not is_prix_placeholder(prix_estime):

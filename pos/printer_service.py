@@ -110,11 +110,14 @@ class POSPrinterConfig:
 
 class MP2258Printer:
     """
-    Impression ticket ESC/POS (MP-2258) via liaison Série.
-    Ne génère pas de PDF: envoi direct de commandes ESC/POS.
+    Impression ticket ESC/POS (MP-2258) via liaison Série / Windows.
+
+    La connexion matérielle est **lazy** : construire les lignes texte
+    (PDF / prévisualisation) ne nécessite ni POS_PRINTER_PORT ni imprimante.
+    L'ouverture du port n'a lieu qu'au moment d'imprimer.
     """
 
-    def __init__(self, cfg: POSPrinterConfig | None = None):
+    def __init__(self, cfg: POSPrinterConfig | None = None, *, connect: bool = False):
         if cfg is None:
             cfg = POSPrinterConfig(
                 backend=str(getattr(settings, "POS_PRINTER_BACKEND", "serial") or "serial").lower(),
@@ -128,7 +131,16 @@ class MP2258Printer:
                 chars_per_line=int(getattr(settings, "POS_PRINTER_CHARS_PER_LINE", 32)),
             )
         self.cfg = cfg
+        self.printer = None
+        if connect:
+            self._ensure_printer()
 
+    def _ensure_printer(self):
+        """Ouvre l'imprimante uniquement pour une vraie impression."""
+        if self.printer is not None:
+            return self.printer
+
+        cfg = self.cfg
         if cfg.backend == "windows":
             if not cfg.printer_name:
                 raise ValueError("POS_PRINTER_NAME non configuré pour backend windows")
@@ -148,23 +160,37 @@ class MP2258Printer:
                 stopbits=cfg.stopbits,
                 timeout=cfg.timeout,
             )
+        return self.printer
 
     def close(self):
+        if self.printer is None:
+            return
         try:
             self.printer.close()
         except Exception:
             pass
+        finally:
+            self.printer = None
 
     def _hr(self) -> str:
         n = max(16, int(self.cfg.chars_per_line))
         return "-" * n + "\n"
 
-    def build_facture_ticket_lines(self, sortie, entreprise, user) -> list[str]:
+    def _build_vente_ticket_lines(
+        self,
+        sortie,
+        entreprise,
+        user,
+        *,
+        title: str,
+        doc_prefix: str,
+        total_label: str,
+        mode_paiement: str | None = None,
+    ) -> list[str]:
         """
-        Construit les lignes texte du ticket facture.
-        Cette méthode sert de source unique pour:
-        - l'impression POS directe (print_facture)
-        - la visualisation PDF (facture-pos)
+        Source unique des lignes ticket vente (facture / reçu comptant).
+        Même colonnes, largeurs, polices implicites (monospace) et totaux.
+        Seuls title / préfixe numéro / libellé total / mode varient.
         """
         cpl = max(16, int(self.cfg.chars_per_line))
         lines: list[str] = []
@@ -183,7 +209,7 @@ class MP2258Printer:
             lines.append(f"{_center_line(email, cpl)}\n")
 
         lines.append(f"{_center_line('-' * cpl, cpl)}\n")
-        lines.append(f"{_center_line('FACTURE DE VENTE', cpl)}\n")
+        lines.append(f"{_center_line(title, cpl)}\n")
         lines.append(f"{_center_line('-' * cpl, cpl)}\n")
 
         invoice_dt = getattr(sortie, "date_creation", None) or timezone.now()
@@ -191,11 +217,13 @@ class MP2258Printer:
         client_name = getattr(client, "nom", None) or "Client inconnu"
         devise_sortie = getattr(sortie, "devise", None)
         currency = _currency_label(devise_sortie)
-        lines.append(f"Ndeg: FACT-{int(sortie.pk):06d}\n")
+        lines.append(f"Ndeg: {doc_prefix}{int(sortie.pk):06d}\n")
         lines.append(f"Date: {invoice_dt.strftime('%d/%m/%Y %H:%M')}\n")
         lines.append(f"Client: {client_name}\n")
         if currency:
             lines.append(f"Devise: {currency}\n")
+        if mode_paiement:
+            lines.append(f"Mode: {mode_paiement}\n")
         lines.append("\n")
 
         money_extra = len(currency) if currency else 0
@@ -247,7 +275,7 @@ class MP2258Printer:
             only_currency = next(iter(totals_by_currency.keys()), currency)
             only_total = next(iter(totals_by_currency.values()), total_general)
             total_s = _fmt_money(only_total, decimals=3) + (f" {only_currency}" if only_currency else "")
-            lines.append(f"TOTAL DU: {total_s}\n")
+            lines.append(f"{total_label}: {total_s}\n")
         else:
             lines.append("TOTALS PAR DEVISE:\n")
             for curr, amount in totals_by_currency.items():
@@ -262,6 +290,56 @@ class MP2258Printer:
         lines.append(timezone.now().strftime("%d/%m/%Y %H:%M") + "\n")
         lines.append("\n")
         return lines
+
+    def build_facture_ticket_lines(self, sortie, entreprise, user) -> list[str]:
+        """
+        Ticket FACTURE — modèle de référence inchangé (vente à crédit).
+        Source unique pour impression POS et PDF facture-pos.
+        """
+        return self._build_vente_ticket_lines(
+            sortie,
+            entreprise,
+            user,
+            title="FACTURE DE VENTE",
+            doc_prefix="FACT-",
+            total_label="TOTAL DU",
+            mode_paiement=None,
+        )
+
+    def build_recu_vente_ticket_lines(self, sortie, entreprise, user) -> list[str]:
+        """
+        Ticket REÇU — même structure/données que la facture, libellés reçus (vente comptant).
+        """
+        return self._build_vente_ticket_lines(
+            sortie,
+            entreprise,
+            user,
+            title="RECU DE VENTE",
+            doc_prefix="REC-",
+            total_label="TOTAL RECU",
+            mode_paiement="COMPTANT",
+        )
+
+    @staticmethod
+    def resolve_document_vente(sortie) -> dict:
+        """
+        Détermine le document à imprimer selon le mode de paiement de la sortie.
+        EN_CREDIT → FACTURE ; PAYEE (comptant) → RECU.
+        """
+        statut = (getattr(sortie, "statut", None) or "").upper()
+        if statut == "EN_CREDIT":
+            return {
+                "type_document": "FACTURE",
+                "mode_paiement": "CREDIT",
+                "pdf_url": f"/api/sorties/{sortie.pk}/facture-pos/",
+                "print_url": f"/api/sorties/{sortie.pk}/facture-pos-print/",
+            }
+        return {
+            "type_document": "RECU",
+            "mode_paiement": "COMPTANT",
+            "pdf_url": f"/api/sorties/{sortie.pk}/bon-pos/",
+            "print_url": f"/api/sorties/{sortie.pk}/bon-pos-print/",
+        }
 
     def _append_entreprise_header(self, lines: list[str], entreprise, title: str) -> None:
         """En-tête entreprise + titre centré (même style que facture)."""
@@ -283,7 +361,7 @@ class MP2258Printer:
         lines.append(f"{_center_line('-' * cpl, cpl)}\n")
 
     def _print_ticket_lines(self, lines: list[str]) -> bool:
-        p = self.printer
+        p = self._ensure_printer()
         p.set(align="left", bold=False, width=1, height=1)
         for line in lines:
             p.text(_safe_text(line))
@@ -464,109 +542,8 @@ class MP2258Printer:
 
     def print_recu(self, sortie, entreprise, user) -> bool:
         """
-        Impression d'un reçu (ticket simplifié) pour une sortie.
+        Impression reçu vente comptant — mêmes lignes ticket que le PDF bon-pos
+        (source commune avec la facture, libellés reçus uniquement).
         """
-        p = self.printer
-        cpl = max(16, int(self.cfg.chars_per_line))
-
-        p.set(align="center", bold=True, width=1, height=1)
-        p.text(_safe_text((getattr(entreprise, "nom", "") or "").strip()) + "\n")
-        p.set(align="center", bold=False)
-        tel = (getattr(entreprise, "telephone", None) or "").strip()
-        if tel:
-            p.text(_safe_text(f"Tel: {tel}\n"))
-        p.text(self._hr())
-        p.set(align="center", bold=True)
-        p.text(_safe_text("RECU DE VENTE\n"))
-        p.set(align="center", bold=False)
-        p.text(self._hr())
-
-        invoice_dt = getattr(sortie, "date_creation", None) or timezone.now()
-        client = getattr(sortie, "client", None)
-        client_name = getattr(client, "nom", None) or "Client anonyme"
-        devise_sortie = getattr(sortie, "devise", None)
-        currency = _currency_label(devise_sortie)
-
-        p.set(align="left")
-        p.text(_safe_text(f"Ndeg: REC-{int(sortie.pk):06d}\n"))
-        p.text(_safe_text(f"Date: {invoice_dt.strftime('%d/%m/%Y %H:%M')}\n"))
-        p.text(_safe_text(f"Client: {client_name}\n"))
-        if currency:
-            p.text(_safe_text(f"Devise: {currency}\n"))
-        p.text("\n")
-
-        money_extra = len(currency) if currency else 0
-        w_art = max(8, cpl - (1 + 6 + 1 + (6 + money_extra) + 1 + (7 + money_extra)))
-        w_qty = 6
-        w_pu = 6 + money_extra
-        w_tot = 7 + money_extra
-
-        header = f"{'Article':<{w_art}} {'Qte':>{w_qty}} {'PU':>{w_pu}} {'Total':>{w_tot}}\n"
-        p.text(_safe_text(header))
-        p.text(self._hr())
-
-        total_general = Decimal("0.00")
-        totals_by_currency: "OrderedDict[str, Decimal]" = OrderedDict()
-        lignes = getattr(sortie, "lignes", None)
-        lignes_qs = lignes.all() if hasattr(lignes, "all") else (lignes or [])
-        for ligne in lignes_qs:
-            article = getattr(ligne, "article", None)
-            nom = _article_display_name(article).strip()
-            if len(nom) > w_art:
-                nom = nom[: max(0, w_art - 3)] + "..."
-
-            qte_raw = getattr(ligne, "quantite", 0) or 0
-            pu_raw = getattr(ligne, "prix_unitaire", 0) or 0
-            qte = Decimal(str(qte_raw or 0))
-            pu = Decimal(str(pu_raw or 0))
-            tot = (qte * pu).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-            total_general = (total_general + tot).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-            line_devise = getattr(ligne, "devise", None) or devise_sortie
-            line_currency = _currency_label(line_devise)
-
-            qte_s = _fmt_qty(qte_raw)
-            pu_s = _fmt_money(pu)
-            tot_s = _fmt_money(tot)
-            if line_currency:
-                pu_s = f"{pu_s}{line_currency}"
-                tot_s = f"{tot_s}{line_currency}"
-                prev = totals_by_currency.get(line_currency, Decimal("0.00"))
-                totals_by_currency[line_currency] = (prev + tot).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-            else:
-                prev = totals_by_currency.get("", Decimal("0.00"))
-                totals_by_currency[""] = (prev + tot).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-
-            line = f"{nom:<{w_art}} {qte_s:>{w_qty}} {pu_s:>{w_pu}} {tot_s:>{w_tot}}\n"
-            p.text(_safe_text(line))
-
-        p.text(self._hr())
-
-        p.set(align="right", bold=True)
-        if len(totals_by_currency) <= 1:
-            only_currency = next(iter(totals_by_currency.keys()), currency)
-            only_total = next(iter(totals_by_currency.values()), total_general)
-            total_s = _fmt_money(only_total) + (f" {only_currency}" if only_currency else "")
-            p.text(_safe_text(f"TOTAL RECU: {total_s}\n"))
-        else:
-            p.text(_safe_text("TOTALS PAR DEVISE:\n"))
-            for curr, amount in totals_by_currency.items():
-                line_total = _fmt_money(amount) + (f" {curr}" if curr else "")
-                p.text(_safe_text(f"- {line_total}\n"))
-        p.set(align="left", bold=False)
-        p.text("\n")
-
-        printed_by = (getattr(user, "get_full_name", lambda: "")() or getattr(user, "username", "")).strip()
-        printed_by = _name_with_initial_upper(printed_by)
-        p.set(align="center")
-        if printed_by:
-            p.text(_safe_text(f"Imprime par: {printed_by}\n"))
-        p.text(_safe_text(timezone.now().strftime("%d/%m/%Y %H:%M") + "\n"))
-        p.text(_safe_text("-- Fin --\n"))
-
-        try:
-            p.cut()
-        except Exception:
-            p.text("\n\n")
-
-        return True
+        return self._print_ticket_lines(self.build_recu_vente_ticket_lines(sortie, entreprise, user))
 

@@ -254,6 +254,8 @@ class RequisitionModuleTests(APITestCase):
         self.assertEqual(ligne['stock_actuel'], '98.00000')
         self.assertEqual(ligne['unite_stock_base'], 'pcs')
         self.assertEqual(ligne['unite'], 'Carton 24')
+        self.assertEqual(ligne['conditionnement_nom'], 'Carton 24')
+        self.assertEqual(ligne['quantite_commande_affichee'], '5.00000 Carton 24')
         self.assertEqual(ligne['remarque'], 'Cartons intacts uniquement.')
         self.assertEqual(
             document['instructions_frontend']['sections_signatures_obligatoires'],
@@ -267,6 +269,37 @@ class RequisitionModuleTests(APITestCase):
             document['sections_impression']['approbation_service_finance']['titre'],
             'Approbation — Service Finance',
         )
+
+    def test_document_quantite_commande_uses_conditionnement_not_stock_unit(self):
+        """Si l'unité envoyée est l'unité de stock, le rapport garde le conditionnement."""
+        add = self.client.post(
+            f'/api/requisitions/{self._create_req()}/lignes/',
+            {
+                'type_ligne': 'ARTICLE',
+                'article_id': self.article.article_id,
+                'conditionnement_id': self.cond_carton.pk,
+                'quantite': '20',
+                'unite': 'pcs',
+            },
+            format='json',
+        )
+        self.assertEqual(add.status_code, 200, add.content)
+        req_id = add.json()['id']
+        ligne_api = add.json()['lignes'][0]
+        self.assertEqual(ligne_api['unite'], 'Carton 24')
+        document = self.client.get(f'/api/requisitions/{req_id}/document/').json()
+        ligne = document['lignes'][0]
+        self.assertEqual(ligne['conditionnement_nom'], 'Carton 24')
+        self.assertEqual(ligne['quantite_commande_affichee'], '20.00000 Carton 24')
+
+    def _create_req(self) -> int:
+        create = self.client.post(
+            '/api/requisitions/',
+            {'titre': 'Req test'},
+            format='json',
+        )
+        self.assertEqual(create.status_code, 201, create.content)
+        return create.json()['id']
 
     def test_requisition_fournisseur_optional_per_ligne(self):
         """Fournisseur optionnel par ligne (article), exposé dans API + rapport JSON."""

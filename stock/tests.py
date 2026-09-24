@@ -336,10 +336,14 @@ class ClientLifecycleApiTests(APITestCase):
         self.assertEqual(payload['resume']['total_credit'], '12.00000')
         self.assertEqual(payload['resume']['total_paye'], '7.00000')
         self.assertEqual(payload['resume']['solde_restant'], '5.00000')
+        self.assertEqual(payload['resume']['du_actuel'], '5.00000')
+        self.assertEqual(payload['resume']['ecart_periode'], '5.00000')
         self.assertEqual(payload['resume']['nombre_ventes'], 2)
         self.assertEqual(payload['resume']['nombre_dettes'], 1)
         self.assertEqual(payload['resume']['nombre_paiements'], 1)
         self.assertEqual(payload['totaux_par_devise'][0]['solde'], '5.00000')
+        self.assertEqual(payload['totaux_par_devise'][0]['du_actuel'], '5.00000')
+        self.assertEqual(payload['totaux_par_devise'][0]['ecart_periode'], '5.00000')
 
         movements_response = self.client.get(f'/api/clients/{self.client_fiche.pk}/mouvements/')
         self.assertEqual(movements_response.status_code, 200, movements_response.content)
@@ -411,11 +415,108 @@ class ClientLifecycleApiTests(APITestCase):
         self.assertEqual(payload['resume']['total_credit'], '12.00000')
         self.assertEqual(payload['resume']['total_paye'], '4.00000')
         self.assertEqual(payload['resume']['solde_restant'], '8.00000')
+        self.assertEqual(payload['resume']['du_actuel'], '8.00000')
+        self.assertEqual(payload['resume']['ecart_periode'], '8.00000')
+
+    def test_client_dashboard_total_paye_excludes_payments_on_old_debts(self):
+        """Total payé = payé sur dettes de la période, pas encaissements d'anciennes dettes."""
+        old_sortie = Sortie.objects.create(
+            client=self.client_fiche,
+            devise=self.devise,
+            statut='EN_CREDIT',
+            entreprise=self.entreprise,
+        )
+        self._add_line(old_sortie, '1', '50')
+        old_dette = DetteClient.objects.create(
+            client=self.client_fiche,
+            sortie=old_sortie,
+            montant_total=Decimal('50.00000'),
+            devise=self.devise,
+            devise_reference=self.devise,
+            montant_reference=Decimal('50.00000'),
+            entreprise=self.entreprise,
+            statut='EN_COURS',
+        )
+
+        recent_sortie = Sortie.objects.create(
+            client=self.client_fiche,
+            devise=self.devise,
+            statut='EN_CREDIT',
+            entreprise=self.entreprise,
+        )
+        self._add_line(recent_sortie, '1', '12')
+        recent_dette = DetteClient.objects.create(
+            client=self.client_fiche,
+            sortie=recent_sortie,
+            montant_total=Decimal('12.00000'),
+            devise=self.devise,
+            devise_reference=self.devise,
+            montant_reference=Decimal('12.00000'),
+            entreprise=self.entreprise,
+            statut='EN_COURS',
+        )
+
+        ct_dette = ContentType.objects.get_for_model(DetteClient)
+        pay_old = MouvementCaisse.objects.create(
+            montant=Decimal('50.00000'),
+            devise=self.devise,
+            devise_reference=self.devise,
+            montant_reference=Decimal('50.00000'),
+            type='ENTREE',
+            motif='Solde ancienne dette',
+            moyen='Banque',
+            content_type=ct_dette,
+            object_id=old_dette.pk,
+            utilisateur=self.user,
+            reference_piece='PAY-OLD',
+            entreprise=self.entreprise,
+            type_caisse=self.type_caisse,
+            categorie='PAIEMENT_DETTE',
+        )
+        pay_recent = MouvementCaisse.objects.create(
+            montant=Decimal('12.00000'),
+            devise=self.devise,
+            devise_reference=self.devise,
+            montant_reference=Decimal('12.00000'),
+            type='ENTREE',
+            motif='Solde dette recente',
+            moyen='Banque',
+            content_type=ct_dette,
+            object_id=recent_dette.pk,
+            utilisateur=self.user,
+            reference_piece='PAY-NEW',
+            entreprise=self.entreprise,
+            type_caisse=self.type_caisse,
+            categorie='PAIEMENT_DETTE',
+        )
+
+        old_date = timezone.now() - timezone.timedelta(days=40)
+        recent_date = timezone.now() - timezone.timedelta(days=2)
+        Sortie.objects.filter(pk=old_sortie.pk).update(date_creation=old_date)
+        DetteClient.objects.filter(pk=old_dette.pk).update(date_creation=old_date)
+        Sortie.objects.filter(pk=recent_sortie.pk).update(date_creation=recent_date)
+        DetteClient.objects.filter(pk=recent_dette.pk).update(date_creation=recent_date)
+        # Les deux paiements tombent dans la fenêtre récente
+        MouvementCaisse.objects.filter(pk__in=[pay_old.pk, pay_recent.pk]).update(date=recent_date)
+
+        period_start = (timezone.now() - timezone.timedelta(days=7)).date().isoformat()
+        period_end = timezone.now().date().isoformat()
+        response = self.client.get(
+            f'/api/clients/{self.client_fiche.pk}/dashboard/',
+            {'date_debut': period_start, 'date_fin': period_end},
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload['resume']['total_credit'], '12.00000')
+        self.assertEqual(payload['resume']['total_dettes'], '12.00000')
+        self.assertEqual(payload['resume']['total_paye'], '12.00000')
+        self.assertEqual(payload['resume']['ecart_periode'], '0.00000')
+        self.assertEqual(payload['totaux_par_devise'][0]['total_paye'], '12.00000')
 
 
 @override_settings(ALLOWED_HOSTS=['testserver', 'localhost', '127.0.0.1'])
 class CreditSaleDebtTests(APITestCase):
-    """Vente EN_CREDIT ΓåÆ dette obligatoire ; coh├⌐rence dashboard."""
+    """Vente EN_CREDIT → dette obligatoire ; cohérence dashboard."""
 
     def setUp(self):
         self.entreprise = Entreprise.objects.create(

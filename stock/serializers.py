@@ -1242,6 +1242,15 @@ class DetteClientSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['montant_paye', 'solde_restant', 'statut', 'date_creation']
 
+    def to_representation(self, instance):
+        # Auto-correction : crédit entièrement payé → PAYEE même avant l'échéance
+        from stock.services.dette_statut import compute_statut_dette
+        attendu = compute_statut_dette(instance)
+        if instance.statut != attendu:
+            DetteClient.objects.filter(pk=instance.pk).update(statut=attendu)
+            instance.statut = attendu
+        return super().to_representation(instance)
+
     def validate_sortie(self, value):
         """
         Validation pour s'assurer que la sortie est EN_CREDIT avant de créer une dette.

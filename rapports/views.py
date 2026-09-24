@@ -93,12 +93,43 @@ def _dettes_encours_qs(
 ):
     """
     Dettes EN_COURS avec solde > 0.
-    Utilise les annotations DB (solde_restant_agg) â€” pas les @property montant_paye / solde_restant.
+    Utilise les annotations DB (solde_restant_agg) — pas les @property montant_paye / solde_restant.
+
+    Période : date de la **vente** (sortie.date_creation), pas l'instant technique
+    de création de la dette (qui peut être « aujourd'hui » après repair / sync).
     """
     qs = DetteClient.objects.with_paiements_aggregate().filter(
         statut='EN_COURS',
         solde_restant_agg__gt=0,
     )
+    if eid:
+        qs = qs.filter(entreprise_id=eid)
+    if branch_id is not None:
+        qs = qs.filter(succursale_id=branch_id)
+    if date_debut_obj:
+        qs = qs.filter(sortie__date_creation__date__gte=date_debut_obj)
+    if date_fin_obj:
+        qs = qs.filter(sortie__date_creation__date__lte=date_fin_obj)
+    if special_kw is not None and eid:
+        qs = qs.filter(
+            client__liens_entreprise__entreprise_id=eid,
+            client__liens_entreprise__is_special=special_kw['is_special'],
+        )
+    return qs.distinct()
+
+
+def _dettes_periode_rapport_qs(
+    *,
+    eid,
+    branch_id=None,
+    date_debut_obj=None,
+    date_fin_obj=None,
+    special_kw=None,
+):
+    """
+    Dettes créées dans la fenêtre (date_creation), tous statuts — aligné cycle de vie / total dettes.
+    """
+    qs = DetteClient.objects.with_paiements_aggregate().filter(sortie__isnull=False)
     if eid:
         qs = qs.filter(entreprise_id=eid)
     if branch_id is not None:
@@ -746,16 +777,19 @@ class RapportsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='clients-dettes')
     def clients_dettes(self, request):
         """
-        Retourne un client spÃ©cifique avec ses dettes dÃ©taillÃ©es (JSON).
-        
-        ParamÃ¨tre obligatoire:
-        - client_id: ID du client (ex: CLI0001)
-        
-        GET /api/rapports/clients-dettes/?client_id=CLI0001
+        Dettes d'un client + articles **uniquement à crédit** (liés aux dettes).
 
-        Filtre is_special (query) â€” mÃªme logique que clients-dettes-general :
-        par dÃ©faut (param absent) seuls les clients spÃ©ciaux sont visibles ;
-        is_special=all pour tout client du tenant ; true / false pour forcer le pÃ©rimÃ¨tre.
+        Les ventes au comptant (sortie PAYEE sans dette) ne sont jamais incluses.
+
+        Query:
+        - client_id (obligatoire)
+        - date_debut / date_fin (YYYY-MM-DD, optionnel) — filtre sur date de **création de la dette**
+          (aligné avec GET /clients/{id}/dettes/ du cycle de vie)
+        - statut_dette : encours (défaut) | tous | payees
+          encours = EN_COURS + RETARD (créances actives)
+          tous = toutes les dettes de la période
+          payees = dettes PAYEE seulement
+        - is_special : true | false | all (défaut métier = spéciaux)
         """
         user = request.user
         eid, branch_id = self._get_tenant_ids_strict(request)
@@ -765,15 +799,45 @@ class RapportsViewSet(viewsets.ViewSet):
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        # RÃ©cupÃ©rer le client_id depuis les paramÃ¨tres de requÃªte
         client_id = request.query_params.get('client_id')
         if not client_id:
             return Response({
-                'error': 'Le paramÃ¨tre "client_id" est obligatoire',
+                'error': 'Le paramètre "client_id" est obligatoire',
                 'exemple': '/api/rapports/clients-dettes/?client_id=CLI0001'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        from stock.models import Client, DetteClient
+        date_debut = request.query_params.get('date_debut')
+        date_fin = request.query_params.get('date_fin')
+        date_debut_obj = None
+        date_fin_obj = None
+        if date_debut:
+            try:
+                date_debut_obj = datetime.strptime(date_debut, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({
+                    'error': 'Format de date_debut invalide. Utilisez YYYY-MM-DD',
+                    'exemple': '2025-01-01',
+                }, status=status.HTTP_400_BAD_REQUEST)
+        if date_fin:
+            try:
+                date_fin_obj = datetime.strptime(date_fin, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({
+                    'error': 'Format de date_fin invalide. Utilisez YYYY-MM-DD',
+                    'exemple': '2025-12-31',
+                }, status=status.HTTP_400_BAD_REQUEST)
+        if date_debut_obj and date_fin_obj and date_debut_obj > date_fin_obj:
+            return Response({
+                'error': 'La date_debut doit être antérieure ou égale à la date_fin'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        statut_dette = (request.query_params.get('statut_dette') or 'encours').strip().lower()
+        if statut_dette not in ('encours', 'tous', 'payees'):
+            return Response({
+                'error': 'statut_dette invalide. Valeurs : encours | tous | payees',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        from stock.models import Client
         client_qs = Client.objects.filter(id=client_id)
         if eid:
             client_qs = client_qs.filter(liens_entreprise__entreprise_id=eid).distinct()
@@ -789,111 +853,195 @@ class RapportsViewSet(viewsets.ViewSet):
             client = client_qs.get()
         except Client.DoesNotExist:
             return Response({
-                'error': f'Client avec ID "{client_id}" non trouvÃ©'
+                'error': f'Client avec ID "{client_id}" non trouvé'
             }, status=status.HTTP_404_NOT_FOUND)
 
         lien = client.liens_entreprise.filter(entreprise_id=eid).first() if eid else None
         if special_kw is not None and (not lien or lien.is_special != special_kw['is_special']):
             return Response({
                 'error': _(
-                    'Client non trouvÃ© ou hors du pÃ©rimÃ¨tre du filtre is_special pour ce rapport.'
+                    'Client non trouvé ou hors du périmètre du filtre is_special pour ce rapport.'
                 )
             }, status=status.HTTP_404_NOT_FOUND)
 
-        clients_data = []
-        from decimal import Decimal
-
-        # Traiter uniquement ce client
-        c = client
-        dettes_qs = DetteClient.objects.filter(client=c).select_related('devise', 'sortie')
+        # Dettes = créances uniquement. Jamais de sorties comptant (PAYEE sans DetteClient).
+        dettes_qs = (
+            DetteClient.objects.filter(client=client)
+            .select_related('devise', 'sortie', 'sortie__client')
+            .prefetch_related('sortie__lignes__article', 'sortie__lignes__devise')
+            .order_by('sortie__date_creation', 'id')
+        )
+        if eid:
+            dettes_qs = dettes_qs.filter(entreprise_id=eid)
         if user.is_agent(request) and branch_id is not None:
             dettes_qs = dettes_qs.filter(succursale_id=branch_id)
+
+        # Période = date de création de la dette (même règle que le détail client /dettes/)
+        if date_debut_obj:
+            dettes_qs = dettes_qs.filter(date_creation__date__gte=date_debut_obj)
+        if date_fin_obj:
+            dettes_qs = dettes_qs.filter(date_creation__date__lte=date_fin_obj)
+
+        if statut_dette == 'encours':
+            dettes_qs = dettes_qs.filter(statut__in=['EN_COURS', 'RETARD'])
+        elif statut_dette == 'payees':
+            dettes_qs = dettes_qs.filter(statut='PAYEE')
+
+        # Une DetteClient = créance (vente à crédit / reprise). Pas de vente comptant pure.
+        dettes_qs = dettes_qs.filter(sortie__isnull=False)
+
+        from stock.services.dette_statut import (
+            appliquer_statut_dette,
+            compute_statut_dette,
+            fmt_money,
+            solde_effectif,
+        )
+
         dettes = []
-        # per-client totals for EN_COURS
+        articles_credit = []
         tot_montant_encours_client = Decimal('0.00')
         tot_paye_encours_client = Decimal('0.00')
         tot_solde_encours_client = Decimal('0.00')
 
         for d in dettes_qs:
-            # accumulate per-client totals for 'EN_COURS' dettes
-            if d.statut == 'EN_COURS':
-                try:
-                    tot_montant_encours_client += d.montant_total or Decimal('0.00')
-                except Exception:
-                    pass
-                try:
-                    tot_paye_encours_client += d.montant_paye or Decimal('0.00')
-                except Exception:
-                    pass
-                try:
-                    tot_solde_encours_client += d.solde_restant or Decimal('0.00')
-                except Exception:
-                    pass
+            # Corrige micro-solde (ex. 0.00001) → PAYEE ; skip si filtre encours
+            statut_reel = compute_statut_dette(d)
+            if d.statut != statut_reel:
+                appliquer_statut_dette(d.pk)
+                d.statut = statut_reel
+            if statut_dette == 'encours' and statut_reel == 'PAYEE':
+                continue
+            if statut_dette == 'payees' and statut_reel != 'PAYEE':
+                continue
 
-            # include sortie products (articles) for this debt's sortie
-            sortie_info = None
-            if d.sortie:
-                produits = []
-                lignes = LigneSortie.objects.filter(sortie=d.sortie).select_related('article')
+            solde_aff = solde_effectif(d)
+            paye_aff = (Decimal(str(d.montant_total or 0)) - solde_aff).quantize(
+                Decimal('0.00001'), rounding=ROUND_DOWN
+            )
+            if paye_aff < 0:
+                paye_aff = Decimal('0.00000')
+
+            if statut_reel in ('EN_COURS', 'RETARD'):
+                tot_montant_encours_client += d.montant_total or Decimal('0.00')
+                tot_paye_encours_client += paye_aff
+                tot_solde_encours_client += solde_aff
+
+            sortie = d.sortie
+            date_vente = sortie.date_creation if sortie else None
+            produits = []
+            if sortie:
+                lignes = list(sortie.lignes.all()) if hasattr(sortie, 'lignes') else []
                 for ls in lignes:
                     art = ls.article
-                    produits.append({
+                    date_ligne = ls.date_sortie or date_vente
+                    montant_ligne = (ls.quantite or Decimal('0')) * (ls.prix_unitaire or Decimal('0'))
+                    montant_s = str(montant_ligne.quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
+                    designation = (
+                        (getattr(art, 'nom_commercial', None) or getattr(art, 'nom_scientifique', None) or '')
+                        or getattr(art, 'article_id', '')
+                    )
+                    produit = {
                         'article_id': getattr(art, 'article_id', None),
-                        'nom_scientifique': getattr(art, 'nom_scientifique', ''),
-                        'nom_commercial': getattr(art, 'nom_commercial', ''),
-                        'quantite': ls.quantite,
-                        'prix_unitaire': str(ls.prix_unitaire)
-                    })
-                sortie_info = {
-                    'id': d.sortie.id,
-                    'motif': getattr(d.sortie, 'motif', '') or '',
-                    'produits': produits
-                }
+                        'designation': designation,
+                        'nom_scientifique': getattr(art, 'nom_scientifique', '') or '',
+                        'nom_commercial': getattr(art, 'nom_commercial', '') or '',
+                        'quantite': str(ls.quantite),
+                        'prix_unitaire': str(ls.prix_unitaire),
+                        'montant': montant_s,
+                        'devise': ls.devise.sigle if ls.devise_id else (d.devise.sigle if d.devise_id else None),
+                        'date': date_ligne.strftime('%Y-%m-%d %H:%M') if date_ligne else None,
+                        'date_display': date_ligne.strftime('%d/%m/%Y') if date_ligne else None,
+                        'date_achat': date_ligne.strftime('%Y-%m-%d') if date_ligne else None,
+                        'mode_paiement': 'CREDIT',
+                        'dette_id': d.id,
+                        'sortie_id': sortie.pk,
+                    }
+                    produits.append(produit)
+                    articles_credit.append(produit)
 
+            date_affichage = date_vente or d.date_creation
             dettes.append({
                 'id': d.id,
-                'sortie': sortie_info,
-                'montant_total': str(d.montant_total),
-                'montant_paye': str(d.montant_paye),
-                'solde_restant': str(d.solde_restant),
-                'devise': {'id': d.devise.id, 'sigle': d.devise.sigle, 'nom': d.devise.nom, 'symbole': d.devise.symbole} if d.devise else None,
+                'sortie': {
+                    'id': sortie.pk if sortie else None,
+                    'motif': (getattr(sortie, 'motif', '') or '') if sortie else '',
+                    'statut': getattr(sortie, 'statut', None) if sortie else None,
+                    'mode_paiement': 'CREDIT',
+                    'date_creation': date_vente.strftime('%Y-%m-%d %H:%M') if date_vente else None,
+                    'produits': produits,
+                } if sortie else None,
+                'montant_total': fmt_money(d.montant_total),
+                'montant_paye': fmt_money(paye_aff),
+                'solde_restant': fmt_money(solde_aff),
+                'devise': {
+                    'id': d.devise.id,
+                    'sigle': d.devise.sigle,
+                    'nom': d.devise.nom,
+                    'symbole': d.devise.symbole,
+                } if d.devise else None,
                 'date_creation': d.date_creation.strftime('%Y-%m-%d %H:%M') if d.date_creation else None,
+                'date_vente': date_vente.strftime('%Y-%m-%d %H:%M') if date_vente else None,
+                'date': date_affichage.strftime('%Y-%m-%d %H:%M') if date_affichage else None,
+                'date_display': date_affichage.strftime('%d/%m/%Y') if date_affichage else None,
                 'date_echeance': d.date_echeance.strftime('%Y-%m-%d') if d.date_echeance else None,
-                'statut': d.statut,
-                'commentaire': d.commentaire
+                'statut': statut_reel,
+                'commentaire': d.commentaire,
+                'mode_paiement': 'CREDIT',
             })
 
-        clients_data.append({
-            'id': c.id,
-            'nom': c.nom,
-            'telephone': c.telephone,
-            'adresse': c.adresse,
-            'email': c.email,
+        totaux = {
+            'montant_total': fmt_money(tot_montant_encours_client),
+            'montant_paye': fmt_money(tot_paye_encours_client),
+            'solde_restant': fmt_money(tot_solde_encours_client),
+        }
+        client_payload = {
+            'id': client.id,
+            'nom': client.nom,
+            'telephone': client.telephone,
+            'adresse': client.adresse,
+            'email': client.email,
             'is_special': bool(lien.is_special) if lien else False,
-            'date_enregistrement': c.date_enregistrement.strftime('%Y-%m-%d %H:%M') if c.date_enregistrement else None,
+            'date_enregistrement': (
+                client.date_enregistrement.strftime('%Y-%m-%d %H:%M')
+                if client.date_enregistrement else None
+            ),
             'dettes': dettes,
-            'totaux_encours': {
-                'montant_total': str(tot_montant_encours_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
-                'montant_paye': str(tot_paye_encours_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
-                'solde_restant': str(tot_solde_encours_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
-            }
-        })
-
-        client_totaux = clients_data[0].get('totaux_encours', {}) if clients_data else {}
+            'articles': articles_credit,
+            'totaux_encours': totaux,
+        }
 
         return self._report_response(request, 'clients-dettes', {
             'titre': _("Dettes du client: %(nom)s") % {'nom': client.nom},
+            'periode': {
+                'date_debut': date_debut,
+                'date_fin': date_fin,
+            } if (date_debut or date_fin) else None,
             'filtres': {
                 'client_id': client_id,
+                'date_debut': date_debut,
+                'date_fin': date_fin,
+                'statut_dette': statut_dette,
                 'is_special': special_kw,
+                'mode_paiement': 'CREDIT',
             },
-            'clients': clients_data,
-            'details': clients_data,
-            'totaux_encours': {
-                'montant_total': client_totaux.get('montant_total', '0.00'),
-                'montant_paye': client_totaux.get('montant_paye', '0.00'),
-                'solde_restant': client_totaux.get('solde_restant', '0.00')
-            }
+            'clients': [client_payload],
+            'details': [client_payload],
+            'articles': articles_credit,
+            'totaux_encours': totaux,
+            'instructions_frontend': {
+                'detail_articles': (
+                    'Utiliser uniquement le tableau `articles` (ou dettes[].sortie.produits). '
+                    'Ce sont exclusivement des articles à crédit liés aux dettes filtrées. '
+                    'Ne jamais fusionner avec l’historique des ventes au comptant du client.'
+                ),
+                'champs_article': [
+                    'designation', 'quantite', 'montant', 'date_display', 'date_achat', 'mode_paiement',
+                ],
+                'achats_comptant': (
+                    'Les articles PAYEE/comptant appartiennent aux rapports ventes / historique achats, '
+                    'pas à ce rapport dettes.'
+                ),
+            },
         })
 
     @action(detail=False, methods=['get'], url_path='clients-dettes-general')
@@ -904,8 +1052,9 @@ class RapportsViewSet(viewsets.ViewSet):
         Rapport synthÃ©tique sans dÃ©tails des dettes individuelles.
         
         ParamÃ¨tres optionnels:
-        - date_debut: Date de dÃ©but (format: YYYY-MM-DD) - Si fournie, filtre les dettes crÃ©Ã©es Ã  partir de cette date
-        - date_fin: Date de fin (format: YYYY-MM-DD) - Optionnel, filtre les dettes crÃ©Ã©es jusqu'Ã  cette date
+        - date_debut / date_fin (YYYY-MM-DD) : si renseignés, dettes **créées** dans la fenêtre
+          (date_creation, comme le détail client) ; colonne « dette » = Σ montant_total sur la période.
+          Sans dates : clients avec encours (solde > 0), dettes EN_COURS uniquement.
         
         GET /api/rapports/clients-dettes-general/
         GET /api/rapports/clients-dettes-general/?date_debut=2025-01-01
@@ -959,52 +1108,87 @@ class RapportsViewSet(viewsets.ViewSet):
                 'error': 'La date_debut doit Ãªtre antÃ©rieure ou Ã©gale Ã  la date_fin'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Dettes en cours (solde > 0) â€” annotations DB, pas les @property
         branch_filter = branch_id if user.is_agent(request) else None
-        dettes_encours_qs = _dettes_encours_qs(
-            eid=eid,
-            branch_id=branch_filter,
-            date_debut_obj=date_debut_obj,
-            date_fin_obj=date_fin_obj,
-            special_kw=special_kw,
-        )
+        has_period = bool(date_debut_obj or date_fin_obj)
+        if has_period:
+            dettes_base_qs = _dettes_periode_rapport_qs(
+                eid=eid,
+                branch_id=branch_filter,
+                date_debut_obj=date_debut_obj,
+                date_fin_obj=date_fin_obj,
+                special_kw=special_kw,
+            )
+        else:
+            dettes_base_qs = _dettes_encours_qs(
+                eid=eid,
+                branch_id=branch_filter,
+                date_debut_obj=None,
+                date_fin_obj=None,
+                special_kw=special_kw,
+            )
 
         clients_avec_dettes = Client.objects.filter(
-            id__in=dettes_encours_qs.values('client_id'),
+            id__in=dettes_base_qs.values('client_id'),
         ).distinct().order_by('-date_enregistrement', 'nom')
 
-        # Totaux globaux sur toute la pÃ©riode / tous les clients filtrÃ©s (pas seulement la page)
-        global_agg = dettes_encours_qs.aggregate(
+        global_agg = dettes_base_qs.aggregate(
             montant_total=Sum('montant_total'),
             montant_paye=Sum('montant_paye_agg'),
             solde_restant=Sum('solde_restant_agg'),
         )
         nombre_clients_global = clients_avec_dettes.count()
 
-        # Pagination : ne traiter que les clients de la page courante
+        complet = request.query_params.get('complet', '').lower() in ('true', '1', 'yes', 'oui')
         paginator = StandardResultsSetPagination()
-        page_clients = paginator.paginate_queryset(clients_avec_dettes, request)
-        if page_clients is None:
-            page_clients = clients_avec_dettes
+        pagination_meta = None
+        if complet:
+            page_clients = list(clients_avec_dettes)
+        else:
+            page_clients = paginator.paginate_queryset(clients_avec_dettes, request)
+            if page_clients is None:
+                page_clients = list(clients_avec_dettes)
+            elif paginator.page is not None:
+                pagination_meta = {
+                    'count': paginator.page.paginator.count,
+                    'next': paginator.get_next_link(),
+                    'previous': paginator.get_previous_link(),
+                    'page_size': paginator.get_page_size(request),
+                }
 
         clients_data = []
 
         for client in page_clients:
             lien = client.liens_entreprise.filter(entreprise_id=eid).first() if eid else None
-            dettes_client = dettes_encours_qs.filter(client=client).select_related('devise')
+            dettes_client = dettes_base_qs.filter(client=client).select_related('devise')
 
-            # Calculer les totaux pour ce client
             tot_montant_client = Decimal('0.00')
             tot_paye_client = Decimal('0.00')
-            tot_solde_client = Decimal('0.00')
 
             for dette in dettes_client:
                 tot_montant_client += dette.montant_total or Decimal('0.00')
                 tot_paye_client += dette.montant_paye_agg or Decimal('0.00')
-                tot_solde_client += dette.solde_restant_agg or Decimal('0.00')
 
-            # Ne garder que les clients avec un solde > 0
-            if tot_solde_client > 0:
+            # Colonne « Dette » = encours réel global (toutes créances ouvertes), aligné dettes clients / du_actuel.
+            global_open_qs = DetteClient.objects.with_paiements_aggregate().filter(
+                client=client,
+                entreprise_id=eid,
+                solde_restant_agg__gt=Decimal('0.00000'),
+            )
+            if branch_filter is not None:
+                global_open_qs = global_open_qs.filter(succursale_id=branch_filter)
+            if special_kw is not None and eid:
+                global_open_qs = global_open_qs.filter(
+                    client__liens_entreprise__entreprise_id=eid,
+                    client__liens_entreprise__is_special=special_kw['is_special'],
+                )
+            tot_solde_global = global_open_qs.aggregate(s=Sum('solde_restant_agg'))['s'] or Decimal('0.00')
+
+            include_client = (
+                tot_montant_client > 0
+                if has_period
+                else tot_solde_global > 0
+            )
+            if include_client:
                 clients_data.append({
                     'id': client.id,
                     'nom': client.nom,
@@ -1015,7 +1199,7 @@ class RapportsViewSet(viewsets.ViewSet):
                     'totaux_encours': {
                         'montant_total': str(tot_montant_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
                         'montant_paye': str(tot_paye_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
-                        'solde_restant': str(tot_solde_client.quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
+                        'solde_restant': str(tot_solde_global.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)),
                     }
                 })
 
@@ -1066,13 +1250,11 @@ class RapportsViewSet(viewsets.ViewSet):
                     )
                 ),
                 'nombre_clients': nombre_clients_global,
-            }
+            },
+            'complet': complet,
         }
-        if page_clients is not None and paginator.page is not None:
-            resp['count'] = paginator.page.paginator.count
-            resp['next'] = paginator.get_next_link()
-            resp['previous'] = paginator.get_previous_link()
-            resp['page_size'] = paginator.get_page_size(request)
+        if pagination_meta:
+            resp.update(pagination_meta)
         return self._report_response(request, 'clients-dettes-general', resp)
 
     def _build_bon_achat_data(self, request, *, complet: bool = False):

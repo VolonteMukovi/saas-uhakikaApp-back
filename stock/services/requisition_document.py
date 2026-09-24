@@ -17,7 +17,12 @@ from rapports.utils.report_envelope import (
     serialize_agence,
     serialize_entreprise,
 )
-from stock.services.requisition import PRIX_PLACEHOLDER, resume_requisition, serialize_fournisseur
+from stock.services.requisition import (
+    PRIX_PLACEHOLDER,
+    _fmt_qty,
+    resume_requisition,
+    serialize_fournisseur,
+)
 
 
 def _iso(value) -> str | None:
@@ -95,6 +100,16 @@ def _categorie_article(article) -> dict[str, Any] | None:
     }
 
 
+def _quantite_commande_affichee(ligne) -> str | None:
+    """Libellé « qté à commander » : quantité saisie + conditionnement choisi (pas l'unité de stock)."""
+    qty = _fmt_qty(ligne.quantite)
+    if not qty:
+        return None
+    cond = getattr(ligne, 'conditionnement', None)
+    unit = (cond.nom.strip() if cond and cond.nom else '') or (ligne.unite or '').strip()
+    return f'{qty} {unit}' if unit else qty
+
+
 def _origine_suggestion(ligne) -> str:
     if ligne.type_ligne == 'LIBRE':
         return 'MANUEL'
@@ -117,6 +132,7 @@ def _ligne_document(ligne, *, statut_requisition: str) -> dict[str, Any]:
         else None
     )
     article = ligne.article
+    cond = getattr(ligne, 'conditionnement', None)
     unite_stock_base = ''
     if article is not None:
         if getattr(article, 'unite_id', None):
@@ -143,10 +159,13 @@ def _ligne_document(ligne, *, statut_requisition: str) -> dict[str, Any]:
         'code_article': ligne.article_id,
         'designation': ligne.designation,
         'categorie': _categorie_article(article),
+        'conditionnement_id': cond.pk if cond else None,
+        'conditionnement_nom': cond.nom if cond else None,
         'unite': ligne.unite or '',
         # L'unité commandée et l'unité de stock sont volontairement séparées.
         # Exemple : « 5 cartons » commandés, « 98 bouteilles » en stock.
         'unite_stock_base': unite_stock_base,
+        'quantite_commande_affichee': _quantite_commande_affichee(ligne),
         'quantite_demandee': quantite_demandee,
         'quantite_validee': quantite_validee,
         'quantite': quantite_demandee,
@@ -213,6 +232,7 @@ def build_requisition_document(requisition, *, request=None) -> dict[str, Any]:
             'article__sous_type_article',
             'article__sous_type_article__type_article',
             'article__unite',
+            'conditionnement',
             'fournisseur',
         ).order_by('ordre', 'id')
     )

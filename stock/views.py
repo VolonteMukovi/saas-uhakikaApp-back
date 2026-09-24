@@ -1398,56 +1398,27 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
     # === Actions POS (facture & bons de sortie) dÃ©placÃ©es depuis RapportViewSet ===
     @action(detail=True, methods=['get'], url_path='facture-pos', permission_classes=[IsAuthenticated])
     def facture_pos_pdf(self, request, pk=None):
+        """PDF FACTURE 58 mm — modèle inchangé (vente à crédit)."""
         user = request.user
         sortie = self.get_object()
         entreprise = user.get_entreprise(request)
-        POS_WIDTH = 58 * mm
-        lm, rm, tm, bm = 1.2 * mm, 1.2 * mm, 2 * mm, 2 * mm
-        content_width = POS_WIDTH - lm - rm
-        buffer = io.BytesIO()
-        styles = getSampleStyleSheet()
-        mono = ParagraphStyle(
-            'MonoTicket',
-            parent=styles['Normal'],
-            fontName='Courier',
-            fontSize=6.4,
-            leading=7.1,
-            alignment=TA_LEFT,
-            wordWrap='CJK',
-        )
-        elements = []
-
         from pos.printer_service import MP2258Printer
+        from caisse.services.recu_paiement_pos import ticket_lines_to_pdf_response
         ticket_lines = MP2258Printer().build_facture_ticket_lines(sortie, entreprise, user)
-        for raw in ticket_lines:
-            txt = (raw or '').rstrip('\n')
-            if txt.strip() == '':
-                elements.append(Spacer(1, 0.6 * mm))
-            else:
-                # preformatted look: Courier + spaces preserved
-                safe = txt.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace(' ', '&nbsp;')
-                elements.append(Paragraph(safe, mono))
+        return ticket_lines_to_pdf_response(ticket_lines, f"FACTURE_{sortie.pk}.pdf")
 
-        avail_width = content_width
-        main_height = sum(flow.wrap(avail_width, 100000)[1] for flow in elements)
-        POS_HEIGHT = main_height + tm + bm + 4.0 * mm
-
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=(POS_WIDTH, POS_HEIGHT),
-            leftMargin=lm,
-            rightMargin=rm,
-            topMargin=tm,
-            bottomMargin=bm,
-            allowSplitting=0,
-        )
-        doc.build(elements)
-        buffer.seek(0)
-        return HttpResponse(
-            buffer,
-            content_type='application/pdf',
-            headers={'Content-Disposition': f'inline; filename="FACTURE_{sortie.pk}.pdf"'},
-        )
+    @action(detail=True, methods=['get'], url_path='document-vente', permission_classes=[IsAuthenticated])
+    def document_vente(self, request, pk=None):
+        """
+        Indique quel document imprimer selon le mode de paiement de la vente.
+        EN_CREDIT → FACTURE ; PAYEE (comptant) → RECU.
+        """
+        sortie = self.get_object()
+        from pos.printer_service import MP2258Printer
+        info = MP2258Printer.resolve_document_vente(sortie)
+        info['sortie_id'] = sortie.pk
+        info['statut'] = getattr(sortie, 'statut', None)
+        return Response(info)
 
     @action(detail=True, methods=['post'], url_path='facture-pos-print', permission_classes=[IsAuthenticated])
     def facture_pos_print(self, request, pk=None):
@@ -1499,7 +1470,8 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
     @action(detail=True, methods=['post'], url_path='bon-pos-print', permission_classes=[IsAuthenticated])
     def bon_sortie_pos_print(self, request, pk=None):
         """
-        Impression ticket reÃ§u (bon de sortie) en ESC/POS.
+        Impression ESC/POS du REÇU de vente au comptant
+        (même source de données que la facture, libellés reçus).
         """
         user = request.user
         sortie = self.get_object()
@@ -1544,67 +1516,17 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
 
     @action(detail=True, methods=['get'], url_path='bon-pos', permission_classes=[IsAuthenticated])
     def bon_sortie_pos(self, request, pk=None):
+        """
+        PDF REÇU de vente au comptant — même pipeline / paramètres visuels que facture-pos,
+        données issues de la source commune (libellés reçus uniquement).
+        """
         user = request.user
         sortie = self.get_object()
-        POS_WIDTH = 58 * mm
-        buffer = io.BytesIO()
-        styles = getSampleStyleSheet()
-        normal = styles['Normal']; normal.fontSize = 8; normal.wordWrap = 'CJK'
-        title_style = ParagraphStyle('TitleMini', fontName='Helvetica-Bold', fontSize=9, alignment=1, spaceAfter=1)
-        # SÃ©curise l'accÃ¨s Ã  l'entreprise (peut Ãªtre None pour superadmin)
         entreprise = user.get_entreprise(request)
-        from rapports.utils.entete import get_entete_entreprise
-        from rapports.utils.pdf_generator import PDFGenerator
-        entete = get_entete_entreprise(entreprise)
-        pdf_gen = PDFGenerator()
-        elements = list(pdf_gen._create_entete(entete, centered=False))
-        elements.append(Spacer(1, 1*mm))
-        elements.append(Paragraph(_("BON DE SORTIE"), title_style))
-        elements.append(Paragraph(f"{_('NÂ°')}: {sortie.pk}", normal))
-        client_label = sortie.client.nom if sortie.client else _("Client Anonyme")
-        elements.append(Paragraph(f"{_('Client')}: {client_label}", normal))
-        elements.append(Spacer(1, 1*mm))
-        lignes = sortie.lignes.all()
-        header = [Paragraph(_("Art"), normal), Paragraph(_("QtÃ©"), normal), Paragraph(_("PU"), normal), Paragraph(_("Tot"), normal)]
-        data = [header]
-        total_general = Decimal('0.00')
-        for l in lignes:
-            pu = l.prix_unitaire or Decimal('0')
-            q = l.quantite or 0
-            tot = (pu * Decimal(str(q))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-            total_general += tot
-            # prefer line-level devise, then sortie.devise
-            line_dev = getattr(l, 'devise', None) or getattr(sortie, 'devise', None)
-            data.append([
-                Paragraph(_article_display_name(l.article), normal),
-                Paragraph(str(q), normal),
-                Paragraph(_format_amount(pu, line_dev, entreprise), normal),
-                Paragraph(_format_amount(tot, line_dev, entreprise), normal)
-            ])
-        # single total row after the loop
-        data.append([Paragraph(f'<b>{_("Total")}</b>', normal), Paragraph('', normal), Paragraph('', normal), Paragraph(f"<b>{_format_amount(total_general, getattr(sortie, 'devise', None), entreprise)}</b>", normal)])
-        table = Table(data, colWidths=[POS_WIDTH*0.40, POS_WIDTH*0.15, POS_WIDTH*0.20, POS_WIDTH*0.25])
-        table.setStyle(TableStyle([
-            ('FONTNAME',(0,0),(-1,-1),'Helvetica'),
-            ('FONTSIZE',(0,0),(-1,-1),8),
-            ('ALIGN',(1,0),(-1,-1),'RIGHT'),
-            ('BACKGROUND',(0,0),(-1,0),colors.lightgrey),
-            ('BOTTOMPADDING',(0,0),(-1,-1),1),
-            ('TOPPADDING',(0,0),(-1,-1),1),
-            ('LEFTPADDING',(0,0),(-1,-1),1),
-            ('RIGHTPADDING',(0,0),(-1,-1),1),
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 0.6*mm))
-        elements.append(Paragraph(_("-- Fin --"), normal))
-        lm = rm = tm = bm = 4*mm
-        avail_width = POS_WIDTH - lm - rm
-        content_height = sum(flow.wrap(avail_width, 100000)[1] for flow in elements)
-        POS_HEIGHT = content_height + tm + bm + 2*mm
-        doc = SimpleDocTemplate(buffer, pagesize=(POS_WIDTH, POS_HEIGHT), leftMargin=lm, rightMargin=rm, topMargin=tm, bottomMargin=bm, allowSplitting=0)
-        doc.build(elements)
-        buffer.seek(0)
-        return HttpResponse(buffer, content_type='application/pdf', headers={'Content-Disposition': f'inline; filename="BON_SORTIE_{sortie.pk}.pdf"'})
+        from pos.printer_service import MP2258Printer
+        from caisse.services.recu_paiement_pos import ticket_lines_to_pdf_response
+        ticket_lines = MP2258Printer().build_recu_vente_ticket_lines(sortie, entreprise, user)
+        return ticket_lines_to_pdf_response(ticket_lines, f"RECU_VENTE_{sortie.pk}.pdf")
 
     @action(detail=True, methods=['get'], url_path='bon-sortie-pos')
     def bon_sortie_pos_alias(self, request, pk=None):
@@ -2142,7 +2064,8 @@ class ArticleViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelV
         return super().get_permissions()
 
     def get_queryset(self):
-        return super().get_queryset().order_by('-pk')
+        # Ordre alphabétique stable (pagination cohérente page à page)
+        return super().get_queryset().order_by('nom_scientifique', 'nom_commercial', 'article_id')
 
     @swagger_auto_schema(
         operation_summary='Recherche d\'articles (tenant)',
@@ -2245,7 +2168,13 @@ class StockViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ReadOnly
     serializer_class = StockSerializer
 
     def get_queryset(self):
-        return super().get_queryset().select_related('article').order_by('-id')
+        # Ordre alphabétique des articles (pagination cohérente page à page)
+        return (
+            super()
+            .get_queryset()
+            .select_related('article')
+            .order_by('article__nom_scientifique', 'article__nom_commercial', 'article_id')
+        )
 
     @swagger_auto_schema(
         operation_summary='Statistiques stocks par statut (tenant)',
@@ -3487,14 +3416,19 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         dettes = DetteClient.objects.filter(client=client, entreprise_id=tenant_id)
         if branch_id is not None:
             dettes = dettes.filter(succursale_id=branch_id)
+        dettes_ouvertes_qs = (
+            dettes.with_paiements_aggregate()
+            .filter(solde_restant_agg__gt=Decimal('0.00000'))
+        )
         return Response({
             'client_id': client.id,
             'client_nom': client.nom,
             'nombre_dettes': dettes.count(),
             'montant_total_dettes': balance['solde']['total_du'],
             'montant_total_paye': balance['solde']['total_paye'],
-            'solde_restant_total': balance['solde']['solde_restant'],
-            'dettes_en_cours': dettes.filter(statut='EN_COURS').count(),
+            'solde_restant_total': balance['solde']['du_actuel'],
+            'du_actuel': balance['solde']['du_actuel'],
+            'dettes_en_cours': dettes_ouvertes_qs.count(),
             'dettes_payees': dettes.filter(statut='PAYEE').count(),
             'dettes_en_retard': dettes.filter(statut='RETARD').count(),
             'totaux_par_devise': balance['totaux_par_devise'],
@@ -3694,10 +3628,14 @@ class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
     @action(detail=False, methods=['get'])
     def en_cours(self, request):
         """
-        Liste toutes les dettes en cours (paginated).
+        Liste toutes les dettes encore dues (paginated), toutes dates confondues.
         GET /api/dettes/en_cours/
         """
-        dettes = self.get_queryset().filter(statut='EN_COURS')
+        dettes = (
+            self.get_queryset()
+            .with_paiements_aggregate()
+            .filter(solde_restant_agg__gt=Decimal('0.00000'))
+        )
         page = self.paginate_queryset(dettes)
         if page is not None:
             serializer = self.get_serializer(page, many=True)

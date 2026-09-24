@@ -85,7 +85,7 @@ def create_dette_for_credit_sortie(
         amount=total_dette,
         devise_source=devise_dette,
     )
-    return DetteClient.objects.create(
+    dette = DetteClient.objects.create(
         sortie=sortie,
         client_id=sortie.client_id,
         montant_total=total_dette,
@@ -98,6 +98,34 @@ def create_dette_for_credit_sortie(
         commentaire=(commentaire or '').strip(),
         statut='EN_COURS',
     )
+    # La date métier = date de la vente, pas l'instant technique de création de la dette
+    # (évite d'afficher « aujourd'hui » après repair / création différée).
+    if sortie.date_creation:
+        DetteClient.objects.filter(pk=dette.pk).update(date_creation=sortie.date_creation)
+        dette.refresh_from_db(fields=['date_creation'])
+    return dette
+
+
+def sync_dette_dates_from_sorties(*, entreprise_id: int | None = None, succursale_id: int | None = None) -> int:
+    """
+    Aligne DetteClient.date_creation sur Sortie.date_creation pour les dettes déjà créées.
+    Retourne le nombre de dettes mises à jour.
+    """
+    qs = (
+        DetteClient.objects.filter(sortie__isnull=False, sortie__date_creation__isnull=False)
+        .exclude(date_creation=F('sortie__date_creation'))
+        .select_related('sortie')
+    )
+    if entreprise_id is not None:
+        qs = qs.filter(entreprise_id=entreprise_id)
+    if succursale_id is not None:
+        qs = qs.filter(succursale_id=succursale_id)
+
+    updated = 0
+    for dette in qs.iterator(chunk_size=200):
+        DetteClient.objects.filter(pk=dette.pk).update(date_creation=dette.sortie.date_creation)
+        updated += 1
+    return updated
 
 
 def find_credit_sorties_without_dette(*, entreprise_id: int | None = None, succursale_id: int | None = None):
