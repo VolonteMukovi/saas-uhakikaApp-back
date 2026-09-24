@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "coolify-universal": {
+      "command": "D:\\projets\\coolify-mcp-server\\.venv\\Scripts\\coolify-mcp.exe"
+    }
+  }
+}

@@ -89,6 +89,7 @@ from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import qrcode
 from datetime import datetime
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 
@@ -442,6 +443,7 @@ class EntrepriseViewSet(viewsets.ModelViewSet):
     - Admin : CRUD sur sa propre entreprise.
     - User (Agent) : lecture seule (retrieve/list) sur son entreprise (branding : logo, slogan, etc.).
     """
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
     queryset = Entreprise.objects.all()
     serializer_class = EntrepriseSerializer
     permission_classes = [EntreprisePermission]

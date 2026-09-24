@@ -336,6 +336,16 @@ class EntrepriseSerializer(serializers.ModelSerializer):
     def get_config(self, obj):
         return obj.get_config_dict()
 
+    def validate_logo(self, value):
+        if not value:
+            return value
+        from stock.services.logo_image import normalize_entreprise_logo
+
+        try:
+            return normalize_entreprise_logo(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         request = self.context.get('request')
