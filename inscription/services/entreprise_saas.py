@@ -194,7 +194,7 @@ def _mettre_a_jour_entreprise_provisoire(
 def entreprise_contient_donnees_metier(entreprise: Entreprise) -> bool:
     """True si l'entreprise a des données opérationnelles."""
     from caisse.models import MouvementCaisse, SessionCaisse, TypeCaisse
-    from stock.models import Article, ClientEntreprise, DetteClient, Entree, Sortie
+    from stock.models import Article, ClientEntreprise, Entree, Sortie
     from users.models import Membership
 
     eid = entreprise.id
@@ -203,7 +203,6 @@ def entreprise_contient_donnees_metier(entreprise: Entreprise) -> bool:
         Entree.objects.filter(entreprise_id=eid).exists(),
         Sortie.objects.filter(entreprise_id=eid).exists(),
         ClientEntreprise.objects.filter(entreprise_id=eid).exists(),
-        DetteClient.objects.filter(entreprise_id=eid).exists(),
         TypeCaisse.objects.filter(entreprise_id=eid).exists(),
         MouvementCaisse.objects.filter(entreprise_id=eid).exists(),
         SessionCaisse.objects.filter(entreprise_id=eid).exists(),

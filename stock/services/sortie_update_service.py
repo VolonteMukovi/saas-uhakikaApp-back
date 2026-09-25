@@ -1,9 +1,10 @@
-"""Mise à jour d'une vente (Sortie) avec impact stock, caisse et dette cohérent."""
+"""Mise à jour d'une vente (Sortie) avec impact stock et caisse cohérent."""
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
 from django.db import transaction
+from django.utils.translation import gettext as _
 from rest_framework import serializers
 
 from stock.models import (
@@ -15,7 +16,6 @@ from stock.models import (
     PrixConditionnementEntree,
     Sortie,
 )
-from stock.services.credit_sale_adjustment_service import sync_dette_for_credit_sortie
 from stock.services.currency import build_conversion_snapshot
 from stock.services.sale_cash_adjustment_service import sync_sortie_cash_movements
 from stock.services.stock_adjustment import (
@@ -159,7 +159,7 @@ def update_sortie_from_payload(
     type_caisse_id: int | None = None,
 ) -> Sortie:
     """
-    Met à jour une sortie complète : rollback FIFO, nouvelles lignes, caisse, dette.
+    Met à jour une sortie complète : rollback FIFO, nouvelles lignes, caisse.
 
     ``data`` attend ``lignes`` (liste), champs entête optionnels (motif, client_id, statut).
     """
@@ -192,8 +192,13 @@ def update_sortie_from_payload(
             sortie.client = None
 
     new_statut = data.get('statut', sortie.statut)
-    if new_statut == 'EN_CREDIT' and not (sortie.client_id or data.get('client_id')):
-        raise serializers.ValidationError({'client_id': 'Client obligatoire pour une vente à crédit.'})
+    if new_statut == 'EN_CREDIT':
+        raise serializers.ValidationError({
+            'statut': _(
+                'Les ventes à crédit (EN_CREDIT) sont temporairement désactivées. '
+                'Utilisez le statut PAYEE (vente au comptant).'
+            ),
+        })
     sortie.statut = new_statut
     sortie.save()
 
@@ -221,12 +226,6 @@ def update_sortie_from_payload(
         totaux_par_devise,
         utilisateur=utilisateur,
         type_caisse_id=type_caisse_id,
-        old_statut=old_statut,
-        new_statut=new_statut,
-    )
-    sync_dette_for_credit_sortie(
-        sortie,
-        default_devise=default_dev,
         old_statut=old_statut,
         new_statut=new_statut,
     )

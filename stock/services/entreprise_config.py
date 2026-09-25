@@ -26,8 +26,6 @@ VALID_REPORT_TYPES = frozenset({
     'bon_entree',
     'bon_achat',
     'ventes',
-    'clients_dettes',
-    'clients_dettes_general',
     'journal',
     'etat_caisse',
     'compte_courant',

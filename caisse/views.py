@@ -1,8 +1,7 @@
-"""API caisse : types, mouvements, sessions, paiements dettes."""
+"""API caisse : types, mouvements, sessions."""
 import io
 from decimal import Decimal, ROUND_DOWN
 
-from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from django.http import HttpResponse
 from django.utils import timezone
@@ -22,15 +21,10 @@ from caisse.models import MouvementCaisse, TypeCaisse
 from caisse.serializers import (
     ConversionPreviewSerializer,
     MouvementCaisseSerializer,
-    PaiementDetteGroupedWriteSerializer,
-    PaiementDettePreviewSerializer,
-    PaiementDetteReadSerializer,
-    PaiementDetteWriteSerializer,
     TypeCaisseSerializer,
 )
 from caisse.services.caisse_defaut import CaisseError
 from caisse.services.currency_conversion import prepare_caisse_movement
-from caisse.paiement_dette_recu_mixin import PaiementDetteRecuMixin
 from caisse.services.caisse import mouvement_moyen_affiche
 from caisse.services.caisse_defaut import caisse_necessite_session
 from caisse.services.errors import validation_error_message
@@ -39,7 +33,7 @@ from caisse.services.session_caisse import (
     require_session_caisse_ouverte,
     solde_session_courant,
 )
-from stock.models import DetteClient, Devise, Entreprise
+from stock.models import Devise, Entreprise
 from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
 from stock.views import (
     BusinessPermissionMixin,
@@ -889,153 +883,3 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         buffer.seek(0)
         filename = f"MVT_{mv.pk}.pdf"
         return HttpResponse(buffer, content_type='application/pdf', headers={'Content-Disposition': f'inline; filename="{filename}"'})
-
-
-
-
-class PaiementDetteViewSet(PaiementDetteRecuMixin, TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
-    """Paiements de dettes via MouvementCaisse liÃ©s Ã  DetteClient (content_type / object_id). URLs inchangÃ©es."""
-    queryset = MouvementCaisse.objects.filter(type='ENTREE')
-    serializer_class = PaiementDetteReadSerializer
-    http_method_names = ['get', 'post', 'head', 'options']
-
-    def get_queryset(self):
-        ct_dette = ContentType.objects.get_for_model(DetteClient)
-        return (
-            super()
-            .get_queryset()
-            .filter(content_type=ct_dette)
-            .select_related('devise', 'utilisateur', 'content_type')
-            .prefetch_related('details__type_caisse')
-            .order_by('-date', '-id')
-        )
-
-    def get_serializer_class(self):
-        if self.action == 'create':
-            return PaiementDetteWriteSerializer
-        if self.action == 'grouped':
-            return PaiementDetteGroupedWriteSerializer
-        return PaiementDetteReadSerializer
-
-    def create(self, request, *args, **kwargs):
-        from caisse.services.recu_paiement_pos import recu_paiement_urls
-
-        serializer = PaiementDetteWriteSerializer(data=request.data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
-        mc = serializer.save()
-        data = PaiementDetteReadSerializer(mc, context={'request': request}).data
-        data['recu'] = recu_paiement_urls(request, mc.pk)
-        return Response(data, status=status.HTTP_201_CREATED)
-
-    @action(detail=False, methods=['post'], url_path='preview')
-    def preview(self, request):
-        """
-        Prévisualise un paiement de dette (conversion paiement/dette/caisse).
-        POST /api/paiements-dettes/preview/
-        """
-        serializer = PaiementDettePreviewSerializer(data=request.data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
-        return Response(serializer.build_preview())
-
-    @action(detail=False, methods=['post'], url_path='grouped')
-    def grouped(self, request):
-        """
-        Paiement groupé de plusieurs dettes d'un même client.
-        POST /api/paiements-dettes/grouped/
-        """
-        from caisse.services.recu_paiement_pos import recu_groupe_urls
-
-        serializer = PaiementDetteGroupedWriteSerializer(data=request.data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
-        result = serializer.save()
-        reference = (result.get('paiement') or {}).get('reference')
-        if reference:
-            result['recu_groupe'] = recu_groupe_urls(request, reference)
-        return Response(result, status=status.HTTP_201_CREATED)
-
-    @action(detail=True, methods=['get'], url_path='recu-json', permission_classes=[IsAuthenticated])
-    def recu_json(self, request, pk=None):
-        """
-        ReÃ§u de paiement dette en JSON (impression / PDF cÃ´tÃ© frontend).
-        GET /api/paiements-dettes/{id}/recu-json/
-        """
-        from django.contrib.contenttypes.models import ContentType as CTModel
-        from rapports.utils.report_envelope import (
-            build_metadata,
-            get_devise_principale,
-            serialize_agence,
-            serialize_entreprise,
-        )
-
-        user = request.user
-        paiement = self.get_object()
-        ct_dette = CTModel.objects.get_for_model(DetteClient)
-        if paiement.content_type_id != ct_dette.id or not paiement.object_id:
-            return Response(
-                {'error': _('Mouvement invalide pour un reÃ§u de paiement de dette.')},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        dette = DetteClient.objects.filter(pk=paiement.object_id).select_related(
-            'client', 'devise', 'sortie',
-        ).first()
-        if not dette:
-            return Response({'error': _('Dette introuvable.')}, status=status.HTTP_404_NOT_FOUND)
-
-        entreprise = user.get_entreprise(request)
-        tenant_id, branch_id = _get_tenant_ids(request)
-        lien = None
-        if dette.client and entreprise:
-            lien = dette.client.liens_entreprise.filter(entreprise_id=entreprise.pk).first()
-
-        from caisse.services.recu_paiement_pos import recu_paiement_urls
-        from pos.printer_service import MP2258Printer
-
-        paiement_data = PaiementDetteReadSerializer(
-            paiement,
-            context={'request': request, 'include_dette_details': True},
-        ).data
-        montant_ce_recu = Decimal(str(paiement.montant or 0))
-        ancien_solde = (montant_ce_recu + Decimal(str(dette.solde_restant or 0))).quantize(
-            Decimal('0.00001'), rounding=ROUND_DOWN,
-        )
-        recu_urls = recu_paiement_urls(request, paiement.pk)
-        ticket_lines = MP2258Printer().build_recu_paiement_dette_ticket_lines(
-            paiement,
-            dette,
-            entreprise,
-            user,
-            moyen=mouvement_moyen_affiche(paiement),
-            ancien_solde=ancien_solde,
-        )
-
-        return Response({
-            'document': 'recu_paiement_dette',
-            'titre': _('REÇU DE PAIEMENT DETTE'),
-            'format': 'json',
-            'entreprise': serialize_entreprise(entreprise, request),
-            'agence': serialize_agence(branch_id, entreprise),
-            'devise': get_devise_principale(entreprise),
-            'metadata': build_metadata(user, request),
-            'client': {
-                'id': dette.client_id,
-                'nom': dette.client.nom if dette.client else '',
-                'telephone': getattr(dette.client, 'telephone', '') or '',
-                'is_special': bool(lien.is_special) if lien else False,
-            },
-            'dette': {
-                'id': dette.id,
-                'montant_total': str(dette.montant_total),
-                'montant_paye': str(dette.montant_paye),
-                'solde_restant': str(dette.solde_restant),
-                'ancien_solde': str(ancien_solde),
-                'statut': dette.statut,
-                'sortie_id': dette.sortie_id,
-            },
-            'paiement': paiement_data,
-            'recu': recu_urls,
-            'pdf_url': recu_urls['pdf_url'],
-            'print_url': recu_urls['print_url'],
-            'ticket_lines': [line.rstrip('\n') for line in ticket_lines],
-        })
-
-    # recu-paiement, recu-paiement-print, recu-groupe* → PaiementDetteRecuMixin

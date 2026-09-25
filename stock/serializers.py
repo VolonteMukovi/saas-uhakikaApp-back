@@ -20,7 +20,6 @@ from .models import (
     BeneficeLot,
     Client,
     ClientEntreprise,
-    DetteClient,
 )
 from django.db import transaction, models
 from django.utils import timezone
@@ -1232,157 +1231,9 @@ class EntreeSerializer(serializers.ModelSerializer):
 
 
 
-class DetteClientSerializer(serializers.ModelSerializer):
-    client = ClientSerializer(read_only=True)
-    client_id = serializers.SlugRelatedField(slug_field='id', queryset=Client.objects.all(), source='client', write_only=True)
-    devise = DeviseSerializer(read_only=True)
-    devise_reference = DeviseSerializer(read_only=True)
-    devise_id = serializers.PrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise', write_only=True, required=False, allow_null=True)
-    sortie = serializers.PrimaryKeyRelatedField(read_only=True)
-    sortie_id = serializers.PrimaryKeyRelatedField(queryset=Sortie.objects.all(), source='sortie', write_only=True)
-    # Remove SerializerMethodField to avoid recursion - will be added as a separate field only when needed
-    paiements = serializers.SerializerMethodField(read_only=True)
-
-    class Meta:
-        model = DetteClient
-        fields = [
-            'id', 'client', 'client_id', 'sortie', 'sortie_id', 'montant_total', 'montant_paye', 'solde_restant',
-            'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference',
-            'date_creation', 'date_echeance', 'statut', 'commentaire', 'paiements',
-        ]
-        read_only_fields = ['montant_paye', 'solde_restant', 'statut', 'date_creation']
-
-    def to_representation(self, instance):
-        # Auto-correction : crédit entièrement payé → PAYEE même avant l'échéance
-        from stock.services.dette_statut import compute_statut_dette
-        attendu = compute_statut_dette(instance)
-        if instance.statut != attendu:
-            DetteClient.objects.filter(pk=instance.pk).update(statut=attendu)
-            instance.statut = attendu
-        return super().to_representation(instance)
-
-    def validate_sortie(self, value):
-        """
-        Validation pour s'assurer que la sortie est EN_CREDIT avant de créer une dette.
-        """
-        if value.statut != 'EN_CREDIT':
-            raise serializers.ValidationError(
-                _("Impossible de créer une dette pour cette sortie. La sortie #%(pk)s a le statut '%(statut)s'. Seules les sorties avec le statut 'EN_CREDIT' peuvent générer une dette.")
-                % {"pk": value.pk, "statut": value.statut}
-            )
-        return value
-
-    def get_paiements(self, obj):
-        if not self.context.get('include_paiements', True):
-            return []
-        try:
-            from caisse.services.caisse import mouvement_moyen_affiche
-
-            qs = (
-                obj._paiements_mouvements_qs()
-                .select_related('devise', 'utilisateur')
-                .prefetch_related('details__type_caisse')
-                .order_by('-date')[:50]
-            )
-            out = []
-            for p in qs:
-                out.append({
-                    'id': p.id,
-                    'montant_paye': str(p.montant),
-                    'date_paiement': p.date.isoformat() if p.date else None,
-                    'moyen': mouvement_moyen_affiche(p),
-                    'reference': p.reference_piece or '',
-                    'mouvement_caisse_id': p.id,
-                    'devise': (
-                        {'id': p.devise.id, 'sigle': p.devise.sigle, 'symbole': p.devise.symbole}
-                        if p.devise
-                        else None
-                    ),
-                })
-            return out
-        except Exception:
-            return []
-
-
-class DetteCorrectionDeleteSerializer(serializers.Serializer):
-    confirm = serializers.BooleanField(required=True)
-    reason = serializers.CharField(required=False, allow_blank=True, default='')
-
-    def validate(self, attrs):
-        if not attrs.get('confirm'):
-            raise serializers.ValidationError(
-                {'confirm': _("Confirmation requise pour cette opération irréversible.")}
-            )
-        return attrs
-
-
-class DetteClientCleanupSerializer(serializers.Serializer):
-    client_id = serializers.SlugRelatedField(
-        slug_field='id',
-        queryset=Client.objects.all(),
-        source='client',
-    )
-    confirm = serializers.BooleanField(required=True)
-    reason = serializers.CharField(required=False, allow_blank=True, default='')
-
-    def validate(self, attrs):
-        if not attrs.get('confirm'):
-            raise serializers.ValidationError(
-                {'confirm': _("Confirmation requise pour cette opération irréversible.")}
-            )
-        return attrs
-
-
-class DetteManuelleCreateSerializer(serializers.Serializer):
-    client_id = serializers.SlugRelatedField(
-        slug_field='id',
-        queryset=Client.objects.all(),
-        source='client',
-    )
-    montant_total = serializers.DecimalField(max_digits=12, decimal_places=5)
-    montant_deja_paye = serializers.DecimalField(
-        max_digits=12, decimal_places=5, required=False, default=Decimal('0.00000')
-    )
-    devise_id = serializers.PrimaryKeyRelatedField(
-        queryset=Devise.objects.all(), source='devise', required=False, allow_null=True
-    )
-    date_dette = serializers.DateTimeField(required=False, allow_null=True)
-    date_echeance = serializers.DateField(required=False, allow_null=True)
-    commentaire = serializers.CharField(required=False, allow_blank=True, default='')
-
-    def validate(self, attrs):
-        montant_total = attrs.get('montant_total') or Decimal('0')
-        montant_deja_paye = attrs.get('montant_deja_paye') or Decimal('0')
-        if montant_total <= 0:
-            raise serializers.ValidationError(
-                {'montant_total': _("Le montant total doit être strictement positif.")}
-            )
-        if montant_deja_paye < 0:
-            raise serializers.ValidationError(
-                {'montant_deja_paye': _("Le montant déjà payé ne peut pas être négatif.")}
-            )
-        if montant_deja_paye > montant_total:
-            raise serializers.ValidationError(
-                {'montant_deja_paye': _("Le montant déjà payé ne peut pas dépasser le montant total.")}
-            )
-        return attrs
-
-
-# Réexport serializers caisse (compatibilité imports ``stock.serializers``).
+# Réexport serializers caisse (compatibilité imports `stock.serializers`).
 from caisse.serializers import (  # noqa: E402, F401
     DetailMouvementCaisseSerializer,
     MouvementCaisseSerializer,
-    PaiementDetteReadSerializer,
-    PaiementDetteSerializer,
-    PaiementDetteWriteSerializer,
     TypeCaisseSerializer,
 )
-
-
-class ClientDettesTotalSerializer(serializers.ModelSerializer):
-    total_dettes = serializers.SerializerMethodField()
-    class Meta:
-        model = Client
-        fields = ['id', 'nom', 'telephone', 'is_special', 'total_dettes']
-    def get_total_dettes(self, obj):
-        return sum([d.solde_restant for d in obj.dettes.all()])

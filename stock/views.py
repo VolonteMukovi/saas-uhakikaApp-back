@@ -28,7 +28,6 @@ from .models import (
     BeneficeLot,
     Client,
     ClientEntreprise,
-    DetteClient,
 )
 from caisse.models import MouvementCaisse
 from caisse.services.caisse import creer_mouvement_caisse, mouvement_moyen_affiche
@@ -52,7 +51,6 @@ from stock.services.currency import (
 )
 from django.db import transaction, models
 from django.db.models import Prefetch, Q, Sum
-from django.contrib.contenttypes.models import ContentType
 from rest_framework.exceptions import PermissionDenied, NotFound
 from django.utils.translation import gettext as _, pgettext
 from django.contrib.admin.models import LogEntry, ADDITION, DELETION, CHANGE
@@ -766,10 +764,12 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         if not tenant_id:
             raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
         statut_demande = serializer.validated_data.get('statut', 'PAYEE')
-        client = serializer.validated_data.get('client')
-        if statut_demande == 'EN_CREDIT' and not client:
+        if str(statut_demande).upper() == 'EN_CREDIT':
             raise serializers.ValidationError({
-                'client': _('Client obligatoire pour une vente à crédit.'),
+                'statut': (
+                    'Les ventes à crédit (EN_CREDIT) sont temporairement désactivées. '
+                    'Utilisez le statut PAYEE.'
+                ),
             })
         from abonnements.services.limites import verifier_vente_sortie
         verifier_vente_sortie(tenant_id, statut_demande, request)
@@ -1038,19 +1038,13 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     )
 
             if sortie.statut == 'EN_CREDIT':
-                from stock.services.credit_sale_debt import (
-                    create_dette_for_credit_sortie,
-                    resolve_sortie_primary_devise,
-                )
+                from stock.services.sortie_devise import resolve_sortie_primary_devise
 
                 primary_dev = resolve_sortie_primary_devise(sortie, default_devise=default_dev)
                 if primary_dev and not sortie.devise_id:
                     sortie.devise = primary_dev
                     sortie.save(update_fields=['devise'])
-                try:
-                    create_dette_for_credit_sortie(sortie, default_devise=default_dev, raise_if_exists=True)
-                except ValueError as exc:
-                    raise serializers.ValidationError({'non_field_errors': str(exc)}) from exc
+
         return Response(self.get_serializer(sortie).data, status=status.HTTP_201_CREATED)
     
     @action(detail=False, methods=['get'], url_path='produits-plus-vendus')
@@ -1355,7 +1349,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         return self._update_common(request, *args, **kwargs, partial=True)
 
     def _update_common(self, request, *args, **kwargs):
-        """Mise a jour d'une sortie avec gestion FIFO, caisse et dette."""
+        """Mise a jour d'une sortie avec gestion FIFO et caisse."""
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         lignes_data = request.data.get('lignes')
@@ -3369,74 +3363,6 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
             return self.get_paginated_response(page)
         return Response(movements)
 
-    @action(detail=True, methods=['get'])
-    def dettes(self, request, pk=None):
-        """
-        Liste toutes les dettes d'un client spÃ©cifique (paginated).
-        GET /api/clients/{id}/dettes/
-        """
-        client = self.get_object()
-        tenant_id, branch_id = _get_tenant_ids(request)
-        dettes = DetteClient.objects.filter(client=client).select_related(
-            'client', 'devise', 'sortie'
-        )
-        if tenant_id is not None:
-            dettes = dettes.filter(entreprise_id=tenant_id)
-        if branch_id is not None:
-            dettes = dettes.filter(succursale_id=branch_id)
-        dettes = dettes.order_by('-date_creation', '-id')
-        page = self.paginate_queryset(dettes)
-        ctx = {'request': request, 'include_paiements': False}
-        if page is not None:
-            serializer = DetteClientSerializer(page, many=True, context=ctx)
-            return self.get_paginated_response(serializer.data)
-        serializer = DetteClientSerializer(dettes, many=True, context=ctx)
-        return Response(serializer.data)
-
-    @action(detail=True, methods=['get'])
-    def total_dettes(self, request, pk=None):
-        """
-        Calcule le total des dettes d'un client.
-        GET /api/clients/{id}/total_dettes/
-        """
-        from stock.services.client_lifecycle import build_client_balance, parse_period_from_request
-
-        client = self.get_object()
-        tenant_id, branch_id = _get_tenant_ids(request)
-        if not tenant_id:
-            return Response({'detail': 'Contexte entreprise manquant.'}, status=403)
-        try:
-            period = parse_period_from_request(request)
-        except ValueError as exc:
-            return Response({'detail': str(exc)}, status=400)
-        balance = build_client_balance(
-            client=client,
-            entreprise_id=tenant_id,
-            succursale_id=branch_id,
-            period=period,
-        )
-        dettes = DetteClient.objects.filter(client=client, entreprise_id=tenant_id)
-        if branch_id is not None:
-            dettes = dettes.filter(succursale_id=branch_id)
-        dettes_ouvertes_qs = (
-            dettes.with_paiements_aggregate()
-            .filter(solde_restant_agg__gt=Decimal('0.00000'))
-        )
-        return Response({
-            'client_id': client.id,
-            'client_nom': client.nom,
-            'nombre_dettes': dettes.count(),
-            'montant_total_dettes': balance['solde']['total_du'],
-            'montant_total_paye': balance['solde']['total_paye'],
-            'solde_restant_total': balance['solde']['du_actuel'],
-            'du_actuel': balance['solde']['du_actuel'],
-            'dettes_en_cours': dettes_ouvertes_qs.count(),
-            'dettes_payees': dettes.filter(statut='PAYEE').count(),
-            'dettes_en_retard': dettes.filter(statut='RETARD').count(),
-            'totaux_par_devise': balance['totaux_par_devise'],
-        })
-
-
 class ClientEntrepriseViewSet(BusinessPermissionMixin, viewsets.ReadOnlyModelViewSet):
     """Lecture des associations `Client â†” Entreprise` (multi-tenant, succursale optionnelle)."""
 
@@ -3514,339 +3440,3 @@ class ClientEntrepriseViewSet(BusinessPermissionMixin, viewsets.ReadOnlyModelVie
                 pass
 
         return qs
-
-
-class DetteClientViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
-    """ViewSet pour la gestion des dettes clients (filtrÃ© par entreprise/succursale)."""
-    queryset = DetteClient.objects.select_related('client', 'devise', 'sortie').all()
-    serializer_class = DetteClientSerializer
-
-    def get_queryset(self):
-        return super().get_queryset().select_related('client', 'devise', 'sortie').order_by('-date_creation', '-id')
-
-    def _assert_correction_permission(self, request):
-        if not (request.user.is_superadmin() or request.user.is_admin(request)):
-            raise PermissionDenied(
-                _("Accès réservé aux administrateurs pour les corrections de dettes.")
-            )
-
-    def _log_correction(self, *, request, dette, action: str, reason: str, payload: dict):
-        try:
-            LogEntry.objects.log_action(
-                user_id=request.user.pk if request.user and request.user.is_authenticated else None,
-                content_type_id=ContentType.objects.get_for_model(DetteClient).pk,
-                object_id=str(dette.pk),
-                object_repr=f"DetteClient#{dette.pk} client={dette.client_id}",
-                action_flag=action,
-                change_message=json.dumps({
-                    'module': 'dette_correction',
-                    'reason': reason or '',
-                    **payload,
-                }, ensure_ascii=False),
-            )
-        except Exception:
-            logger.exception("Journal correction dette: échec log_action (dette_id=%s)", getattr(dette, 'pk', None))
-
-    def _delete_dette_and_related_payments(self, *, request, dette, reason: str):
-        ct_dette = ContentType.objects.get_for_model(DetteClient)
-        paiements_qs = MouvementCaisse.objects.filter(
-            content_type=ct_dette,
-            object_id=dette.pk,
-        )
-        paiements_count = paiements_qs.count()
-        paiements_total = paiements_qs.aggregate(s=Sum('montant'))['s'] or Decimal('0')
-        paiement_ids = list(paiements_qs.values_list('id', flat=True))
-
-        dette_snapshot = {
-            'dette_id': dette.pk,
-            'client_id': dette.client_id,
-            'sortie_id': dette.sortie_id,
-            'montant_total': str(dette.montant_total),
-            'montant_paye': str(dette.montant_paye),
-            'solde_restant': str(dette.solde_restant),
-            'paiements_count': paiements_count,
-            'paiements_total': str(paiements_total),
-            'paiement_ids': paiement_ids,
-        }
-        paiements_qs.delete()
-        dette.delete()
-        self._log_correction(
-            request=request,
-            dette=dette,
-            action=DELETION,
-            reason=reason,
-            payload=dette_snapshot,
-        )
-        return dette_snapshot
-
-    def perform_create(self, serializer):
-        sortie = serializer.validated_data.get('sortie')
-        if sortie and sortie.statut != 'EN_CREDIT':
-            raise serializers.ValidationError({
-                'sortie': f"Impossible de crÃ©er une dette pour cette sortie. "
-                         f"La sortie #{sortie.pk} (Client: {sortie.client.nom if sortie.client else 'Anonyme'}) a le statut '{sortie.statut}'. "
-                         f"Seules les sorties avec le statut 'EN_CREDIT' peuvent gÃ©nÃ©rer une dette."
-            })
-        if sortie and DetteClient.objects.filter(sortie=sortie).exists():
-            raise serializers.ValidationError({
-                'sortie': f"Une dette existe dÃ©jÃ  pour la sortie #{sortie.pk}."
-            })
-        date_echeance = serializer.validated_data.get('date_echeance') or (timezone.now().date() + timezone.timedelta(days=30))
-        tenant_id, branch_id = self.get_tenant_ids()
-        if not tenant_id:
-            raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
-        devise_dette = serializer.validated_data.get('devise') or getattr(sortie, 'devise', None) or _get_principal_devise(tenant_id)
-        if not devise_dette:
-            raise serializers.ValidationError({'devise_id': _('Devise requise pour créer une dette.')})
-        snapshot = build_conversion_snapshot(
-            entreprise_id=tenant_id,
-            amount=serializer.validated_data.get('montant_total'),
-            devise_source=devise_dette,
-        )
-        serializer.save(
-            date_echeance=date_echeance,
-            entreprise_id=tenant_id,
-            succursale_id=branch_id,
-            devise=devise_dette,
-            devise_reference=snapshot['devise_reference'],
-            taux_change=snapshot['taux_change'],
-            montant_reference=snapshot['montant_reference'],
-        )
-
-    @action(detail=False, methods=['get'])
-    def en_retard(self, request):
-        """
-        Liste toutes les dettes en retard (paginated).
-        GET /api/dettes/en_retard/
-        """
-        dettes = self.get_queryset().filter(statut='RETARD')
-        page = self.paginate_queryset(dettes)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-        serializer = self.get_serializer(dettes, many=True)
-        return Response(serializer.data)
-
-    @action(detail=False, methods=['get'])
-    def en_cours(self, request):
-        """
-        Liste toutes les dettes encore dues (paginated), toutes dates confondues.
-        GET /api/dettes/en_cours/
-        """
-        dettes = (
-            self.get_queryset()
-            .with_paiements_aggregate()
-            .filter(solde_restant_agg__gt=Decimal('0.00000'))
-        )
-        page = self.paginate_queryset(dettes)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-        serializer = self.get_serializer(dettes, many=True)
-        return Response(serializer.data)
-
-    @action(detail=False, methods=['get'])
-    def payees(self, request):
-        """
-        Liste toutes les dettes payÃ©es (paginated).
-        GET /api/dettes/payees/
-        """
-        dettes = self.get_queryset().filter(statut='PAYEE')
-        page = self.paginate_queryset(dettes)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-        serializer = self.get_serializer(dettes, many=True)
-        return Response(serializer.data)
-
-    @action(detail=True, methods=['get'], url_path='paiements')
-    def paiements(self, request, pk=None):
-        """
-        Liste tous les mouvements de paiement liÃ©s Ã  cette dette (paginated).
-        GET /api/dettes/{id}/paiements/
-        """
-        dette = self.get_object()
-        paiements_qs = (
-            dette._paiements_mouvements_qs()
-            .select_related('devise', 'utilisateur')
-            .prefetch_related('details__type_caisse')
-            .order_by('-date', '-id')
-        )
-        page = self.paginate_queryset(paiements_qs)
-        if page is not None:
-            serializer = PaiementDetteReadSerializer(page, many=True, context={'request': request})
-            return self.get_paginated_response(serializer.data)
-        serializer = PaiementDetteReadSerializer(paiements_qs, many=True, context={'request': request})
-        return Response(serializer.data)
-
-
-    def destroy(self, request, *args, **kwargs):
-        self._assert_correction_permission(request)
-        raw_confirm = request.data.get('confirm', request.query_params.get('confirm', False))
-        raw_reason = request.data.get('reason', request.query_params.get('reason', ''))
-        confirm = raw_confirm if isinstance(raw_confirm, bool) else str(raw_confirm).strip().lower() in ('1', 'true', 'yes', 'oui')
-        ser = DetteCorrectionDeleteSerializer(data={'confirm': confirm, 'reason': raw_reason})
-        ser.is_valid(raise_exception=True)
-        reason = (ser.validated_data.get('reason') or '').strip()
-        dette = self.get_object()
-        with transaction.atomic():
-            snapshot = self._delete_dette_and_related_payments(
-                request=request,
-                dette=dette,
-                reason=reason,
-            )
-        return Response(
-            {
-                'success': True,
-                'message': _("Dette supprimée avec tous les paiements liés."),
-                **snapshot,
-            },
-            status=status.HTTP_200_OK,
-        )
-
-    @action(detail=False, methods=['post'], url_path='cleanup-client')
-    def cleanup_client(self, request):
-        self._assert_correction_permission(request)
-        serializer = DetteClientCleanupSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        client = serializer.validated_data['client']
-        reason = (serializer.validated_data.get('reason') or '').strip()
-
-        dettes = self.get_queryset().filter(client=client).order_by('id')
-        if not dettes.exists():
-            return Response(
-                {'detail': _("Aucune dette trouvée pour ce client dans ce périmètre.")},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        deleted = []
-        with transaction.atomic():
-            for dette in dettes:
-                deleted.append(
-                    self._delete_dette_and_related_payments(
-                        request=request,
-                        dette=dette,
-                        reason=reason,
-                    )
-                )
-
-        total_montant = sum(Decimal(x['montant_total']) for x in deleted)
-        total_paiements = sum(Decimal(x['paiements_total']) for x in deleted)
-        total_paiements_count = sum(int(x['paiements_count']) for x in deleted)
-        return Response(
-            {
-                'success': True,
-                'message': _("Nettoyage des dettes du client terminé."),
-                'client_id': client.id,
-                'client_nom': client.nom,
-                'dettes_supprimees': len(deleted),
-                'montant_total_dettes_supprimees': str(total_montant),
-                'paiements_supprimes_count': total_paiements_count,
-                'paiements_supprimes_total': str(total_paiements),
-                'details': deleted,
-            },
-            status=status.HTTP_200_OK,
-        )
-
-    @action(detail=False, methods=['post'], url_path='manual-create')
-    def manual_create(self, request):
-        self._assert_correction_permission(request)
-        serializer = DetteManuelleCreateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        v = serializer.validated_data
-        client = v['client']
-        montant_total = v['montant_total']
-        montant_deja_paye = v.get('montant_deja_paye') or Decimal('0')
-        commentaire = (v.get('commentaire') or '').strip()
-        tenant_id, branch_id = self.get_tenant_ids()
-        if not tenant_id:
-            return Response({'detail': _('Contexte entreprise manquant.')}, status=status.HTTP_403_FORBIDDEN)
-
-        devise = v.get('devise') or _get_principal_devise(tenant_id)
-        if not devise:
-            return Response({'detail': _('Aucune devise disponible pour créer cette dette.')}, status=status.HTTP_400_BAD_REQUEST)
-
-        date_dette = v.get('date_dette')
-        date_echeance = v.get('date_echeance')
-        statut = 'PAYEE' if montant_deja_paye == montant_total else 'EN_COURS'
-        sortie_statut = 'PAYEE' if statut == 'PAYEE' else 'EN_CREDIT'
-
-        with transaction.atomic():
-            sortie = Sortie.objects.create(
-                motif=commentaire or _('Dette manuelle de correction'),
-                client=client,
-                devise=devise,
-                statut=sortie_statut,
-                entreprise_id=tenant_id,
-                succursale_id=branch_id,
-            )
-            snapshot = build_conversion_snapshot(
-                entreprise_id=tenant_id,
-                amount=montant_total,
-                devise_source=devise,
-            )
-            dette = DetteClient.objects.create(
-                client=client,
-                sortie=sortie,
-                montant_total=montant_total,
-                devise=devise,
-                devise_reference=snapshot['devise_reference'],
-                taux_change=snapshot['taux_change'],
-                montant_reference=snapshot['montant_reference'],
-                date_echeance=date_echeance,
-                statut=statut,
-                commentaire=commentaire or _('Création manuelle pour correction historique.'),
-                entreprise_id=tenant_id,
-                succursale_id=branch_id,
-            )
-            if date_dette:
-                DetteClient.objects.filter(pk=dette.pk).update(date_creation=date_dette)
-                dette.refresh_from_db()
-
-            paiement_reprise = None
-            if montant_deja_paye > 0:
-                paiement_reprise = creer_mouvement_caisse(
-                    montant=montant_deja_paye,
-                    devise=devise,
-                    type_mouvement='ENTREE',
-                    entreprise_id=tenant_id,
-                    succursale_id=branch_id,
-                    content_object=dette,
-                    utilisateur=request.user if request.user.is_authenticated else None,
-                    reference_piece=f'REG-DETTE-{dette.pk}',
-                    motif=_('Régularisation historique de dette'),
-                    moyen='REGULARISATION',
-                    categorie='PAIEMENT_DETTE',
-                    skip_session_check=True,
-                    date_operation=date_dette,
-                )
-
-            self._log_correction(
-                request=request,
-                dette=dette,
-                action=ADDITION,
-                reason=commentaire,
-                payload={
-                    'manual_create': True,
-                    'sortie_id': sortie.pk,
-                    'montant_total': str(montant_total),
-                    'montant_deja_paye': str(montant_deja_paye),
-                    'solde_restant': str(dette.solde_restant),
-                    'date_dette': date_dette.isoformat() if date_dette else None,
-                    'date_echeance': date_echeance.isoformat() if date_echeance else None,
-                    'paiement_reprise_id': paiement_reprise.pk if paiement_reprise else None,
-                },
-            )
-
-        data = DetteClientSerializer(dette, context={'request': request}).data
-        return Response(
-            {
-                'success': True,
-                'message': _('Dette manuelle créée avec succès.'),
-                'dette': data,
-                'montant_deja_paye_enregistre': str(montant_deja_paye),
-                'solde_restant': str(dette.solde_restant),
-            },
-            status=status.HTTP_201_CREATED,
-        )
-

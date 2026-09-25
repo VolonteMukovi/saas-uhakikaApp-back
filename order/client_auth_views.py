@@ -10,7 +10,7 @@ from django.utils.translation import gettext as _
 
 from django.db.models import Count
 
-from stock.models import Client, ClientEntreprise, DetteClient, Sortie, Succursale
+from stock.models import Client, ClientEntreprise, Sortie, Succursale
 from stock.serializers import EntrepriseSerializer, SuccursaleSerializer
 
 from .authentication import ClientJWTAuthentication
@@ -277,7 +277,7 @@ def client_portal_select_context(request):
 
 @swagger_auto_schema(
     method="get",
-    operation_summary="Tableau de bord client (dettes, ventes, commandes — périmètre membership)",
+    operation_summary="Tableau de bord client (ventes, commandes — périmètre membership)",
     manual_parameters=[
         openapi.Parameter(
             "Authorization",
@@ -296,25 +296,6 @@ def client_portal_dashboard(request):
     client = request.client
     m = request.client_membership
     bq = branch_q_for_membership(m)
-    dettes = (
-        DetteClient.objects.filter(client=client, entreprise_id=m.entreprise_id)
-        .filter(bq)
-        .select_related("devise", "sortie")
-        .order_by("-date_creation")[:100]
-    )
-    dettes_data = [
-        {
-            "id": d.id,
-            "montant_total": str(d.montant_total),
-            "montant_paye": str(d.montant_paye),
-            "solde_restant": str(d.solde_restant),
-            "statut": d.statut,
-            "date_creation": d.date_creation,
-            "devise_sigle": d.devise.sigle if d.devise else None,
-            "sortie_id": d.sortie_id,
-        }
-        for d in dettes
-    ]
     sorties = (
         Sortie.objects.filter(client=client, entreprise_id=m.entreprise_id)
         .filter(bq)
@@ -343,7 +324,6 @@ def client_portal_dashboard(request):
         {
             "client": _client_public_dict(client),
             "contexte": _contexte_dict(m),
-            "dettes": dettes_data,
             "ventes": sorties_data,
             "achats_recents": achats_recents,
             "commandes": commandes_data,

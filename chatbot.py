@@ -456,17 +456,12 @@ Permettre la vente à crédit tout en maîtrisant le recouvrement.
 #### Fonctionnement
 
 - Création d'une sortie avec statut EN_CREDIT.
-- Création automatique d'une DetteClient liée à la sortie.
 - Échéance par défaut : 30 jours après la création.
 - Statuts : EN_COURS, PAYEE, RETARD.
 
 #### Paiements
 | Action | Endpoint |
 | --- | --- |
-| Enregistrer un paiement | POST /api/paiements-dettes/ |
-| Historique paiements | GET /api/dettes/{id}/paiements/ |
-| Reçu JSON | GET /api/paiements-dettes/{id}/recu-json/ |
-| Reçu PDF | GET /api/paiements-dettes/{id}/recu-paiement/ |
 
 Chaque paiement crée un MouvementCaisse ENTREE lié à la dette. Le statut est recalculé automatiquement :
 
@@ -476,10 +471,6 @@ Chaque paiement crée un MouvementCaisse ENTREE lié à la dette. Le statut est 
 #### Filtres dettes
 | Filtre | Endpoint |
 | --- | --- |
-| Dettes en cours | GET /api/dettes/en_cours/ |
-| Dettes en retard | GET /api/dettes/en_retard/ |
-| Dettes payées | GET /api/dettes/payees/ |
-| Total dettes client | GET /api/clients/{id}/total_dettes/ |
 
 #### Avantages
 
@@ -730,7 +721,6 @@ Variables d'environnement : POS_PRINTER_PORT, POS_PRINTER_BACKEND=serial, etc.
 | Chiffre d'affaires / ventes | Rapport ventes, sorties |
 | Stock disponible | /api/stocks/, /api/stocks/stats/ |
 | Total entrées / sorties | Stats entreprise, journal |
-| Dettes en cours | /api/dettes/en_cours/ |
 | Caisse par devise | /api/mouvements-caisse/solde/ |
 | Bénéfice | /api/entrees/benefices-totaux/ |
 | Produits les plus vendus | /api/sorties/produits-plus-vendus/ |
@@ -886,7 +876,6 @@ UHAKIKAAPP expose une API REST complète, conçue pour être consommée par :
 | Catalogue | /api/articles/, /api/unites/, /api/typearticles/ |
 | Stock | /api/stocks/, /api/entrees/, /api/sorties/ |
 | Caisse | /api/mouvements-caisse/, /api/types-caisse/ |
-| Clients & dettes | /api/clients/, /api/dettes/, /api/paiements-dettes/ |
 | Fournisseurs & achats | /api/fournisseurs/, /api/lots/ |
 | Commandes | /api/commandes/ |
 | Rapports | /api/rapports/... |

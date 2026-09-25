@@ -17,7 +17,6 @@ from caisse.services.caisse_defaut import CaisseError, valider_caisse_pour_opera
 from caisse.services.currency_conversion import prepare_caisse_movement
 from stock.services.currency import build_conversion_snapshot, quantize_amount
 from caisse.services.session_caisse import SessionCaisseError, get_session_ouverte_for_caisse
-from stock.models import DetteClient
 
 
 def _merge_details_into_motif(details: List[dict], entreprise_id: int, motif_base: str) -> str:
@@ -177,8 +176,6 @@ def creer_mouvement_caisse(
             motif = f"Vente sortie #{sortie.pk} — {montant}"
         elif entree:
             motif = f"Approvisionnement entrée #{entree.pk} — {montant}"
-        elif content_object is not None and isinstance(content_object, DetteClient):
-            motif = f"Paiement dette #{content_object.pk} — {montant}"
         else:
             motif = f"Mouvement — {montant}"
 
@@ -186,8 +183,6 @@ def creer_mouvement_caisse(
         categorie = "VENTE"
     elif entree and categorie == "AUTRE":
         categorie = "APPROVISIONNEMENT"
-    elif content_object is not None and isinstance(content_object, DetteClient) and categorie == "AUTRE":
-        categorie = "PAIEMENT_DETTE"
     elif type_mouvement == "ENTREE" and categorie == "AUTRE":
         categorie = "ENTREE_MANUELLE"
     elif type_mouvement == "SORTIE" and categorie == "AUTRE":

@@ -46,9 +46,6 @@ REGLES_FONCTIONNALITES: tuple[RegleFonctionnalite, ...] = (
     # Clients
     RegleFonctionnalite(_p(r'^/api/clients'), ECRITURE, 'clients'),
     RegleFonctionnalite(_p(r'^/api/client-entreprises'), ECRITURE, 'clients'),
-    # Dettes
-    RegleFonctionnalite(_p(r'^/api/dettes'), ECRITURE, 'dettes'),
-    RegleFonctionnalite(_p(r'^/api/paiements-dettes'), ECRITURE, 'dettes'),
     # Caisse
     RegleFonctionnalite(_p(r'^/api/caisse'), ECRITURE, 'caisse'),
     RegleFonctionnalite(_p(r'^/api/mouvements-caisse'), ECRITURE, 'caisse'),
@@ -60,13 +57,9 @@ REGLES_FONCTIONNALITES: tuple[RegleFonctionnalite, ...] = (
     # Impression POS
     RegleFonctionnalite(_p(r'^/api/sorties/\d+/facture-pos-print'), ECRITURE, 'impression_pos'),
     RegleFonctionnalite(_p(r'^/api/sorties/\d+/bon-pos-print'), ECRITURE, 'impression_pos'),
-    RegleFonctionnalite(_p(r'^/api/paiements-dettes/\d+/recu-print'), ECRITURE, 'impression_pos'),
-    RegleFonctionnalite(_p(r'^/api/paiements-dettes/recu-groupe-print'), ECRITURE, 'impression_pos'),
     # Rapports avancés (lecture + export)
     RegleFonctionnalite(_p(r'^/api/rapports/bon-achat'), TOUTES, 'rapports_avances', True),
     RegleFonctionnalite(_p(r'^/api/rapports/.+/fiche-stock'), TOUTES, 'rapports_avances', True),
-    RegleFonctionnalite(_p(r'^/api/rapports/clients-dettes-general'), TOUTES, 'rapports_avances', True),
-    RegleFonctionnalite(_p(r'^/api/rapports/clients-dettes'), TOUTES, 'dettes', True),
     RegleFonctionnalite(_p(r'^/api/rapports'), TOUTES, 'rapports_simples', True),
     RegleFonctionnalite(_p(r'^/api/chatbot'), TOUTES, 'chatbot', True),
 )

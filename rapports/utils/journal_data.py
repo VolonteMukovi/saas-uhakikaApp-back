@@ -6,12 +6,11 @@ from __future__ import annotations
 from calendar import monthrange
 from decimal import Decimal, ROUND_DOWN
 
-from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
 from django.utils.translation import gettext as _
 
 from caisse.models import MouvementCaisse
-from stock.models import DetteClient, Entree, Sortie
+from stock.models import Entree, Sortie
 
 
 def _format_amount(amount, devise):
@@ -95,19 +94,6 @@ def build_journal_report_data(
     if date_max:
         qs_caisse = qs_caisse.filter(date__date__lte=date_max)
 
-    ct_dette = ContentType.objects.get_for_model(DetteClient)
-    qs_paiements = MouvementCaisse.objects.filter(
-        entreprise_id=tenant_id,
-        content_type=ct_dette,
-        type='ENTREE',
-    ).select_related('devise', 'content_type')
-    if branch_id is not None:
-        qs_paiements = qs_paiements.filter(succursale_id=branch_id)
-    if date_min:
-        qs_paiements = qs_paiements.filter(date__date__gte=date_min)
-    if date_max:
-        qs_paiements = qs_paiements.filter(date__date__lte=date_max)
-
     events = []
 
     for e in qs_entrees:
@@ -185,27 +171,6 @@ def build_journal_report_data(
             'source_id': mv.id,
         })
 
-    ct_dette_model = ContentType.objects.get_for_model(DetteClient)
-    for p in qs_paiements:
-        dette = None
-        if p.content_type_id == ct_dette_model.id and p.object_id:
-            dette = DetteClient.objects.filter(pk=p.object_id).select_related('client').first()
-        client_nom = (dette.client.nom if dette and dette.client else '')[:40]
-        events.append({
-            'date': p.date.isoformat() if p.date else None,
-            'date_display': p.date.strftime('%Y-%m-%d %H:%M') if p.date else '',
-            'type': 'PAIEMENT_DETTE',
-            'type_display': str(_('Paiement dette')),
-            'designation': f"{_('Paiement dette')} - {client_nom}".strip()[:80],
-            'montant_texte': _format_amount(p.montant, p.devise),
-            'montant': str(p.montant) if p.montant is not None else '0',
-            'devise_sigle': p.devise.sigle if p.devise else None,
-            'ref': p.reference_piece or f"Paiement#{p.id}",
-            'source_id': p.id,
-            'client': client_nom,
-            'dette_id': dette.pk if dette else None,
-        })
-
     events.sort(key=lambda x: x.get('date') or '')
 
     resume = {
@@ -214,7 +179,6 @@ def build_journal_report_data(
         'ventes': sum(1 for e in events if e.get('type') == 'VENTE'),
         'caisse_entrees': sum(1 for e in events if e.get('type') == 'CAISSE_ENTREE'),
         'caisse_sorties': sum(1 for e in events if e.get('type') == 'CAISSE_SORTIE'),
-        'paiements_dettes': sum(1 for e in events if e.get('type') == 'PAIEMENT_DETTE'),
     }
 
     return {

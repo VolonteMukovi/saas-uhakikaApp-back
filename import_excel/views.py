@@ -1177,24 +1177,14 @@ def import_sortie(request):
     if not lignes:
         return JsonResponse({'error': 'Aucune ligne de sortie valide dans le fichier.'}, status=400)
 
-    # Vente en crédit (dette) : le client est obligatoire
+    # Ventes à crédit temporairement désactivées
     if statut_global == 'EN_CREDIT':
-        if not client_id_global:
-            return JsonResponse({
-                'error': 'Pour une vente en crédit (statut EN_CREDIT), le client_id est obligatoire. Renseignez la colonne client_id sur la première ligne de la feuille Sortie.'
-            }, status=400)
-        try:
-            client_obj = Client.objects.get(id=client_id_global)
-        except Client.DoesNotExist:
-            return JsonResponse({
-                'error': f'Client avec ID "{client_id_global}" introuvable. Vente en crédit impossible.'
-            }, status=400)
+        return JsonResponse({
+            'error': 'Les ventes à crédit (EN_CREDIT) sont temporairement désactivées. Utilisez le statut PAYEE.',
+        }, status=400)
 
     # Appeler la même logique que SortieViewSet.create (FIFO, LigneSortieLot, Stock, MouvementCaisse)
-    from rest_framework.request import Request
     from stock.views import SortieViewSet
-    from stock.models import Sortie as SortieModel, DetteClient
-    from decimal import Decimal
 
     payload = {
         'motif': motif_global,
@@ -1222,19 +1212,5 @@ def import_sortie(request):
             return JsonResponse({'error': 'Création sortie refusée.', 'details': err_detail}, status=400)
         except Exception:
             return JsonResponse({'error': 'Création sortie refusée.'}, status=400)
-
-    # Si vente en crédit : créer la DetteClient (une dette par sortie)
-    if statut_global == 'EN_CREDIT' and client_id_global:
-        sortie_id = response.data.get('id')
-        sortie = SortieModel.objects.filter(pk=sortie_id).select_related('client').prefetch_related('lignes').first()
-        if sortie and not DetteClient.objects.filter(sortie=sortie).exists():
-            from stock.services.credit_sale_debt import create_dette_for_credit_sortie
-            try:
-                create_dette_for_credit_sortie(sortie, raise_if_exists=False)
-            except ValueError as exc:
-                return JsonResponse(
-                    {'error': 'Création dette refusée.', 'details': str(exc)},
-                    status=400,
-                )
 
     return JsonResponse(response.data, status=201)

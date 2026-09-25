@@ -9,7 +9,7 @@ from .client_auth_views import (
 )
 from .client_portal_articles import client_portal_articles_search
 from .client_portal_achats_views import ClientPortalAchatsViewSet
-from .client_portal_viewsets import ClientPortalDetteViewSet, ClientPortalSortieViewSet
+from .client_portal_viewsets import ClientPortalSortieViewSet
 from .commande_views import CommandeViewSet
 from .views import FournisseurViewSet, LotViewSet, FraisLotViewSet, LotItemViewSet
 
@@ -19,7 +19,6 @@ router.register(r"lots", LotViewSet)
 router.register(r"frais-lots", FraisLotViewSet, basename="frais-lot")
 router.register(r"lot-items", LotItemViewSet, basename="lot-item")
 router.register(r"commandes", CommandeViewSet, basename="commande")
-router.register(r"client-portal/dettes", ClientPortalDetteViewSet, basename="client-portal-dette")
 router.register(r"client-portal/ventes", ClientPortalSortieViewSet, basename="client-portal-vente")
 router.register(r"client-portal/achats", ClientPortalAchatsViewSet, basename="client-portal-achat")
 

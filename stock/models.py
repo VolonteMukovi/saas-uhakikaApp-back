@@ -3,10 +3,6 @@ import uuid
 from django.db import models
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, is_password_usable, make_password
-from django.contrib.contenttypes.fields import GenericForeignKey
-from django.contrib.contenttypes.models import ContentType
-from django.db.models import Sum, F, OuterRef, Subquery, DecimalField, Value
-from django.db.models.functions import Coalesce
 from django.utils import timezone
 from decimal import Decimal
 # Modèle Entreprise
@@ -558,7 +554,7 @@ class ClientEntreprise(models.Model):
     is_special = models.BooleanField(
         default=False,
         verbose_name="Client spécial",
-        help_text="Priorité dans les rapports (dettes, etc.) pour ce client dans cette entreprise.",
+        help_text="Priorité dans les rapports pour ce client dans cette entreprise.",
     )
 
     class Meta:
@@ -571,114 +567,6 @@ class ClientEntreprise(models.Model):
 
     def __str__(self) -> str:
         return f"{self.client_id} @ {self.entreprise_id}"
-
-
-class DetteClientQuerySet(models.QuerySet):
-    """Annotations pour filtres / rapports (montants depuis MouvementCaisse)."""
-
-    def with_paiements_aggregate(self):
-        from caisse.models import MouvementCaisse
-
-        ct = ContentType.objects.get_for_model(DetteClient)
-        paye_sq = (
-            MouvementCaisse.objects.filter(
-                content_type=ct,
-                object_id=OuterRef('pk'),
-                type='ENTREE',
-            )
-            .values('object_id')
-            .annotate(
-                total=Sum(
-                    Coalesce(
-                        F('montant_applique'),
-                        F('montant'),
-                        output_field=DecimalField(max_digits=14, decimal_places=5),
-                    )
-                )
-            )
-            .values('total')[:1]
-        )
-        return self.annotate(
-            montant_paye_agg=Coalesce(
-                Subquery(paye_sq, output_field=DecimalField(max_digits=14, decimal_places=5)),
-                Value(Decimal('0.00')),
-            ),
-            solde_restant_agg=F('montant_total') - F('montant_paye_agg'),
-        )
-
-
-class DetteClient(models.Model):
-    client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='dettes')
-    sortie = models.OneToOneField('Sortie', on_delete=models.CASCADE, related_name='dette')
-    montant_total = models.DecimalField(max_digits=12, decimal_places=5)
-    devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='dettes', null=True, blank=True)
-    devise_reference = models.ForeignKey(
-        'Devise',
-        on_delete=models.PROTECT,
-        related_name='dettes_reference',
-        null=True,
-        blank=True,
-    )
-    taux_change = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
-    montant_reference = models.DecimalField(max_digits=14, decimal_places=5, default=Decimal('0'))
-    date_creation = models.DateTimeField(auto_now_add=True)
-    date_echeance = models.DateField(blank=True, null=True, help_text="Date limite de paiement")
-    statut = models.CharField(
-        max_length=20,
-        choices=[
-            ('EN_COURS', 'En cours'),
-            ('PAYEE', 'Payée'),
-            ('RETARD', 'En retard')
-        ],
-        default='EN_COURS'
-    )
-    commentaire = models.TextField(blank=True, null=True)
-    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='dettes_clients', null=True, blank=True)
-    succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='dettes_clients', null=True, blank=True)
-
-    objects = DetteClientQuerySet.as_manager()
-
-    class Meta:
-        ordering = ['-date_creation']
-        verbose_name = "Dette client"
-        verbose_name_plural = "Dettes clients"
-        indexes = [
-            models.Index(fields=['entreprise_id']),
-            models.Index(fields=['entreprise_id', 'succursale_id']),
-        ]
-
-    def __str__(self):
-        return f"Dette {self.client.nom} - {self.montant_total}{self.devise.sigle if self.devise else ''}"
-
-    def save(self, *args, **kwargs):
-        if not self.date_echeance:
-            from datetime import timedelta
-            self.date_echeance = timezone.now().date() + timedelta(days=30)
-        super().save(*args, **kwargs)
-
-    def _paiements_mouvements_qs(self):
-        from caisse.models import MouvementCaisse
-
-        ct = ContentType.objects.get_for_model(DetteClient)
-        return MouvementCaisse.objects.filter(
-            content_type=ct,
-            object_id=self.pk,
-            type='ENTREE',
-        )
-
-    @property
-    def montant_paye(self) -> Decimal:
-        total = Decimal('0.00')
-        for mv in self._paiements_mouvements_qs():
-            if mv.montant_applique is not None:
-                total += mv.montant_applique
-            else:
-                total += mv.montant or Decimal('0.00')
-        return total
-
-    @property
-    def solde_restant(self) -> Decimal:
-        return (self.montant_total or Decimal('0.00')) - self.montant_paye
 
 
 class LigneSortie(models.Model):

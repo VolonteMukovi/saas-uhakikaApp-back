@@ -168,24 +168,3 @@ def prepare_caisse_movement(
         taux_reference=snapshot['taux_change'],
         montant_reference=snapshot['montant_reference'],
     )
-
-
-def payment_equivalent_in_dette_currency(
-    montant_paye,
-    devise_paiement: Devise,
-    dette_devise: Devise,
-    *,
-    entreprise_id: int,
-    date_operation=None,
-    explicit_rate: Decimal | None = None,
-) -> tuple[Decimal, Decimal]:
-    """Montant du paiement exprimé dans la devise de la dette + taux utilisé."""
-    equivalent, rate, _ = convert_between_devises(
-        montant_paye,
-        devise_paiement,
-        dette_devise,
-        entreprise_id=entreprise_id,
-        date_operation=date_operation,
-        explicit_rate=explicit_rate,
-    )
-    return equivalent, rate

@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from chatbot.context import ChatbotContext
 from chatbot.services.intent_classifier import IntentResult
-from stock.models import Article, DetteClient, Entree, LigneEntree, LigneSortie, Sortie, Stock
+from stock.models import Article, Entree, LigneEntree, LigneSortie, Sortie, Stock
 from stock.services.stock_stats import (
     aggregate_stock_stats,
     list_articles_expiration_dans_fenetre,
@@ -112,31 +112,12 @@ def _client_sales_summary(ctx: ChatbotContext, client_id: int, period: str = 'al
 
 
 def _client_debts_summary(ctx: ChatbotContext, client_id: int) -> dict:
-    dettes = (
-        DetteClient.objects.filter(entreprise_id=ctx.tenant_id, client_id=client_id)
-        .exclude(statut='PAYEE')
-        .with_paiements_aggregate()
-        .filter(solde_restant_agg__gt=0)
-        .select_related('devise')
-    )
-    if ctx.branch_id is not None:
-        dettes = dettes.filter(succursale_id=ctx.branch_id)
-    total = dettes.aggregate(t=Coalesce(Sum('solde_restant_agg'), Decimal('0')))['t']
-    items = []
-    for d in dettes[:10]:
-        items.append({
-            'solde': _money(getattr(d, 'solde_restant_agg', 0)),
-            'statut': d.statut,
-            'devise': d.devise.sigle if d.devise else '',
-            'montant_total': _money(d.montant_total),
-        })
+    """Dettes retirées — résumé vide (compat intents chatbot)."""
     return {
-        'nombre_dettes': dettes.count(),
-        'solde_restant': _money(total),
-        'dettes': items,
-        'statut': 'retard' if dettes.filter(statut='RETARD').exists() else (
-            'dette en cours' if dettes.exists() else 'à jour'
-        ),
+        'nombre_dettes': 0,
+        'solde_restant': _money(Decimal('0')),
+        'dettes': [],
+        'statut': 'à jour',
     }
 
 
@@ -397,32 +378,13 @@ def fetch_dettes_data(ctx: ChatbotContext, intent_result: IntentResult) -> dict:
             return {'mode': 'ambiguous', 'clients_candidats': matches, 'hint': hint}
         return {'mode': 'not_found', 'hint': hint, 'clients_candidats': []}
 
-    dettes = (
-        DetteClient.objects.filter(entreprise_id=ctx.tenant_id)
-        .exclude(statut='PAYEE')
-        .with_paiements_aggregate()
-        .filter(solde_restant_agg__gt=0)
-        .select_related('client', 'devise')
-    )
-    if ctx.branch_id is not None:
-        dettes = dettes.filter(succursale_id=ctx.branch_id)
-    total_solde = dettes.aggregate(t=Coalesce(Sum('solde_restant_agg'), Decimal('0')))['t']
-    clients_dette = [
-        {
-            'id': d.client_id,
-            'nom': d.client.nom,
-            'solde': _money(d.solde_restant_agg),
-            'devise': d.devise.sigle if d.devise else '',
-            'statut': d.statut,
-        }
-        for d in dettes.order_by('-solde_restant_agg')[:15]
-    ]
     return {
         'mode': 'global',
-        'nombre_dettes_en_cours': dettes.count(),
-        'nombre_en_retard': dettes.filter(statut='RETARD').count(),
-        'solde_total': _money(total_solde),
-        'principaux_debiteurs': clients_dette,
+        'nombre_dettes_en_cours': 0,
+        'nombre_en_retard': 0,
+        'solde_total': _money(Decimal('0')),
+        'principaux_debiteurs': [],
+        'message': 'Le suivi des dettes clients a été retiré.',
     }
 
 

@@ -46,7 +46,7 @@ def _fonctionnalites_essai_complet():
         'vente_comptant': True,
         'vente_credit': True,
         'clients': True,
-        'dettes': True,
+        'dettes': False,
         'caisse': True,
         'rapports_simples': True,
         'rapports_avances': True,

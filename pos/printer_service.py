@@ -371,72 +371,6 @@ class MP2258Printer:
             p.text("\n\n")
         return True
 
-    def build_recu_paiement_dette_ticket_lines(
-        self,
-        paiement,
-        dette,
-        entreprise,
-        user,
-        *,
-        moyen: str | None = None,
-        ancien_solde=None,
-    ) -> list[str]:
-        """
-        Reçu paiement dette/crédit — même disposition monospace que la facture de vente.
-        """
-        cpl = max(16, int(self.cfg.chars_per_line))
-        lines: list[str] = []
-        self._append_entreprise_header(lines, entreprise, "RECU PAIEMENT DETTE")
-
-        client = getattr(dette, "client", None)
-        client_name = getattr(client, "nom", None) or "Client inconnu"
-        devise = getattr(paiement, "devise", None) or getattr(dette, "devise", None)
-        currency = _currency_label(devise)
-
-        pay_dt = getattr(paiement, "date", None) or timezone.now()
-        montant_paye = Decimal(str(getattr(paiement, "montant", 0) or 0))
-        nouveau_solde = Decimal(str(getattr(dette, "solde_restant", 0) or 0))
-        if ancien_solde is None:
-            ancien_solde = (montant_paye + nouveau_solde).quantize(Decimal("0.00001"), rounding=ROUND_DOWN)
-        else:
-            ancien_solde = Decimal(str(ancien_solde or 0))
-
-        montant_total_dette = Decimal(str(getattr(dette, "montant_total", 0) or 0))
-        ref = (getattr(paiement, "reference_piece", None) or "").strip()
-
-        lines.append(f"Ndeg: RECU-{int(paiement.pk):06d}\n")
-        lines.append(f"Date: {pay_dt.strftime('%d/%m/%Y %H:%M')}\n")
-        lines.append(f"Client: {client_name}\n")
-        lines.append(f"Dette #: {dette.pk}\n")
-        if ref:
-            lines.append(f"Ref: {ref}\n")
-        if currency:
-            lines.append(f"Devise: {currency}\n")
-        if moyen:
-            lines.append(f"Moyen: {moyen}\n")
-        lines.append("\n")
-
-        cur_suffix = f" {currency}" if currency else ""
-        lines.append(f"Montant dette: {_fmt_money(montant_total_dette)}{cur_suffix}\n")
-        lines.append(f"Montant paye: {_fmt_money(montant_paye)}{cur_suffix}\n")
-        lines.append(f"Ancien solde: {_fmt_money(ancien_solde)}{cur_suffix}\n")
-        lines.append(f"Nouveau solde: {_fmt_money(nouveau_solde)}{cur_suffix}\n")
-        lines.append("\n")
-        lines.append("Paiement dette / credit client\n")
-        lines.append("\n")
-
-        caissier = getattr(paiement, "utilisateur", None) or user
-        printed_by = (
-            (getattr(caissier, "get_full_name", lambda: "")() or getattr(caissier, "username", ""))
-            if caissier
-            else ""
-        ).strip()
-        printed_by = _name_with_initial_upper(printed_by)
-        if printed_by:
-            lines.append(f"Caissier: {printed_by}\n")
-        lines.append(timezone.now().strftime("%d/%m/%Y %H:%M") + "\n")
-        lines.append("\n")
-        return lines
 
     def build_recu_paiement_groupe_ticket_lines(
         self,
@@ -496,20 +430,6 @@ class MP2258Printer:
         lines.append("\n")
         return lines
 
-    def print_recu_paiement_dette(
-        self,
-        paiement,
-        dette,
-        entreprise,
-        user,
-        *,
-        moyen: str | None = None,
-        ancien_solde=None,
-    ) -> bool:
-        lines = self.build_recu_paiement_dette_ticket_lines(
-            paiement, dette, entreprise, user, moyen=moyen, ancien_solde=ancien_solde,
-        )
-        return self._print_ticket_lines(lines)
 
     def print_recu_paiement_groupe(
         self,

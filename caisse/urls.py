@@ -8,12 +8,11 @@ from caisse.report_views import (
 )
 from caisse.session_active_views import SessionActiveAPIView
 from caisse.session_views import SessionCaisseViewSet
-from caisse.views import MouvementCaisseViewSet, PaiementDetteViewSet, TypeCaisseViewSet
+from caisse.views import MouvementCaisseViewSet, TypeCaisseViewSet
 
 router = routers.DefaultRouter()
 router.register(r'mouvements-caisse', MouvementCaisseViewSet)
 router.register(r'types-caisse', TypeCaisseViewSet)
-router.register(r'paiements-dettes', PaiementDetteViewSet, basename='paiementdette')
 router.register(r'sessions-caisse', SessionCaisseViewSet, basename='session-caisse')
 
 caisse_router = routers.DefaultRouter()

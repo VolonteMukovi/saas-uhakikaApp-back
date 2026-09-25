@@ -131,3 +131,5 @@ docs/_build/
 # =============================================================================
 docker-compose.override.yml
 .dockerignore
+
+media/

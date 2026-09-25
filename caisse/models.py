@@ -139,7 +139,6 @@ class MouvementCaisse(models.Model):
     TYPE_CHOICES = [('ENTREE', 'Entrée'), ('SORTIE', 'Sortie')]
     CATEGORIE_CHOICES = [
         ('VENTE', 'Vente comptant'),
-        ('PAIEMENT_DETTE', 'Paiement dette client'),
         ('APPROVISIONNEMENT', 'Approvisionnement payé cash'),
         ('DEPENSE', 'Dépense'),
         ('ENTREE_MANUELLE', 'Entrée manuelle'),
@@ -180,7 +179,7 @@ class MouvementCaisse(models.Model):
     date_taux = models.DateTimeField(null=True, blank=True, help_text='Date du taux utilisé pour la conversion caisse.')
     montant_applique = models.DecimalField(
         max_digits=14, decimal_places=5, null=True, blank=True,
-        help_text='Montant imputé sur l\'objet lié (ex. dette) dans la devise métier de cet objet.',
+        help_text='Montant imputé sur l\'objet lié dans la devise métier de cet objet.',
     )
     devise_applique = models.ForeignKey(
         'stock.Devise',
