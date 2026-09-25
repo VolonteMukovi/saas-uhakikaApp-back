@@ -192,12 +192,9 @@ def update_sortie_from_payload(
             sortie.client = None
 
     new_statut = data.get('statut', sortie.statut)
-    if new_statut == 'EN_CREDIT':
+    if new_statut == 'EN_CREDIT' and not sortie.client_id:
         raise serializers.ValidationError({
-            'statut': _(
-                'Les ventes à crédit (EN_CREDIT) sont temporairement désactivées. '
-                'Utilisez le statut PAYEE (vente au comptant).'
-            ),
+            'client': _('Un client est obligatoire pour une vente à crédit.'),
         })
     sortie.statut = new_statut
     sortie.save()
@@ -229,4 +226,8 @@ def update_sortie_from_payload(
         old_statut=old_statut,
         new_statut=new_statut,
     )
+
+    from stock.services.dettes_clients import synchroniser_dette_sortie
+    synchroniser_dette_sortie(sortie)
+
     return sortie

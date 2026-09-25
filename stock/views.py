@@ -28,6 +28,8 @@ from .models import (
     BeneficeLot,
     Client,
     ClientEntreprise,
+    DettesClients,
+    PaiementDettesClients,
 )
 from caisse.models import MouvementCaisse
 from caisse.services.caisse import creer_mouvement_caisse, mouvement_moyen_affiche
@@ -764,12 +766,9 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         if not tenant_id:
             raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
         statut_demande = serializer.validated_data.get('statut', 'PAYEE')
-        if str(statut_demande).upper() == 'EN_CREDIT':
+        if str(statut_demande).upper() == 'EN_CREDIT' and not serializer.validated_data.get('client'):
             raise serializers.ValidationError({
-                'statut': (
-                    'Les ventes à crédit (EN_CREDIT) sont temporairement désactivées. '
-                    'Utilisez le statut PAYEE.'
-                ),
+                'client': 'Un client est obligatoire pour une vente à crédit.',
             })
         from abonnements.services.limites import verifier_vente_sortie
         verifier_vente_sortie(tenant_id, statut_demande, request)
@@ -1039,11 +1038,13 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
 
             if sortie.statut == 'EN_CREDIT':
                 from stock.services.sortie_devise import resolve_sortie_primary_devise
+                from stock.services.dettes_clients import creer_dette_pour_sortie_credit
 
                 primary_dev = resolve_sortie_primary_devise(sortie, default_devise=default_dev)
                 if primary_dev and not sortie.devise_id:
                     sortie.devise = primary_dev
                     sortie.save(update_fields=['devise'])
+                creer_dette_pour_sortie_credit(sortie)
 
         return Response(self.get_serializer(sortie).data, status=status.HTTP_201_CREATED)
     
@@ -3226,6 +3227,26 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         except ValueError as exc:
             return None, Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
+    @swagger_auto_schema(
+        operation_summary='Détail client — achats & dette (simplifié)',
+        operation_description=(
+            "Retourne uniquement : `nombre_achats`, `total_achete`, `dette_restante`, "
+            "`produits_achetes`.\n\n"
+            "- **Achats** = sorties `PAYEE` + `EN_CREDIT` (jamais les paiements de dettes).\n"
+            "- **total_achete** = Σ (quantité × prix_unitaire) des LigneSortie.\n"
+            "- **dette_restante** = Σ `DettesClients.reste` (filtre sur la date de dette).\n"
+            "- Filtres : `date_debut`, `date_fin` (YYYY-MM-DD). Sans filtre = toute la période."
+        ),
+        manual_parameters=[
+            openapi.Parameter(
+                'date_debut', openapi.IN_QUERY, type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE,
+            ),
+            openapi.Parameter(
+                'date_fin', openapi.IN_QUERY, type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE,
+            ),
+        ],
+        tags=['Clients — détail'],
+    )
     @action(detail=True, methods=['get'], url_path='dashboard')
     def dashboard(self, request, pk=None):
         client = self.get_object()
@@ -3241,6 +3262,14 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         )
         return Response(payload)
 
+    @swagger_auto_schema(
+        operation_summary='Alias du dashboard client simplifié',
+        tags=['Clients — détail'],
+        manual_parameters=[
+            openapi.Parameter('date_debut', openapi.IN_QUERY, type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE),
+            openapi.Parameter('date_fin', openapi.IN_QUERY, type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE),
+        ],
+    )
     @action(detail=True, methods=['get'], url_path='statistiques')
     def statistiques(self, request, pk=None):
         client = self.get_object()
@@ -3256,6 +3285,14 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         )
         return Response(payload)
 
+    @swagger_auto_schema(
+        operation_summary='Dette restante du client (DettesClients.reste)',
+        tags=['Clients — détail'],
+        manual_parameters=[
+            openapi.Parameter('date_debut', openapi.IN_QUERY, type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE),
+            openapi.Parameter('date_fin', openapi.IN_QUERY, type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE),
+        ],
+    )
     @action(detail=True, methods=['get'], url_path='solde')
     def solde(self, request, pk=None):
         client = self.get_object()
@@ -3345,6 +3382,21 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         )
         return Response({'count': len(data), 'results': data})
 
+    @swagger_auto_schema(
+        operation_summary='Produits achetés du client (paginé)',
+        operation_description=(
+            "Remplace l'ancien journal débit/crédit/solde.\n\n"
+            "Retourne les lignes produit des sorties (même source que "
+            "`dashboard.produits_achetes`). Les paiements de dettes sont exclus."
+        ),
+        manual_parameters=[
+            openapi.Parameter('date_debut', openapi.IN_QUERY, type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE),
+            openapi.Parameter('date_fin', openapi.IN_QUERY, type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE),
+            openapi.Parameter('page', openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+            openapi.Parameter('page_size', openapi.IN_QUERY, type=openapi.TYPE_INTEGER),
+        ],
+        tags=['Clients — détail'],
+    )
     @action(detail=True, methods=['get'], url_path='mouvements')
     def mouvements(self, request, pk=None):
         client = self.get_object()
@@ -3352,16 +3404,16 @@ class ClientViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         if error_response is not None:
             return error_response
         tenant_id, branch_id = _get_tenant_ids(request)
-        movements = build_client_movements(
+        products = build_client_movements(
             client=client,
             entreprise_id=tenant_id,
             succursale_id=branch_id,
             period=period,
         )
-        page = self.paginate_queryset(movements)
+        page = self.paginate_queryset(products)
         if page is not None:
             return self.get_paginated_response(page)
-        return Response(movements)
+        return Response(products)
 
 class ClientEntrepriseViewSet(BusinessPermissionMixin, viewsets.ReadOnlyModelViewSet):
     """Lecture des associations `Client â†” Entreprise` (multi-tenant, succursale optionnelle)."""
@@ -3440,3 +3492,198 @@ class ClientEntrepriseViewSet(BusinessPermissionMixin, viewsets.ReadOnlyModelVie
                 pass
 
         return qs
+
+
+_DETTE_DATE_PARAMS = [
+    openapi.Parameter(
+        'date_debut', openapi.IN_QUERY, type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE,
+        description='Filtrer les dettes à partir de cette date (YYYY-MM-DD).',
+    ),
+    openapi.Parameter(
+        'date_fin', openapi.IN_QUERY, type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE,
+        description='Filtrer les dettes jusqu’à cette date (YYYY-MM-DD).',
+    ),
+    openapi.Parameter(
+        'status', openapi.IN_QUERY, type=openapi.TYPE_STRING, enum=['ENCOURS', 'TERMINE'],
+        description='Filtrer par statut.',
+    ),
+    openapi.Parameter(
+        'client_id', openapi.IN_QUERY, type=openapi.TYPE_STRING,
+        description='Filtrer par client (id string, ex. CLI0001).',
+    ),
+]
+
+
+@swagger_auto_schema(tags=['Dettes clients'])
+class DettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ReadOnlyModelViewSet):
+    """
+    Dettes clients (lecture seule).
+
+    Création automatique lors d'une sortie `EN_CREDIT`.
+    Paiements via `POST /api/paiements-dettes-clients/` (+ `Idempotency-Key`).
+    """
+
+    queryset = DettesClients.objects.select_related('sortie', 'sortie__client').all()
+    serializer_class = DettesClientsSerializer
+    tenant_lookup = 'sortie__entreprise_id'
+    ordering = ('-date', '-id')
+
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return DettesClientsSerializer
+        return DettesClientsListSerializer
+
+    def get_queryset(self):
+        from stock.services.dettes_clients import filter_dettes_qs
+
+        qs = super().get_queryset()
+        if self.action in ('list', 'retrieve'):
+            qs = qs.prefetch_related(
+                'sortie__lignes__devise',
+            )
+        if self.action == 'retrieve':
+            qs = qs.prefetch_related(
+                'paiements',
+                'sortie__lignes__article',
+            )
+        p = self.request.query_params
+        return filter_dettes_qs(
+            qs,
+            date_debut=p.get('date_debut'),
+            date_fin=p.get('date_fin'),
+            status=p.get('status'),
+            client_id=p.get('client_id'),
+        )
+
+    @swagger_auto_schema(
+        operation_summary='Liste des dettes clients (légère)',
+        manual_parameters=_DETTE_DATE_PARAMS + [
+            openapi.Parameter(
+                'cursor', openapi.IN_QUERY, type=openapi.TYPE_STRING,
+                description='Pagination curseur (CURSOR.md). Alternative : page / page_size.',
+            ),
+            openapi.Parameter(
+                'page', openapi.IN_QUERY, type=openapi.TYPE_INTEGER,
+                description='Pagination page (compatibilité).',
+            ),
+            openapi.Parameter(
+                'page_size', openapi.IN_QUERY, type=openapi.TYPE_INTEGER,
+                description='Taille de page (max 200).',
+            ),
+        ],
+        tags=['Dettes clients'],
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    @swagger_auto_schema(
+        operation_summary='Détail d’une dette (articles + paiements)',
+        tags=['Dettes clients'],
+    )
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+
+    @swagger_auto_schema(
+        operation_summary='Total général des restes dus',
+        manual_parameters=_DETTE_DATE_PARAMS,
+        tags=['Dettes clients'],
+        responses={200: openapi.Response('Totaux', schema=openapi.Schema(type=openapi.TYPE_OBJECT))},
+    )
+    @action(detail=False, methods=['get'], url_path='totaux')
+    def totaux(self, request):
+        from stock.services.dettes_clients import totaux_resume
+
+        return Response(totaux_resume(self.get_queryset()))
+
+    @swagger_auto_schema(
+        operation_summary='Reste dû regroupé par client',
+        manual_parameters=_DETTE_DATE_PARAMS,
+        tags=['Dettes clients'],
+        responses={200: openapi.Response('Par client', schema=openapi.Schema(type=openapi.TYPE_OBJECT))},
+    )
+    @action(detail=False, methods=['get'], url_path='par-clients')
+    def par_clients(self, request):
+        from stock.services.dettes_clients import totaux_par_client
+
+        qs = self.get_queryset()
+        clients, total_all = totaux_par_client(qs, only_positif=True)
+        page = self.paginate_queryset(clients)
+        payload = {
+            'clients': page if page is not None else clients,
+            'total_reste': f'{total_all:.5f}',
+        }
+        if page is not None:
+            resp = self.get_paginated_response(page)
+            # Conserver total_reste global hors page
+            data = resp.data
+            if isinstance(data, dict):
+                data['total_reste'] = payload['total_reste']
+                # Alias lisible côté FE (clients == results)
+                if 'results' in data and 'clients' not in data:
+                    data['clients'] = data['results']
+            return resp
+        return Response(payload)
+
+
+@swagger_auto_schema(tags=['Paiements dettes clients'])
+class PaiementDettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+    """
+    Paiements (partiels ou totaux) sur une DettesClients.
+
+    POST critique : envoyer `Idempotency-Key` (CURSOR.md).
+    Méthodes : list, retrieve, create.
+    """
+
+    queryset = PaiementDettesClients.objects.select_related(
+        'dettes_clients',
+        'dettes_clients__sortie',
+        'dettes_clients__sortie__client',
+    ).all()
+    serializer_class = PaiementDettesClientsSerializer
+    tenant_lookup = 'dettes_clients__sortie__entreprise_id'
+    http_method_names = ['get', 'post', 'head', 'options']
+    ordering = ('-id',)
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        dette_id = self.request.query_params.get('dettes_clients') or self.request.query_params.get('dette_id')
+        if dette_id:
+            qs = qs.filter(dettes_clients_id=dette_id)
+        date_debut = self.request.query_params.get('date_debut')
+        date_fin = self.request.query_params.get('date_fin')
+        if date_debut:
+            qs = qs.filter(date__gte=date_debut)
+        if date_fin:
+            qs = qs.filter(date__lte=date_fin)
+        return qs
+
+    def get_serializer(self, *args, **kwargs):
+        serializer = super().get_serializer(*args, **kwargs)
+        if hasattr(serializer, 'fields') and 'dettes_clients' in serializer.fields:
+            tenant_id, _ = _get_tenant_ids(self.request)
+            if tenant_id is not None:
+                serializer.fields['dettes_clients'].queryset = DettesClients.objects.filter(
+                    sortie__entreprise_id=tenant_id,
+                )
+        return serializer
+
+    @swagger_auto_schema(
+        operation_summary='Enregistrer un paiement (partiel ou total)',
+        operation_description=(
+            'Écriture critique : envoyer l’en-tête `Idempotency-Key` (UUID). '
+            'La réponse inclut `dette` (paye / reste / status) à jour.'
+        ),
+        request_body=PaiementDettesClientsSerializer,
+        tags=['Paiements dettes clients'],
+        manual_parameters=[
+            openapi.Parameter(
+                'Idempotency-Key',
+                openapi.IN_HEADER,
+                type=openapi.TYPE_STRING,
+                required=False,
+                description='UUID unique pour éviter les doubles paiements (CURSOR.md).',
+            ),
+        ],
+    )
+    def create(self, request, *args, **kwargs):
+        return super().create(request, *args, **kwargs)

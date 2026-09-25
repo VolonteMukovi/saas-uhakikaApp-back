@@ -20,6 +20,8 @@ from .models import (
     BeneficeLot,
     Client,
     ClientEntreprise,
+    DettesClients,
+    PaiementDettesClients,
 )
 from django.db import transaction, models
 from django.utils import timezone
@@ -1229,6 +1231,132 @@ class EntreeSerializer(serializers.ModelSerializer):
         return update_entree_from_payload(instance, data)
 
 
+
+
+class PaiementDettesClientsNestedSerializer(serializers.ModelSerializer):
+    """Historique compact (sans snapshot dette — déjà sur la fiche parent)."""
+
+    class Meta:
+        model = PaiementDettesClients
+        fields = ['id', 'dettes_clients', 'montant', 'date', 'created_at']
+        read_only_fields = fields
+
+
+class PaiementDettesClientsSerializer(serializers.ModelSerializer):
+    date = serializers.DateField(required=False)
+    dette = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = PaiementDettesClients
+        fields = ['id', 'dettes_clients', 'montant', 'date', 'created_at', 'dette']
+        read_only_fields = ['id', 'created_at', 'dette']
+
+    def validate_montant(self, value):
+        if value is None or Decimal(str(value)) <= 0:
+            raise serializers.ValidationError('Le montant du paiement doit être supérieur à 0.')
+        return value
+
+    def get_dette(self, obj):
+        d = obj.dettes_clients
+        if d is None:
+            return None
+        return {
+            'id': d.pk,
+            'montant': d.montant,
+            'paye': d.paye,
+            'reste': d.reste,
+            'status': d.status,
+            'updated_at': d.updated_at.isoformat() if getattr(d, 'updated_at', None) else None,
+        }
+
+    def create(self, validated_data):
+        from stock.services.dettes_clients import enregistrer_paiement
+
+        return enregistrer_paiement(
+            validated_data['dettes_clients'],
+            montant=validated_data['montant'],
+            date_paiement=validated_data.get('date'),
+        )
+
+
+def _devise_sigle_from_sortie(sortie) -> str | None:
+    if not sortie or not getattr(sortie, 'pk', None):
+        return None
+    sigles: set[str] = set()
+    for ligne in sortie.lignes.all():
+        dev = getattr(ligne, 'devise', None)
+        sigle = getattr(dev, 'sigle', None) if dev else None
+        if sigle:
+            sigles.add(str(sigle))
+    if not sigles:
+        return None
+    if len(sigles) == 1:
+        return next(iter(sigles))
+    return next(iter(sorted(sigles)))
+
+
+class DettesClientsListSerializer(serializers.ModelSerializer):
+    """Liste légère — sans articles ni historique paiements."""
+
+    client_id = serializers.CharField(source='sortie.client_id', read_only=True, allow_null=True)
+    client_nom = serializers.CharField(source='sortie.client.nom', read_only=True, default=None)
+    sortie_id = serializers.IntegerField(source='sortie.id', read_only=True)
+    devise_sigle = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DettesClients
+        fields = [
+            'id',
+            'sortie_id',
+            'client_id',
+            'client_nom',
+            'date',
+            'montant',
+            'paye',
+            'reste',
+            'status',
+            'devise_sigle',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_devise_sigle(self, obj):
+        sortie = getattr(obj, 'sortie', None)
+        return _devise_sigle_from_sortie(sortie)
+
+
+class DettesClientsSerializer(DettesClientsListSerializer):
+    """Détail — articles achetés + paiements."""
+
+    articles = serializers.SerializerMethodField()
+    paiements = PaiementDettesClientsNestedSerializer(many=True, read_only=True)
+
+    class Meta(DettesClientsListSerializer.Meta):
+        fields = DettesClientsListSerializer.Meta.fields + [
+            'articles',
+            'paiements',
+        ]
+
+    def get_articles(self, obj):
+        rows = []
+        lignes = obj.sortie.lignes.all() if obj.sortie_id else []
+        for ligne in lignes:
+            article = ligne.article
+            nom = ''
+            if article:
+                nom = article.nom_commercial or article.nom_scientifique or str(article.pk)
+            qte = Decimal(str(ligne.quantite or 0))
+            pu = Decimal(str(ligne.prix_unitaire or 0))
+            rows.append({
+                'ligne_sortie_id': ligne.pk,
+                'article_id': article.pk if article else None,
+                'article_nom': nom,
+                'quantite': qte,
+                'prix_unitaire': pu,
+                'montant_ligne': (qte * pu).quantize(Decimal('0.00001')),
+                'devise': ligne.devise.sigle if ligne.devise_id else None,
+            })
+        return rows
 
 
 # Réexport serializers caisse (compatibilité imports `stock.serializers`).

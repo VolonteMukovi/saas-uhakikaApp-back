@@ -264,6 +264,21 @@ class ClientLifecycleApiTests(APITestCase):
         )
         self.client_fiche = Client.objects.create(id='CLI0099', nom='Client Test')
         ClientEntreprise.objects.create(client=self.client_fiche, entreprise=self.entreprise)
+        entree = Entree.objects.create(libele='Appro lifecycle', entreprise=self.entreprise)
+        LigneEntree.objects.create(
+            article=self.article,
+            entree=entree,
+            quantite=Decimal('500'),
+            quantite_restante=Decimal('500'),
+            prix_unitaire=Decimal('5'),
+            prix_vente=Decimal('10'),
+            devise=self.devise,
+            seuil_alerte=Decimal('0'),
+        )
+        Stock.objects.update_or_create(
+            article=self.article,
+            defaults={'Qte': Decimal('500'), 'seuilAlert': Decimal('0')},
+        )
 
     def _add_line(self, sortie, quantite, prix_unitaire):
         return LigneSortie.objects.create(
@@ -276,25 +291,107 @@ class ClientLifecycleApiTests(APITestCase):
             montant_reference=Decimal(str(quantite)) * Decimal(str(prix_unitaire)),
         )
 
-    def test_en_credit_sortie_without_dette_record(self):
-        Stock.objects.update_or_create(
-            article=self.article,
-            defaults={'Qte': Decimal('100'), 'seuilAlert': Decimal('0')},
-        )
+    def _creer_sortie(self, *, statut='PAYEE', quantite='1', prix='10'):
         payload = {
-            'statut': 'EN_CREDIT',
+            'statut': statut,
             'client_id': self.client_fiche.pk,
             'lignes': [{
                 'article_id': self.article.pk,
-                'quantite': '1',
-                'prix_unitaire': '10',
+                'quantite': quantite,
+                'prix_unitaire': prix,
                 'devise_id': self.devise.pk,
             }],
         }
+        if statut == 'PAYEE':
+            payload['type_caisse_id'] = self.type_caisse.pk
         response = self.client.post('/api/sorties/', payload, format='json')
         self.assertEqual(response.status_code, 201, response.content)
-        sortie = Sortie.objects.get(pk=response.json()['id'])
+        return response.json()
+
+    def test_en_credit_sortie_creates_dette(self):
+        response_data = self._creer_sortie(statut='EN_CREDIT', quantite='1', prix='10')
+        sortie = Sortie.objects.get(pk=response_data['id'])
         self.assertEqual(sortie.statut, 'EN_CREDIT')
+        from stock.models import DettesClients
+        dette = DettesClients.objects.get(sortie=sortie)
+        self.assertEqual(dette.montant, Decimal('10.00000'))
+        self.assertEqual(dette.paye, Decimal('0.00000'))
+        self.assertEqual(dette.reste, Decimal('10.00000'))
+        self.assertEqual(dette.status, DettesClients.STATUS_ENCOURS)
+
+    def test_dashboard_client_sans_achat(self):
+        response = self.client.get(f'/api/clients/{self.client_fiche.pk}/dashboard/')
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(data['nombre_achats'], 0)
+        self.assertEqual(data['total_achete'], '0.00000')
+        self.assertEqual(data['dette_restante'], '0.00000')
+        self.assertEqual(data['produits_achetes'], [])
+        self.assertEqual(data['client']['type'], 'STANDARD')
+        self.assertNotIn('chiffre_affaires_total', data)
+        self.assertNotIn('resume', data)
+        self.assertNotIn('repartition', data)
+
+    def test_dashboard_achat_comptant(self):
+        self._creer_sortie(statut='PAYEE', quantite='2', prix='25')
+        data = self.client.get(f'/api/clients/{self.client_fiche.pk}/dashboard/').json()
+        self.assertEqual(data['nombre_achats'], 1)
+        self.assertEqual(data['total_achete'], '50.00000')
+        self.assertEqual(data['dette_restante'], '0.00000')
+        self.assertEqual(len(data['produits_achetes']), 1)
+        self.assertEqual(data['produits_achetes'][0]['produit'], 'produit client')
+        self.assertEqual(data['produits_achetes'][0]['total'], '50.00000')
+
+    def test_dashboard_credit_et_paiement_partiel_ne_compte_pas_paiement_comme_achat(self):
+        from stock.models import DettesClients
+
+        self._creer_sortie(statut='EN_CREDIT', quantite='1', prix='500')
+        dette = DettesClients.objects.get(sortie__client=self.client_fiche)
+        pay = self.client.post(
+            '/api/paiements-dettes-clients/',
+            {'dettes_clients': dette.pk, 'montant': '200'},
+            format='json',
+        )
+        self.assertEqual(pay.status_code, 201, pay.content)
+
+        data = self.client.get(f'/api/clients/{self.client_fiche.pk}/dashboard/').json()
+        self.assertEqual(data['nombre_achats'], 1)
+        self.assertEqual(data['total_achete'], '500.00000')
+        self.assertEqual(data['dette_restante'], '300.00000')
+        self.assertEqual(len(data['produits_achetes']), 1)
+
+        # mouvements = produits, pas débit/crédit
+        mv = self.client.get(f'/api/clients/{self.client_fiche.pk}/mouvements/?page=1&page_size=25')
+        self.assertEqual(mv.status_code, 200)
+        results = mv.json()
+        if isinstance(results, dict) and 'results' in results:
+            results = results['results']
+        self.assertEqual(len(results), 1)
+        self.assertIn('produit', results[0])
+        self.assertNotIn('debit', results[0])
+        self.assertNotIn('solde_apres_operation', results[0])
+
+    def test_dashboard_filtre_periode_exclut_achat_hors_periode(self):
+        from django.utils import timezone as tz
+        from stock.models import DettesClients
+
+        self._creer_sortie(statut='EN_CREDIT', quantite='1', prix='100')
+        dette = DettesClients.objects.get(sortie__client=self.client_fiche)
+        # dette datée hors période
+        dette.date = tz.datetime(2020, 1, 1).date()
+        dette.save(update_fields=['date'])
+        Sortie.objects.filter(pk=dette.sortie_id).update(
+            date_creation=tz.make_aware(tz.datetime(2020, 1, 1, 12, 0, 0))
+        )
+
+        data = self.client.get(
+            f'/api/clients/{self.client_fiche.pk}/dashboard/'
+            f'?date_debut=2026-09-01&date_fin=2026-09-30'
+        ).json()
+        self.assertEqual(data['nombre_achats'], 0)
+        self.assertEqual(data['total_achete'], '0.00000')
+        self.assertEqual(data['dette_restante'], '0.00000')
+        self.assertEqual(data['produits_achetes'], [])
 
 @override_settings(ALLOWED_HOSTS=['testserver', 'localhost', '127.0.0.1'])
 class TauxChangeApiTests(APITestCase):
@@ -1035,3 +1132,145 @@ class CodeBarresArticleTests(APITestCase):
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(response['Content-Type'], 'application/pdf')
         self.assertTrue(response.content.startswith(b'%PDF'))
+
+
+@override_settings(ALLOWED_HOSTS=['testserver', 'localhost', '127.0.0.1'])
+class DettesClientsApiTests(APITestCase):
+    def setUp(self):
+        self.entreprise = Entreprise.objects.create(
+            nom='E-Dettes',
+            secteur='s',
+            pays='CD',
+            adresse='a',
+            telephone='t',
+            email='dettes@example.com',
+            nif='n-dettes',
+            responsable='resp',
+        )
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='admin_dettes',
+            email='admin-dettes@example.com',
+            password='secretpass123',
+        )
+        Membership.objects.create(
+            user=self.user,
+            entreprise=self.entreprise,
+            role='admin',
+            is_active=True,
+        )
+        self.client.force_authenticate(user=self.user)
+        self.devise = Devise.objects.create(
+            sigle='USD',
+            nom='Dollar',
+            symbole='$',
+            est_principal=True,
+            entreprise=self.entreprise,
+        )
+        self.unite = Unite.objects.create(libelle='pc', entreprise=self.entreprise)
+        self.type_article = TypeArticle.objects.create(libelle='Divers', entreprise=self.entreprise)
+        self.sous_type = SousTypeArticle.objects.create(
+            type_article=self.type_article,
+            libelle='General',
+            entreprise=self.entreprise,
+        )
+        self.article = Article.objects.create(
+            nom_scientifique='article dette',
+            nom_commercial='article dette',
+            sous_type_article=self.sous_type,
+            unite=self.unite,
+            emplacement='A1',
+            entreprise=self.entreprise,
+        )
+        Stock.objects.create(article=self.article, Qte=Decimal('100'), seuilAlert=Decimal('0'))
+        entree = Entree.objects.create(libele='Appro dettes', entreprise=self.entreprise)
+        LigneEntree.objects.create(
+            article=self.article,
+            entree=entree,
+            quantite=Decimal('100'),
+            quantite_restante=Decimal('100'),
+            prix_unitaire=Decimal('5'),
+            prix_vente=Decimal('500'),
+            devise=self.devise,
+            seuil_alerte=Decimal('0'),
+        )
+        self.client_fiche = Client.objects.create(id='CLI-DETTE', nom='Client Dette')
+        ClientEntreprise.objects.create(client=self.client_fiche, entreprise=self.entreprise)
+
+    def _creer_sortie_credit(self, quantite='1', prix='500'):
+        response = self.client.post(
+            '/api/sorties/',
+            {
+                'statut': 'EN_CREDIT',
+                'client_id': self.client_fiche.pk,
+                'lignes': [{
+                    'article_id': self.article.pk,
+                    'quantite': quantite,
+                    'prix_unitaire': prix,
+                    'devise_id': self.devise.pk,
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        return response.json()
+
+    def test_paiement_partiel_puis_solde(self):
+        from stock.models import DettesClients, PaiementDettesClients
+
+        self._creer_sortie_credit()
+        dette = DettesClients.objects.get(sortie__client=self.client_fiche)
+        self.assertEqual(dette.reste, Decimal('500.00000'))
+
+        r1 = self.client.post(
+            '/api/paiements-dettes-clients/',
+            {'dettes_clients': dette.pk, 'montant': '100', 'date': '2026-09-01'},
+            format='json',
+        )
+        self.assertEqual(r1.status_code, 201, r1.content)
+        dette.refresh_from_db()
+        self.assertEqual(dette.paye, Decimal('100.00000'))
+        self.assertEqual(dette.reste, Decimal('400.00000'))
+        self.assertEqual(dette.status, DettesClients.STATUS_ENCOURS)
+
+        r2 = self.client.post(
+            '/api/paiements-dettes-clients/',
+            {'dettes_clients': dette.pk, 'montant': '400', 'date': '2026-09-10'},
+            format='json',
+        )
+        self.assertEqual(r2.status_code, 201, r2.content)
+        dette.refresh_from_db()
+        self.assertEqual(dette.reste, Decimal('0.00000'))
+        self.assertEqual(dette.status, DettesClients.STATUS_TERMINE)
+        self.assertEqual(PaiementDettesClients.objects.filter(dettes_clients=dette).count(), 2)
+
+        r3 = self.client.post(
+            '/api/paiements-dettes-clients/',
+            {'dettes_clients': dette.pk, 'montant': '1'},
+            format='json',
+        )
+        self.assertEqual(r3.status_code, 400, r3.content)
+
+    def test_par_clients_et_totaux(self):
+        self._creer_sortie_credit(prix='100')
+        self._creer_sortie_credit(prix='250')
+        response = self.client.get('/api/dettes-clients/par-clients/')
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(data['total_reste'], '350.00000')
+        self.assertEqual(len(data['clients']), 1)
+        self.assertEqual(data['clients'][0]['total_reste'], '350.00000')
+
+        detail = self.client.get('/api/dettes-clients/')
+        self.assertEqual(detail.status_code, 200)
+        results = detail.json()
+        if isinstance(results, dict) and 'results' in results:
+            results = results['results']
+        self.assertEqual(len(results), 2)
+        # Liste légère : pas d'articles embarqués
+        self.assertNotIn('articles', results[0])
+
+        fiche = self.client.get(f"/api/dettes-clients/{results[0]['id']}/")
+        self.assertEqual(fiche.status_code, 200)
+        self.assertIn('articles', fiche.json())
+        self.assertIn('paiements', fiche.json())

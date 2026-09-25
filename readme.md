@@ -104,7 +104,8 @@ Les entreprises locales rencontrent souvent les mêmes difficultés. UHAKIKAAPP 
 | Pertes non contrôlées | Marges inconnues | Bénéfices par lot (`BeneficeLot`), rapport ventes avec marges |
 | Confusion dans les ventes | Erreurs de caisse | Ventes structurées, lien automatique stock + caisse |
 | Absence de rapports fiables | Décisions à l'aveugle | 8+ rapports PDF + journal complet + tableaux de bord |
-| Mauvaise gestion des dettes | Impayés oubliés | Dettes client, statuts EN_COURS / PAYEE / RETARD, paiements tracés |
+| Mauvaise gestion des dettes | Impayés oubliés | Dettes client (`ENCOURS` / `TERMINE`), paiements partiels tracés |
+
 | Erreurs dans la caisse | Écarts financiers | Mouvements ENTREE/SORTIE par devise, contrôle des soldes |
 | Absence de traçabilité | Responsabilité floue | Contexte JWT (utilisateur, entreprise, succursale), liens mouvements ↔ opérations |
 | Bénéfice réel inconnu | Pilotage approximatif | Endpoint bénéfices totaux avec évaluation de performance |
@@ -516,43 +517,41 @@ Le champ **`moyen`** sur les mouvements de caisse accepte une valeur libre : esp
 
 #### Objectif
 
-Permettre la vente à crédit tout en **maîtrisant le recouvrement**.
+Permettre la vente à crédit avec une logique **simple et vérifiable** (montant / payé / reste).
 
 #### Fonctionnement
 
-1. Création d'une sortie avec statut **`EN_CREDIT`**.
-2. Création automatique d'une **`DetteClient`** liée à la sortie.
-3. Échéance par défaut : **30 jours** après la création.
-4. Statuts : **EN_COURS**, **PAYEE**, **RETARD**.
+1. Création d'une sortie avec statut **`EN_CREDIT`** (client obligatoire).
+2. Création automatique d'une **`DettesClients`** liée à la sortie :
+   - `montant` = Σ (`prix_unitaire` × `quantite`) des `LignesSorties`
+   - `paye = 0`, `reste = montant`, `status = ENCOURS`
+3. Statuts uniquement : **`ENCOURS`** | **`TERMINE`** (`reste = 0` → `TERMINE`).
+4. Paiements partiels via **`PaiementDettesClients`** (`dettes_clients`, `montant`, `date`).
+5. Total dû d’un client = **somme des `reste`** de ses dettes.
+6. Total général = **somme de tous les `reste`**.
 
-#### Paiements
+Doc frontend dédiée : [`DETTES_CLIENTS_FRONTEND.md`](./DETTES_CLIENTS_FRONTEND.md).
+
+#### Endpoints
 
 | Action | Endpoint |
 |--------|----------|
-| Enregistrer un paiement | `POST /api/paiements-dettes/` |
-| Historique paiements | `GET /api/dettes/{id}/paiements/` |
-| Reçu JSON (aperçu / impression front) | `GET /api/paiements-dettes/{id}/recu-json/` |
-| Reçu PDF (ticket POS) | `GET /api/paiements-dettes/{id}/recu-paiement/` |
+| Liste / détail dettes | `GET /api/dettes-clients/`, `GET /api/dettes-clients/{id}/` |
+| Par client (reste dû) | `GET /api/dettes-clients/par-clients/` |
+| Total général | `GET /api/dettes-clients/totaux/` |
+| Enregistrer un paiement | `POST /api/paiements-dettes-clients/` |
+| Historique paiements | `GET /api/paiements-dettes-clients/?dettes_clients={id}` |
 
-Chaque paiement crée un **`MouvementCaisse ENTREE`** lié à la dette. Le statut est recalculé automatiquement :
+Filtres query : `date_debut`, `date_fin`, `status`, `client_id`.
 
-- **PAYEE** si solde ≤ 0 ;
-- **RETARD** si échéance dépassée et solde > 0.
-
-#### Filtres dettes
-
-| Filtre | Endpoint |
-|--------|----------|
-| Dettes en cours | `GET /api/dettes/en_cours/` |
-| Dettes en retard | `GET /api/dettes/en_retard/` |
-| Dettes payées | `GET /api/dettes/payees/` |
-| Total dettes client | `GET /api/clients/{id}/total_dettes/` |
+Règles paiement : montant ≤ `reste` ; dette `TERMINE` refusée ; `paye` / `reste` / `status` recalculés automatiquement.  
+Écriture critique : en-tête **`Idempotency-Key`** (voir `CURSOR.md` et `DETTES_CLIENTS_FRONTEND.md`).
 
 #### Avantages
 
 - **Fidélisation** des clients par le crédit contrôlé.
-- **Suivi rigoureux** des impayés.
-- **Recouvrement tracé** avec reçus PDF.
+- **Suivi clair** : ce qui reste dû = somme des `reste`.
+- **Paiements partiels** tracés un par un.
 
 ---
 
@@ -588,7 +587,15 @@ Un même client peut être lié à **plusieurs entreprises** via `ClientEntrepri
 | Créer un client | `POST /api/clients/` (avec ou sans authentification) |
 | Rechercher | `GET /api/clients/search/?q=` |
 | Associer à une entreprise | `POST /api/clients/associate-entreprise/` |
-| Voir les dettes | `GET /api/clients/{id}/dettes/` |
+| Voir les dettes | `GET /api/dettes-clients/?client_id=` |
+| Détail achats & dette | `GET /api/clients/{id}/dashboard/?date_debut=&date_fin=` |
+| Produits achetés (paginé) | `GET /api/clients/{id}/mouvements/` |
+
+Doc frontend : [`CLIENT_DETAIL_FRONTEND.md`](./CLIENT_DETAIL_FRONTEND.md).
+
+Le dashboard retourne uniquement : `nombre_achats`, `total_achete`, `dette_restante`, `produits_achetes`  
+(les paiements de dettes ne comptent **pas** comme des achats).
+
 
 #### Portail client
 
@@ -598,8 +605,9 @@ Les clients disposent d'un **espace autonome** :
 |----------------|----------|
 | Tableau de bord | `GET /api/client-portal/dashboard/` |
 | Recherche catalogue | `GET /api/client-portal/articles/search/` |
-| Mes dettes | `GET /api/client-portal/dettes/` |
-| Historique paiements | `GET /api/client-portal/dettes/{id}/paiements/` |
+| Mes dettes | `GET /api/dettes-clients/?client_id=` (espace staff) |
+| Historique paiements | `GET /api/paiements-dettes-clients/?dettes_clients=` |
+
 | Mes ventes | `GET /api/client-portal/ventes/` |
 
 ---
@@ -1001,7 +1009,8 @@ Variables d'environnement : `POS_PRINTER_PORT`, `POS_PRINTER_BACKEND=serial`, et
 | Chiffre d'affaires / ventes | Rapport ventes, sorties |
 | Stock disponible | `/api/stocks/`, `/api/stocks/stats/` |
 | Total entrées / sorties | Stats entreprise, journal |
-| Dettes en cours | `/api/dettes/en_cours/` |
+| Dettes en cours | `/api/dettes-clients/?status=ENCOURS`, `/api/dettes-clients/totaux/` |
+
 | Caisse par devise | `/api/mouvements-caisse/solde/` |
 | Bénéfice | `/api/entrees/benefices-totaux/` |
 | Produits les plus vendus | `/api/sorties/produits-plus-vendus/` |
@@ -1184,7 +1193,8 @@ UHAKIKAAPP expose une **API REST** complète, conçue pour être consommée par 
 | **Catalogue** | `/api/articles/`, `/api/unites/`, `/api/typearticles/` |
 | **Stock** | `/api/stocks/`, `/api/entrees/`, `/api/sorties/`, `/api/inventaires/` |
 | **Caisse** | `/api/mouvements-caisse/`, `/api/types-caisse/` |
-| **Clients & dettes** | `/api/clients/`, `/api/dettes/`, `/api/paiements-dettes/` |
+| **Clients & dettes** | `/api/clients/`, `/api/dettes-clients/`, `/api/paiements-dettes-clients/` |
+
 | **Fournisseurs & achats** | `/api/fournisseurs/`, `/api/lots/` |
 | **Commandes** | `/api/commandes/` |
 | **Rapports** | `/api/rapports/...` (lecture seule) |

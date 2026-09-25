@@ -1,13 +1,18 @@
+"""Détail client — achats & dettes (logique simple).
+
+Source de vérité :
+- achats = Sortie (PAYEE + EN_CREDIT) + LigneSortie
+- dette restante = somme(DettesClients.reste)
+- PaiementDettesClients n'est jamais un achat
+"""
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_DOWN
 
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, Q, Sum
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, Sum
 from django.utils import timezone
 
-from caisse.models import MouvementCaisse
-from stock.models import Client, LigneSortie, Sortie
-from stock.services.sortie_devise import resolve_sortie_primary_devise
+from stock.models import Client, ClientEntreprise, DettesClients, LigneSortie, Sortie
 
 ZERO = Decimal("0.00000")
 _MONEY_FIELD = DecimalField(max_digits=14, decimal_places=5)
@@ -63,112 +68,111 @@ def parse_period_from_request(request):
     }
 
 
-def _sortie_devise_sigle(sortie: Sortie) -> str | None:
-    devise = resolve_sortie_primary_devise(sortie)
-    return devise.sigle if devise else None
-
-
-def _sortie_mouvement_map(sortie_ids) -> dict[int, MouvementCaisse]:
-    if not sortie_ids:
-        return {}
-    rows = (
-        MouvementCaisse.objects.filter(sortie_id__in=sortie_ids)
-        .select_related('utilisateur', 'type_caisse', 'session_caisse', 'devise')
-        .order_by('sortie_id', 'id')
+def _client_type(*, client: Client, entreprise_id: int) -> str:
+    link = (
+        ClientEntreprise.objects.filter(client=client, entreprise_id=entreprise_id)
+        .only("is_special")
+        .first()
     )
-    out = {}
-    for mc in rows:
-        if mc.sortie_id and mc.sortie_id not in out:
-            out[mc.sortie_id] = mc
-    return out
+    if link and link.is_special:
+        return "SPECIAL"
+    return "STANDARD"
 
 
-def _credit_total_for_sorties(sorties_qs) -> Decimal:
-    lignes = LigneSortie.objects.filter(sortie__in=sorties_qs.filter(statut="EN_CREDIT"))
-    agg = lignes.aggregate(total=Sum(_LINE_TOTAL))
-    return _amount(agg["total"])
+def _article_nom(article) -> str:
+    if not article:
+        return ""
+    return article.nom_commercial or article.nom_scientifique or str(article.pk)
 
 
-def _totaux_par_devise_from_sorties(sorties_qs) -> list[dict]:
-    credit_sorties = sorties_qs.filter(statut="EN_CREDIT")
-    rows = (
-        LigneSortie.objects.filter(sortie__in=credit_sorties)
-        .values("devise__id", "devise__sigle")
-        .annotate(total_credit=Sum(_LINE_TOTAL), nombre_ventes_credit=Count("sortie_id", distinct=True))
+def _sorties_qs(*, client: Client, entreprise_id: int, succursale_id: int | None, period: dict):
+    """Achats = sorties du client (date = date_creation de la sortie)."""
+    qs = Sortie.objects.filter(client=client, entreprise_id=entreprise_id)
+    if succursale_id is not None:
+        qs = qs.filter(succursale_id=succursale_id)
+    return _period_lookup(qs, "date_creation__date", period["_date_debut"], period["_date_fin"])
+
+
+def _dettes_qs(*, client: Client, entreprise_id: int, succursale_id: int | None, period: dict):
+    """Dettes filtrées sur DettesClients.date (pas la date de paiement)."""
+    qs = DettesClients.objects.filter(
+        sortie__client=client,
+        sortie__entreprise_id=entreprise_id,
     )
-    result = []
-    for row in rows:
-        total_credit_devise = _amount(row["total_credit"])
-        result.append(
+    if succursale_id is not None:
+        qs = qs.filter(sortie__succursale_id=succursale_id)
+    return _period_lookup(qs, "date", period["_date_debut"], period["_date_fin"])
+
+
+def _lignes_achats_qs(sorties_qs):
+    return (
+        LigneSortie.objects.filter(sortie__in=sorties_qs)
+        .select_related("article", "devise", "sortie")
+        .annotate(line_total=_LINE_TOTAL)
+        .order_by("-sortie__date_creation", "-id")
+    )
+
+
+def build_produits_achetes(sorties_qs) -> list[dict]:
+    """Lignes produit issues des sorties (jamais des paiements de dettes)."""
+    results = []
+    for ligne in _lignes_achats_qs(sorties_qs):
+        qte = _amount(ligne.quantite)
+        pu = _amount(ligne.prix_unitaire)
+        dt = ligne.sortie.date_creation
+        results.append(
             {
-                "devise": row["devise__sigle"],
-                "devise_id": row["devise__id"],
-                "total_credit": _amount_str(total_credit_devise),
-                "total_paye": _amount_str(ZERO),
-                "ecart_periode": _amount_str(total_credit_devise),
-                "du_actuel": _amount_str(ZERO),
-                "solde": _amount_str(ZERO),
-                "nombre_dettes": row["nombre_ventes_credit"],
+                "date": timezone.localtime(dt).date().isoformat() if dt else None,
+                "produit": _article_nom(ligne.article),
+                "article_id": ligne.article_id,
+                "quantite": f"{qte:.5f}",
+                "prix_unitaire": f"{pu:.5f}",
+                "total": _amount_str(getattr(ligne, "line_total", qte * pu)),
+                "devise": ligne.devise.sigle if ligne.devise_id else None,
+                "sortie_id": ligne.sortie_id,
+                "statut_vente": ligne.sortie.statut,
             }
         )
-    return result
+    return results
 
 
-def _client_base_querysets(*, client: Client, entreprise_id: int, succursale_id: int | None, period: dict):
-    date_debut = period["_date_debut"]
-    date_fin = period["_date_fin"]
+def build_client_dashboard(
+    *,
+    client: Client,
+    entreprise_id: int,
+    succursale_id: int | None,
+    period: dict,
+):
+    """
+    Réponse minimale pour le détail client :
 
-    sorties = Sortie.objects.filter(client=client, entreprise_id=entreprise_id)
-    if succursale_id is not None:
-        sorties = sorties.filter(succursale_id=succursale_id)
-
-    sorties = _period_lookup(sorties, "date_creation__date", date_debut, date_fin)
-    lignes = LigneSortie.objects.filter(sortie__in=sorties).annotate(line_total=_LINE_TOTAL)
-
-    return {
-        "sorties": sorties,
-        "lignes": lignes,
-    }
-
-
-def build_client_dashboard(*, client: Client, entreprise_id: int, succursale_id: int | None, period: dict):
-    qs = _client_base_querysets(
+    - nombre_achats : nb de Sortie (comptant + crédit)
+    - total_achete : Σ (qté × PU) des LigneSortie
+    - dette_restante : Σ DettesClients.reste (filtrées par date de dette)
+    - produits_achetes : lignes produit
+    """
+    sorties = _sorties_qs(
         client=client,
         entreprise_id=entreprise_id,
         succursale_id=succursale_id,
         period=period,
     )
-    sorties = qs["sorties"]
-    lignes = qs["lignes"]
-
-    ventes_agg = lignes.aggregate(
-        total_comptant=Sum("line_total", filter=Q(sortie__statut="PAYEE")),
+    dettes = _dettes_qs(
+        client=client,
+        entreprise_id=entreprise_id,
+        succursale_id=succursale_id,
+        period=period,
     )
 
-    total_credit = _credit_total_for_sorties(sorties)
-    total_dettes = total_credit
-    total_comptant = _amount(ventes_agg["total_comptant"])
-    total_montant = _amount(total_comptant + total_credit)
-    total_paye = ZERO
-    ecart_periode = total_credit
-    du_actuel = ZERO
-    solde_restant = ZERO
+    lignes = LigneSortie.objects.filter(sortie__in=sorties).annotate(line_total=_LINE_TOTAL)
+    agg = lignes.aggregate(total=Sum("line_total"), nb_lignes=Count("id"))
+    dette_agg = dettes.aggregate(
+        montant=Sum("montant"),
+        paye=Sum("paye"),
+        reste=Sum("reste"),
+    )
 
-    last_sortie = sorties.order_by("-date_creation", "-id").select_related("devise").first()
-
-    derniere_operation = {"date": None, "type": None, "montant": "0.00000", "devise": None}
-    if last_sortie is not None:
-        sortie_total = _amount(
-            last_sortie.lignes.aggregate(total=Sum(_LINE_TOTAL))["total"]
-        )
-        derniere_operation = {
-            "date": last_sortie.date_creation.isoformat() if last_sortie.date_creation else None,
-            "type": "VENTE_COMPTANT" if last_sortie.statut == "PAYEE" else "VENTE_CREDIT",
-            "montant": _amount_str(sortie_total),
-            "devise": _sortie_devise_sigle(last_sortie) or (last_sortie.devise.sigle if last_sortie.devise else None),
-        }
-
-    nombre_ventes_credit = sorties.filter(statut="EN_CREDIT").count()
+    produits = build_produits_achetes(sorties)
 
     return {
         "client": {
@@ -177,74 +181,38 @@ def build_client_dashboard(*, client: Client, entreprise_id: int, succursale_id:
             "telephone": client.telephone,
             "email": client.email,
             "adresse": client.adresse,
+            "type": _client_type(client=client, entreprise_id=entreprise_id),
         },
         "periode": {
             "date_debut": period["date_debut"],
             "date_fin": period["date_fin"],
             "mode": period["mode"],
         },
-        "resume": {
-            "nombre_operations": sorties.count(),
-            "chiffre_affaires_total": _amount_str(total_montant),
-            "total_comptant": _amount_str(total_comptant),
-            "total_credit": _amount_str(total_credit),
-            "total_dettes": _amount_str(total_dettes),
-            "total_paye": _amount_str(total_paye),
-            "du_actuel": _amount_str(du_actuel),
-            "solde_restant": _amount_str(solde_restant),
-            "ecart_periode": _amount_str(ecart_periode),
-            "nombre_ventes": sorties.count(),
-            "nombre_dettes": nombre_ventes_credit,
-            "nombre_paiements": 0,
-            "nombre_dettes_ouvertes": 0,
+        "nombre_achats": sorties.count(),
+        "total_achete": _amount_str(agg["total"]),
+        "dette_restante": _amount_str(dette_agg["reste"]),
+        "situation_dettes": {
+            "dette_totale": _amount_str(dette_agg["montant"]),
+            "total_paye": _amount_str(dette_agg["paye"]),
+            "reste": _amount_str(dette_agg["reste"]),
         },
-        "repartition": {
-            "comptant": _amount_str(total_comptant),
-            "credit": _amount_str(total_credit),
-            "dettes_en_cours": 0,
-            "dettes_payees": 0,
-            "dettes_en_retard": 0,
-            "dettes_periode_en_cours": nombre_ventes_credit,
-            "dettes_periode_payees": 0,
-            "dettes_periode_en_retard": 0,
-        },
-        "derniere_operation": derniere_operation,
-        "totaux_par_devise": _totaux_par_devise_from_sorties(sorties),
-        "instructions_frontend": {
-            "solde_restant": "Le suivi des créances client (dettes) n'est plus disponible sur cette API.",
-            "du_actuel": "Toujours 0 — ancien module dettes retiré.",
-            "ecart_periode": "Montant des ventes à crédit sur la période (sans paiements dettes).",
-            "total_credit": "Ventes EN_CREDIT sur la période.",
-            "total_paye": "Toujours 0 — paiements dettes retirés.",
-        },
+        "produits_achetes": produits,
+        "nombre_lignes_produits": agg["nb_lignes"] or 0,
     }
 
 
 def build_client_statistics(*, client: Client, entreprise_id: int, succursale_id: int | None, period: dict):
-    dashboard = build_client_dashboard(
+    """Alias du dashboard simplifié (plus de KPIs secondaires)."""
+    return build_client_dashboard(
         client=client,
         entreprise_id=entreprise_id,
         succursale_id=succursale_id,
         period=period,
     )
-    qs = _client_base_querysets(
-        client=client,
-        entreprise_id=entreprise_id,
-        succursale_id=succursale_id,
-        period=period,
-    )
-    nombre_ventes = dashboard["resume"]["nombre_ventes"]
-    chiffre_affaires_total = _amount(dashboard["resume"]["chiffre_affaires_total"])
-    montant_moyen = ZERO if nombre_ventes == 0 else (chiffre_affaires_total / Decimal(nombre_ventes))
-    dashboard["statistiques"] = {
-        "montant_moyen_par_vente": _amount_str(montant_moyen),
-        "nombre_ventes_comptant": qs["sorties"].filter(statut="PAYEE").count(),
-        "nombre_ventes_credit": qs["sorties"].filter(statut="EN_CREDIT").count(),
-    }
-    return dashboard
 
 
 def build_client_balance(*, client: Client, entreprise_id: int, succursale_id: int | None, period: dict):
+    """Solde = dette restante uniquement (nouvelle logique DettesClients.reste)."""
     dashboard = build_client_dashboard(
         client=client,
         entreprise_id=entreprise_id,
@@ -254,29 +222,34 @@ def build_client_balance(*, client: Client, entreprise_id: int, succursale_id: i
     return {
         "client": dashboard["client"],
         "periode": dashboard["periode"],
-        "solde": {
-            "total_du": dashboard["resume"]["total_dettes"],
-            "total_paye": dashboard["resume"]["total_paye"],
-            "du_actuel": dashboard["resume"]["du_actuel"],
-            "solde_restant": dashboard["resume"]["solde_restant"],
-            "ecart_periode": dashboard["resume"]["ecart_periode"],
-        },
-        "totaux_par_devise": dashboard["totaux_par_devise"],
-        "instructions_frontend": dashboard.get("instructions_frontend"),
+        "dette_restante": dashboard["dette_restante"],
+        "nombre_achats": dashboard["nombre_achats"],
+        "total_achete": dashboard["total_achete"],
     }
 
 
 def build_client_sales(*, client: Client, entreprise_id: int, succursale_id: int | None, period: dict):
-    qs = _client_base_querysets(
-        client=client,
-        entreprise_id=entreprise_id,
-        succursale_id=succursale_id,
-        period=period,
+    """Liste des achats (sorties) — hors paiements de dettes."""
+    sorties = (
+        _sorties_qs(
+            client=client,
+            entreprise_id=entreprise_id,
+            succursale_id=succursale_id,
+            period=period,
+        )
+        .annotate(
+            montant_total=Sum(
+                ExpressionWrapper(
+                    F("lignes__quantite") * F("lignes__prix_unitaire"),
+                    output_field=_MONEY_FIELD,
+                )
+            ),
+            nombre_lignes=Count("lignes"),
+        )
+        .order_by("-date_creation", "-id")
     )
-    sorties = qs["sorties"].select_related("devise").order_by("-date_creation", "-id")
     results = []
     for sortie in sorties:
-        total = sortie.lignes.aggregate(total=Sum(_LINE_TOTAL))["total"]
         results.append(
             {
                 "id": sortie.pk,
@@ -284,9 +257,8 @@ def build_client_sales(*, client: Client, entreprise_id: int, succursale_id: int
                 "reference": f"SORTIE-{sortie.pk}",
                 "type": "VENTE_COMPTANT" if sortie.statut == "PAYEE" else "VENTE_CREDIT",
                 "statut": sortie.statut,
-                "montant_total": _amount_str(total),
-                "devise": _sortie_devise_sigle(sortie) or (sortie.devise.sigle if sortie.devise else None),
-                "nombre_lignes": sortie.lignes.count(),
+                "montant_total": _amount_str(sortie.montant_total),
+                "nombre_lignes": sortie.nombre_lignes or 0,
                 "motif": sortie.motif or "",
             }
         )
@@ -294,58 +266,16 @@ def build_client_sales(*, client: Client, entreprise_id: int, succursale_id: int
 
 
 def build_client_movements(*, client: Client, entreprise_id: int, succursale_id: int | None, period: dict):
-    qs = _client_base_querysets(
+    """
+    Remplace l'ancien journal débit/crédit/solde.
+
+    Retourne les produits achetés (même source que dashboard.produits_achetes),
+    paginables côté view.
+    """
+    sorties = _sorties_qs(
         client=client,
         entreprise_id=entreprise_id,
         succursale_id=succursale_id,
         period=period,
     )
-    sorties = qs["sorties"].select_related("devise").prefetch_related("lignes__devise").order_by("date_creation", "id")
-    sortie_mouvements = _sortie_mouvement_map(sorties.values_list("pk", flat=True))
-
-    movements = []
-    running_balance = ZERO
-
-    for sortie in sorties:
-        total = _amount(sortie.lignes.aggregate(total=Sum(_LINE_TOTAL))["total"])
-        mc_sortie = sortie_mouvements.get(sortie.pk)
-        if sortie.statut == "EN_CREDIT":
-            debit = total
-            credit = ZERO
-            running_balance += total
-            type_operation = "VENTE_CREDIT"
-            impact = "augmente_solde"
-        else:
-            debit = ZERO
-            credit = ZERO
-            type_operation = "VENTE_COMPTANT"
-            impact = "sans_impact_solde"
-        movements.append(
-            {
-                "date": sortie.date_creation,
-                "type": type_operation,
-                "reference": f"SORTIE-{sortie.pk}",
-                "libelle": "Vente a credit" if sortie.statut == "EN_CREDIT" else "Vente au comptant",
-                "debit": _amount_str(debit),
-                "credit": _amount_str(credit),
-                "montant": _amount_str(total),
-                "solde_apres_operation": _amount_str(running_balance),
-                "devise": _sortie_devise_sigle(sortie),
-                "statut": sortie.statut,
-                "utilisateur": (
-                    mc_sortie.utilisateur.get_full_name() or mc_sortie.utilisateur.username
-                    if mc_sortie and mc_sortie.utilisateur
-                    else None
-                ),
-                "session_caisse": mc_sortie.session_caisse_id if mc_sortie else None,
-                "type_caisse": mc_sortie.type_caisse.libelle_affiche if mc_sortie and mc_sortie.type_caisse else None,
-                "description": sortie.motif or "",
-                "impact_solde": impact,
-            }
-        )
-
-    movements.sort(key=lambda item: (item["date"], item["reference"]))
-    for item in movements:
-        item["date"] = item["date"].isoformat() if item["date"] else None
-    movements.reverse()
-    return movements
+    return build_produits_achetes(sorties)

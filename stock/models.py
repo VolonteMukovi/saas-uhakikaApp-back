@@ -1,6 +1,7 @@
 import uuid
 
 from django.db import models
+from django.db.models import Sum
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, is_password_usable, make_password
 from django.utils import timezone
@@ -567,6 +568,84 @@ class ClientEntreprise(models.Model):
 
     def __str__(self) -> str:
         return f"{self.client_id} @ {self.entreprise_id}"
+
+
+class DettesClients(models.Model):
+    """Dette simple liée à une sortie à crédit."""
+
+    STATUS_ENCOURS = 'ENCOURS'
+    STATUS_TERMINE = 'TERMINE'
+    STATUS_CHOICES = [
+        (STATUS_ENCOURS, 'En cours'),
+        (STATUS_TERMINE, 'Terminé'),
+    ]
+
+    sortie = models.OneToOneField(
+        Sortie,
+        on_delete=models.CASCADE,
+        related_name='dette_client',
+    )
+    montant = models.DecimalField(max_digits=14, decimal_places=5)
+    paye = models.DecimalField(max_digits=14, decimal_places=5, default=Decimal('0'))
+    reste = models.DecimalField(max_digits=14, decimal_places=5)
+    date = models.DateField()
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_ENCOURS,
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-date', '-id']
+        verbose_name = 'Dette client'
+        verbose_name_plural = 'Dettes clients'
+        indexes = [
+            models.Index(fields=['date']),
+            models.Index(fields=['status']),
+            models.Index(fields=['date', 'status']),
+            models.Index(fields=['status', '-date', '-id']),
+        ]
+
+    def __str__(self) -> str:
+        client = self.sortie.client.nom if self.sortie_id and self.sortie.client_id else '?'
+        return f"Dette #{self.pk} — {client} — reste {self.reste}"
+
+    def recalculer_soldes(self, *, save: bool = True) -> None:
+        total_paye = self.paiements.aggregate(t=Sum('montant'))['t'] or Decimal('0')
+        self.paye = Decimal(str(total_paye)).quantize(Decimal('0.00001'))
+        self.reste = (Decimal(str(self.montant)) - self.paye).quantize(Decimal('0.00001'))
+        if self.reste < 0:
+            self.reste = Decimal('0.00000')
+        self.status = self.STATUS_TERMINE if self.reste == 0 else self.STATUS_ENCOURS
+        if save:
+            self.save(update_fields=['paye', 'reste', 'status', 'updated_at'])
+
+
+class PaiementDettesClients(models.Model):
+    """Paiement (éventuellement partiel) sur une DettesClients."""
+
+    dettes_clients = models.ForeignKey(
+        DettesClients,
+        on_delete=models.CASCADE,
+        related_name='paiements',
+    )
+    montant = models.DecimalField(max_digits=14, decimal_places=5)
+    date = models.DateField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['date', 'id']
+        verbose_name = 'Paiement dette client'
+        verbose_name_plural = 'Paiements dettes clients'
+        indexes = [
+            models.Index(fields=['date']),
+            models.Index(fields=['dettes_clients', 'date']),
+            models.Index(fields=['-id']),
+        ]
+
+    def __str__(self) -> str:
+        return f"Paiement #{self.pk} — {self.montant} sur dette {self.dettes_clients_id}"
 
 
 class LigneSortie(models.Model):

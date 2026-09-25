@@ -1177,12 +1177,6 @@ def import_sortie(request):
     if not lignes:
         return JsonResponse({'error': 'Aucune ligne de sortie valide dans le fichier.'}, status=400)
 
-    # Ventes à crédit temporairement désactivées
-    if statut_global == 'EN_CREDIT':
-        return JsonResponse({
-            'error': 'Les ventes à crédit (EN_CREDIT) sont temporairement désactivées. Utilisez le statut PAYEE.',
-        }, status=400)
-
     # Appeler la même logique que SortieViewSet.create (FIFO, LigneSortieLot, Stock, MouvementCaisse)
     from stock.views import SortieViewSet
 
