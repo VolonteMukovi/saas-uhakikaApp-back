@@ -402,16 +402,20 @@ def connecter_ou_inscrire_via_google(payload: dict) -> tuple[User, bool]:
                 _('Ce compte est déjà lié à un autre profil Google.'),
                 code='google_already_linked',
             )
-        if not user.is_active and not (email_verified or user.email_verifie):
+        # Ne réactive jamais un compte désactivé par l'admin (email déjà vérifié).
+        if not user.is_active and not user.email_verifie:
+            if email_verified:
+                user.is_active = True
+                user.email_verifie = True
+                user.save(update_fields=['is_active', 'email_verifie'])
+        if not user.is_active:
             raise ErreurConnexionGoogle(
                 _('Ce compte est désactivé. Contactez le support.'),
                 code='account_disabled',
             )
-        # Liaison Google → même utilisateur (pas de 2e compte)
-        if email_verified and (not user.email_verifie or not user.is_active):
+        if email_verified and not user.email_verifie:
             user.email_verifie = True
-            user.is_active = True
-            user.save(update_fields=['email_verifie', 'is_active'])
+            user.save(update_fields=['email_verifie'])
         if not existing_profil:
             ProfilConnexionGoogle.objects.create(
                 utilisateur=user,

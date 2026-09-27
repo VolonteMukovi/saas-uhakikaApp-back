@@ -29,7 +29,9 @@ class PaiementEnLigneTests(TestCase):
                 'est_visible_catalogue': True,
             },
         )
-        self.user = User.objects.create_user(username='payuser', password='testpass123', role='admin')
+        self.user = User.objects.create_user(
+            username='payuser', password='testpass123', role='admin', email_verifie=True,
+        )
         self.super = User.objects.create_superuser(username='superpay', password='superpass', email='s@p.com')
         self.ent = Entreprise.objects.create(nom='Pay Test')
         self.membership = Membership.objects.create(
@@ -56,8 +58,11 @@ class PaiementEnLigneTests(TestCase):
         self.assertEqual(resp.status_code, 201)
         self.assertTrue(resp.data.get('sandbox'))
         self.assertIn('reference_interne', resp.data)
-        abo = AbonnementEntreprise.objects.get(entreprise=self.ent, est_courant=True)
+        abo = AbonnementEntreprise.objects.get(id=resp.data['abonnement_id'])
         self.assertEqual(abo.statut, AbonnementEntreprise.STATUT_EN_ATTENTE)
+        # L'essai reste courant jusqu'à confirmation du paiement
+        essai = AbonnementEntreprise.objects.get(entreprise=self.ent, est_courant=True)
+        self.assertEqual(essai.statut, AbonnementEntreprise.STATUT_ESSAI)
 
     def test_webhook_confirme_active_licence(self):
         init = self.client.post('/api/abonnements/paiements/initier/', {

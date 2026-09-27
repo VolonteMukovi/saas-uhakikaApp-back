@@ -11,13 +11,30 @@ from typing import Any
 from django.http import HttpRequest
 
 
+def normaliser_statut_gateway(statut_raw: str) -> str:
+    """Mappe un statut provider vers confirme | echec | en_attente."""
+    raw = (statut_raw or '').strip().lower()
+    if raw in {
+        'success', 'paid', 'confirme', 'completed', '00', 'ok',
+        'payment.success',
+    }:
+        return 'confirme'
+    if raw in {
+        'failed', 'fail', 'echec', 'échoué', 'error', 'refused', 'refuse',
+        'cancelled', 'canceled', 'annule', 'annulé', 'payment.failed',
+        'payment.cancelled',
+    }:
+        return 'echec'
+    return 'en_attente'
+
+
 @dataclass
 class NotificationPaiement:
     """Résultat normalisé d'une notification gateway."""
 
     reference_interne: str
     reference_externe: str
-    statut: str  # confirme | echec
+    statut: str  # confirme | echec | en_attente
     montant: Decimal | None = None
     devise: str | None = None
     brut: dict | None = None

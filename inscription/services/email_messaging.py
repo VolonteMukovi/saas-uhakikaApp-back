@@ -19,6 +19,7 @@ from inscription.services.email_delivery import (
     verification_deja_envoyee_recemment,
     verifier_destinataire_resend,
 )
+from inscription.services.onboarding_status import build_frontend_url_pour_prochaine_etape
 from inscription.services.email_verification import (
     build_frontend_url,
     build_verification_url,
@@ -151,7 +152,7 @@ def envoyer_email_bienvenue(user, *, entreprise, etat_licence: dict | None, limi
         'jours_restants': (etat_licence or {}).get('jours_restants'),
         'utilisateurs_max': (limites_plan or {}).get('utilisateurs_max'),
         'fonctionnalites_cles': _fonctionnalites_plan(formule, limites_plan),
-        'dashboard_url': build_frontend_url(getattr(settings, 'FRONTEND_DASHBOARD_PATH', '/dashboard')),
+        'dashboard_url': build_frontend_url_pour_prochaine_etape(user),
         'support_email': getattr(settings, 'SUPPORT_EMAIL', 'support@uhakikaapp.store'),
         'site_url': getattr(settings, 'FRONTEND_BASE_URL', 'https://uhakikaapp.store'),
     }

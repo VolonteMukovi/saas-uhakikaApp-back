@@ -75,6 +75,20 @@ def chemin_redirection_pour_etape(next_step: str) -> str:
     return mapping.get(next_step, mapping[NEXT_PROFILE])
 
 
+def build_frontend_url_pour_prochaine_etape(user, request=None) -> str:
+    """URL absolue du bouton e-mail alignée sur resoudre_next_step (évite /dashboard prématuré)."""
+    from inscription.services.email_verification import build_frontend_url
+
+    next_step = resoudre_next_step(user, request)
+    chemin = chemin_redirection_pour_etape(next_step)
+    locale = getattr(settings, 'FRONTEND_LOCALE_PREFIX', '').rstrip('/')
+    if locale and chemin.startswith(f'{locale}/'):
+        chemin = chemin[len(locale) :] or '/'
+    elif locale and chemin == locale:
+        chemin = '/'
+    return build_frontend_url(chemin)
+
+
 def build_onboarding_status(user, request=None) -> dict:
     """Réponse GET /api/onboarding/status/."""
     ent = user.get_entreprise(request) if (user and user.is_authenticated) else None

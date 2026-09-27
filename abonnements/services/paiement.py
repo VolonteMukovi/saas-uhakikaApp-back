@@ -283,6 +283,16 @@ def traiter_webhook_paiement(fournisseur: str, payload: dict, ip_source: str | N
         journal.save(update_fields=['paiement'])
 
         if notification.statut != 'confirme':
+            if notification.statut != 'echec':
+                # pending / unknown : ne pas tuer le checkout
+                journal.statut_traitement = JournalWebhookPaiement.STATUT_IGNORE
+                journal.message = f'statut gateway non final: {notification.statut}'
+                journal.save(update_fields=['statut_traitement', 'message'])
+                return {
+                    'statut': 'en_attente',
+                    'paiement_id': paiement.id,
+                    'statut_gateway': notification.statut,
+                }
             paiement.statut = PaiementAbonnement.STATUT_ECHEC
             payload_store = dict(paiement.payload_gateway or {})
             payload_store['echec_webhook'] = notification.brut or payload

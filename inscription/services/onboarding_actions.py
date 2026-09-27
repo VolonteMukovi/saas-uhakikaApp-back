@@ -104,27 +104,14 @@ def mettre_a_jour_entreprise_onboarding(user, data: dict, request=None) -> dict:
         if isinstance(value, str):
             value = value.strip()
         setattr(ent, attr, value)
-    ent.save(update_fields=list(updates.keys()))
+    save_fields = [k for k in updates.keys() if hasattr(ent, k)]
+    ent.save(update_fields=save_fields)
     evaluer_et_marquer_configuration(ent)
 
+    status = build_onboarding_status(user, request)
     if not entreprise_est_configuree(ent):
-        manquants = _champs_entreprise_manquants(ent)
-        labels = {
-            'nom': _('le nom de l\'entreprise'),
-            'email': _('l\'e-mail professionnel'),
-            'telephone': _('le téléphone'),
-            'adresse': _('l\'adresse'),
-            'pays': _('le pays'),
-            'responsable': _('le nom du responsable'),
-            'secteur': _('le secteur d\'activité'),
-        }
-        premier = labels.get(manquants[0], manquants[0]) if manquants else _('les informations')
-        raise ErreurOnboarding(
-            _('Veuillez renseigner %(champ)s.') % {'champ': premier},
-            code='entreprise_incomplete',
-        )
-
-    return build_onboarding_status(user, request)
+        status['champs_manquants'] = _champs_entreprise_manquants(ent)
+    return status
 
 
 @transaction.atomic
@@ -136,10 +123,15 @@ def finaliser_onboarding(user, request=None) -> dict:
         raise ErreurOnboarding(_('Veuillez compléter votre profil.'), code='profil_incomplet')
     assurer_contexte_initial_utilisateur(user)
     ent = user.get_entreprise(request)
+    if ent:
+        evaluer_et_marquer_configuration(ent)
+        ent.refresh_from_db()
     if not entreprise_est_configuree(ent):
+        manquants = _champs_entreprise_manquants(ent) if ent else []
         raise ErreurOnboarding(
             _('Veuillez compléter les informations de votre entreprise.'),
             code='entreprise_incomplete',
+            title=_('Informations incomplètes'),
         )
 
     abo = get_abonnement_courant(ent.id) if ent else None

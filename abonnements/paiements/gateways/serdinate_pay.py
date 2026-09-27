@@ -8,7 +8,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.http import HttpRequest
 
-from abonnements.paiements.gateways.base import GatewayPaiementBase, NotificationPaiement
+from abonnements.paiements.gateways.base import GatewayPaiementBase, NotificationPaiement, normaliser_statut_gateway
 
 
 class GatewaySerdinatePay(GatewayPaiementBase):
@@ -63,7 +63,7 @@ class GatewaySerdinatePay(GatewayPaiementBase):
 
     def parser_notification(self, payload: dict) -> NotificationPaiement:
         statut_raw = (payload.get('event') or payload.get('status') or '').lower()
-        statut = 'confirme' if statut_raw in ('payment.success', 'success', 'paid', 'confirme') else 'echec'
+        statut = normaliser_statut_gateway(statut_raw)
         montant = payload.get('amount') or payload.get('montant')
         return NotificationPaiement(
             reference_interne=str(payload.get('order_id') or payload.get('reference_interne') or ''),

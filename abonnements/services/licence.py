@@ -46,7 +46,7 @@ def _fonctionnalites_essai_complet():
         'vente_comptant': True,
         'vente_credit': True,
         'clients': True,
-        'dettes': False,
+        'dettes': True,
         'caisse': True,
         'rapports_simples': True,
         'rapports_avances': True,
@@ -107,17 +107,17 @@ def get_formule_a_vie() -> FormuleAbonnement:
         defaults=defaults,
     )
     if not created:
+        # Ne pas écraser les edits admin (description / features) à chaque appel.
         update_fields = []
-        for key, value in defaults.items():
-            if key == 'prix_a_vie':
-                if prix_force is not None:
-                    value = prix_force
-                elif float(getattr(formule, 'prix_a_vie', 0) or 0) > 0:
-                    # Prix déjà fixé en admin : ne pas le remettre à 0 sans env
-                    continue
-            if getattr(formule, key) != value:
-                setattr(formule, key, value)
-                update_fields.append(key)
+        if prix_force is not None and float(formule.prix_a_vie or 0) != float(prix_force):
+            formule.prix_a_vie = prix_force
+            update_fields.append('prix_a_vie')
+        if not formule.est_active:
+            formule.est_active = True
+            update_fields.append('est_active')
+        if not formule.est_visible_catalogue:
+            formule.est_visible_catalogue = True
+            update_fields.append('est_visible_catalogue')
         if update_fields:
             formule.save(update_fields=[*update_fields, 'updated_at'])
     return formule

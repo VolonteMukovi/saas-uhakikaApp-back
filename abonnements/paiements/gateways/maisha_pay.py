@@ -9,7 +9,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.http import HttpRequest
 
-from abonnements.paiements.gateways.base import GatewayPaiementBase, NotificationPaiement
+from abonnements.paiements.gateways.base import GatewayPaiementBase, NotificationPaiement, normaliser_statut_gateway
 
 
 class GatewayMaishaPay(GatewayPaiementBase):
@@ -67,7 +67,7 @@ class GatewayMaishaPay(GatewayPaiementBase):
 
     def parser_notification(self, payload: dict) -> NotificationPaiement:
         statut_raw = (payload.get('status') or payload.get('statut') or '').lower()
-        statut = 'confirme' if statut_raw in ('success', 'paid', 'confirme', 'completed') else 'echec'
+        statut = normaliser_statut_gateway(statut_raw)
         montant = payload.get('amount') or payload.get('montant')
         return NotificationPaiement(
             reference_interne=str(payload.get('reference_interne') or payload.get('merchant_reference') or ''),
