@@ -49,7 +49,7 @@ GET /api/dettes-clients/?cursor=...&page_size=25
 GET /api/dettes-clients/?page=1&page_size=25
 ```
 
-Champs liste : `id`, `sortie_id`, `client_id`, `client_nom`, `date`, `montant`, `paye`, `reste`, `status`, `updated_at`.
+Champs liste : `id`, `sortie_id`, `client_id`, `client_nom`, `date`, `montant`, `paye`, `reste`, `status`, `devise_sigle`, `updated_at`.
 
 Pagination :
 
@@ -171,6 +171,25 @@ Règles :
 - Montant ≤ `reste` ; dette `TERMINE` refusée (`400` problem+json).
 - Après paiement : utiliser `dette` dans la réponse — **pas besoin** d’un 2ᵉ GET.
 - Retry réseau : **même** `Idempotency-Key` → réponse historisée, pas de double débit.
+
+### Reçu PDF / impression (même format que facture vente)
+
+Après un paiement, prévisualiser ou imprimer le reçu ticket 58 mm :
+
+| Action | Méthode | URL |
+|--------|---------|-----|
+| Routage FE | `GET` | `/api/paiements-dettes-clients/{id}/document-paiement/` |
+| PDF (prévisualisation) | `GET` | `/api/paiements-dettes-clients/{id}/recu-pos/` |
+| Impression POS | `POST` | `/api/paiements-dettes-clients/{id}/recu-pos-print/` |
+
+Contenu du reçu (aligné facture / reçu vente) :
+
+- en-tête entreprise ;
+- titre **RECU PAIEMENT DETTE** ;
+- Date, Client, Devise, `Mode: PAIEMENT DETTE`, Date vente ;
+- **produits** de la vente à crédit (noms complets, montants à 2 décimales) ;
+- résumé : Montant facture / Ce paiement / Total payé / Reste dû / Statut ;
+- pied : Imprimé par + messages de remerciement / aucun retour.
 
 ### Historique des paiements
 

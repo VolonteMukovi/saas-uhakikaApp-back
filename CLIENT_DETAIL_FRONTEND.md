@@ -109,9 +109,13 @@ Tableau produits (date, produit, qté, PU, total)
 
 Ne **pas** recalculer côté front. Ne plus afficher CA / solde / écart / graphiques / débit-crédit.
 
----
+### Solde (léger)
 
-## Alias conservés
+```http
+GET /api/clients/{client_id}/solde/
+```
+
+Même totaux que le dashboard **sans** `produits_achetes` (payload réduit → ETag plus efficace).
 
 | Endpoint | Comportement |
 |----------|--------------|

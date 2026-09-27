@@ -1280,7 +1280,17 @@ class PaiementDettesClientsSerializer(serializers.ModelSerializer):
 
 
 def _devise_sigle_from_sortie(sortie) -> str | None:
-    if not sortie or not getattr(sortie, 'pk', None):
+    """Préfère la devise de la sortie (1 jointure) ; fallback lignes préchargées."""
+    if not sortie:
+        return None
+    for attr in ('devise', 'devise_reference'):
+        dev = getattr(sortie, attr, None)
+        sigle = getattr(dev, 'sigle', None) if dev else None
+        if sigle:
+            return str(sigle)
+    # Fallback uniquement si prefetch déjà fait (évite N+1)
+    prefetched = getattr(sortie, '_prefetched_objects_cache', {})
+    if 'lignes' not in prefetched:
         return None
     sigles: set[str] = set()
     for ligne in sortie.lignes.all():
@@ -1290,9 +1300,7 @@ def _devise_sigle_from_sortie(sortie) -> str | None:
             sigles.add(str(sigle))
     if not sigles:
         return None
-    if len(sigles) == 1:
-        return next(iter(sigles))
-    return next(iter(sorted(sigles)))
+    return sorted(sigles)[0]
 
 
 class DettesClientsListSerializer(serializers.ModelSerializer):
@@ -1321,8 +1329,7 @@ class DettesClientsListSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_devise_sigle(self, obj):
-        sortie = getattr(obj, 'sortie', None)
-        return _devise_sigle_from_sortie(sortie)
+        return _devise_sigle_from_sortie(getattr(obj, 'sortie', None))
 
 
 class DettesClientsSerializer(DettesClientsListSerializer):

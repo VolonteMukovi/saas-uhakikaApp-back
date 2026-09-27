@@ -116,13 +116,17 @@ def _lignes_achats_qs(sorties_qs):
 def build_produits_achetes(sorties_qs) -> list[dict]:
     """Lignes produit issues des sorties (jamais des paiements de dettes)."""
     results = []
-    for ligne in _lignes_achats_qs(sorties_qs):
+    for ligne in _lignes_achats_qs(sorties_qs).iterator(chunk_size=200):
         qte = _amount(ligne.quantite)
         pu = _amount(ligne.prix_unitaire)
         dt = ligne.sortie.date_creation
+        if dt is not None:
+            date_str = timezone.localtime(dt).date().isoformat() if timezone.is_aware(dt) else dt.date().isoformat()
+        else:
+            date_str = None
         results.append(
             {
-                "date": timezone.localtime(dt).date().isoformat() if dt else None,
+                "date": date_str,
                 "produit": _article_nom(ligne.article),
                 "article_id": ligne.article_id,
                 "quantite": f"{qte:.5f}",
@@ -142,6 +146,7 @@ def build_client_dashboard(
     entreprise_id: int,
     succursale_id: int | None,
     period: dict,
+    include_produits: bool = True,
 ):
     """
     Réponse minimale pour le détail client :
@@ -149,7 +154,7 @@ def build_client_dashboard(
     - nombre_achats : nb de Sortie (comptant + crédit)
     - total_achete : Σ (qté × PU) des LigneSortie
     - dette_restante : Σ DettesClients.reste (filtrées par date de dette)
-    - produits_achetes : lignes produit
+    - produits_achetes : lignes produit (optionnel pour alléger /solde)
     """
     sorties = _sorties_qs(
         client=client,
@@ -165,16 +170,13 @@ def build_client_dashboard(
     )
 
     lignes = LigneSortie.objects.filter(sortie__in=sorties).annotate(line_total=_LINE_TOTAL)
-    agg = lignes.aggregate(total=Sum("line_total"), nb_lignes=Count("id"))
-    dette_agg = dettes.aggregate(
-        montant=Sum("montant"),
-        paye=Sum("paye"),
-        reste=Sum("reste"),
+    agg = lignes.aggregate(
+        total=Sum("line_total"),
+        nb_lignes=Count("id"),
     )
+    dette_reste = _amount(dettes.aggregate(reste=Sum("reste"))["reste"])
 
-    produits = build_produits_achetes(sorties)
-
-    return {
+    payload = {
         "client": {
             "id": client.pk,
             "nom": client.nom,
@@ -190,15 +192,14 @@ def build_client_dashboard(
         },
         "nombre_achats": sorties.count(),
         "total_achete": _amount_str(agg["total"]),
-        "dette_restante": _amount_str(dette_agg["reste"]),
-        "situation_dettes": {
-            "dette_totale": _amount_str(dette_agg["montant"]),
-            "total_paye": _amount_str(dette_agg["paye"]),
-            "reste": _amount_str(dette_agg["reste"]),
-        },
-        "produits_achetes": produits,
+        "dette_restante": _amount_str(dette_reste),
         "nombre_lignes_produits": agg["nb_lignes"] or 0,
     }
+    if include_produits:
+        payload["produits_achetes"] = build_produits_achetes(sorties)
+    else:
+        payload["produits_achetes"] = []
+    return payload
 
 
 def build_client_statistics(*, client: Client, entreprise_id: int, succursale_id: int | None, period: dict):
@@ -208,16 +209,18 @@ def build_client_statistics(*, client: Client, entreprise_id: int, succursale_id
         entreprise_id=entreprise_id,
         succursale_id=succursale_id,
         period=period,
+        include_produits=True,
     )
 
 
 def build_client_balance(*, client: Client, entreprise_id: int, succursale_id: int | None, period: dict):
-    """Solde = dette restante uniquement (nouvelle logique DettesClients.reste)."""
+    """Solde = dette restante — sans charger les produits (perf / ETag léger)."""
     dashboard = build_client_dashboard(
         client=client,
         entreprise_id=entreprise_id,
         succursale_id=succursale_id,
         period=period,
+        include_produits=False,
     )
     return {
         "client": dashboard["client"],

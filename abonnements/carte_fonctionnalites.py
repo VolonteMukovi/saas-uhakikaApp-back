@@ -57,6 +57,7 @@ REGLES_FONCTIONNALITES: tuple[RegleFonctionnalite, ...] = (
     # Impression POS
     RegleFonctionnalite(_p(r'^/api/sorties/\d+/facture-pos-print'), ECRITURE, 'impression_pos'),
     RegleFonctionnalite(_p(r'^/api/sorties/\d+/bon-pos-print'), ECRITURE, 'impression_pos'),
+    RegleFonctionnalite(_p(r'^/api/paiements-dettes-clients/\d+/recu-pos-print'), ECRITURE, 'impression_pos'),
     # Rapports avancés (lecture + export)
     RegleFonctionnalite(_p(r'^/api/rapports/bon-achat'), TOUTES, 'rapports_avances', True),
     RegleFonctionnalite(_p(r'^/api/rapports/.+/fiche-stock'), TOUTES, 'rapports_avances', True),

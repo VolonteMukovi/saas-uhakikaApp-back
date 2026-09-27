@@ -201,49 +201,77 @@ def totaux_reste(qs) -> Decimal:
 
 
 def _devises_par_client(qs) -> dict[str, str | None]:
-    """Une requête : sigle devise dominant par client (lignes des sorties liées aux dettes)."""
+    """Une requête : sigle devise par client (sortie.devise, sinon ligne)."""
     from stock.models import LigneSortie
 
-    sortie_ids = qs.values_list("sortie_id", flat=True)
-    rows = (
-        LigneSortie.objects.filter(sortie_id__in=sortie_ids, sortie__client_id__isnull=False)
-        .exclude(devise__sigle__isnull=True)
-        .exclude(devise__sigle="")
-        .values_list("sortie__client_id", "devise__sigle")
+    # Priorité : devise portée par la Sortie
+    rows_sortie = (
+        qs.filter(sortie__client_id__isnull=False)
+        .exclude(sortie__devise__sigle__isnull=True)
+        .exclude(sortie__devise__sigle="")
+        .values_list("sortie__client_id", "sortie__devise__sigle")
         .distinct()
     )
     by_client: dict[str, set[str]] = {}
-    for client_id, sigle in rows:
+    for client_id, sigle in rows_sortie:
         by_client.setdefault(client_id, set()).add(sigle)
+
+    missing = set(
+        qs.filter(sortie__client_id__isnull=False)
+        .values_list("sortie__client_id", flat=True)
+        .distinct()
+    ) - set(by_client.keys())
+    if missing:
+        sortie_ids = qs.filter(sortie__client_id__in=missing).values_list("sortie_id", flat=True)
+        rows_lignes = (
+            LigneSortie.objects.filter(sortie_id__in=sortie_ids, sortie__client_id__in=missing)
+            .exclude(devise__sigle__isnull=True)
+            .exclude(devise__sigle="")
+            .values_list("sortie__client_id", "devise__sigle")
+            .distinct()
+        )
+        for client_id, sigle in rows_lignes:
+            by_client.setdefault(client_id, set()).add(sigle)
+
     return {
         cid: (sorted(sigles)[0] if sigles else None)
         for cid, sigles in by_client.items()
     }
 
 
-def totaux_par_client(qs, *, only_positif: bool = True):
-    """Liste {client_id, client_nom, total_reste, devise_sigle} + total agrégé."""
+def totaux_par_client_qs(qs, *, only_positif: bool = True):
+    """ValuesQuerySet paginable (CURSOR.md) — ne matérialise pas toute la table."""
     rows = (
         qs.filter(sortie__client__isnull=False)
         .values("sortie__client_id", "sortie__client__nom")
         .annotate(total_reste=Sum("reste"))
         .order_by("sortie__client__nom")
     )
-    devises = _devises_par_client(qs)
+    if only_positif:
+        rows = rows.filter(total_reste__gt=0)
+    return rows
+
+
+def enrichir_clients_devise(dettes_qs, rows) -> list[dict]:
+    """Ajoute devise_sigle aux lignes client déjà paginées (1 requête devises)."""
+    client_ids = [r["sortie__client_id"] for r in rows]
+    devises = _devises_par_client(dettes_qs.filter(sortie__client_id__in=client_ids)) if client_ids else {}
     results = []
-    total_all = ZERO
     for r in rows:
-        total = _q(r["total_reste"])
-        total_all += total
-        if only_positif and total <= 0:
-            continue
         cid = r["sortie__client_id"]
         results.append(
             {
                 "client_id": cid,
                 "client_nom": r["sortie__client__nom"],
-                "total_reste": f"{total:.5f}",
+                "total_reste": f"{_q(r['total_reste']):.5f}",
                 "devise_sigle": devises.get(cid),
             }
         )
-    return results, total_all
+    return results
+
+
+def totaux_par_client(qs, *, only_positif: bool = True):
+    """Compat : liste + total (préférer totaux_par_client_qs + pagination en vue)."""
+    rows = list(totaux_par_client_qs(qs, only_positif=only_positif))
+    clients = enrichir_clients_devise(qs, rows)
+    return clients, totaux_reste(qs)

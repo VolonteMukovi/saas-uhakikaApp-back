@@ -1431,11 +1431,11 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         if backend == 'windows':
             printer_name = (getattr(settings, 'POS_PRINTER_NAME', '') or '').strip()
             if not printer_name:
-                return Response({'error': "Imprimante Windows non configurÃ©e (POS_PRINTER_NAME)."}, status=501)
+                return Response({'error': "Imprimante Windows non configuree (POS_PRINTER_NAME)."}, status=501)
         else:
             port = getattr(settings, 'POS_PRINTER_PORT', None)
             if not port:
-                return Response({'error': "Port imprimante non configurÃ© (POS_PRINTER_PORT)."}, status=501)
+                return Response({'error': "Port imprimante non configure (POS_PRINTER_PORT)."}, status=501)
 
         try:
             from pos.printer_service import MP2258Printer
@@ -1449,14 +1449,21 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         try:
             printer = MP2258Printer()
             printer.print_facture(sortie, entreprise, user)
-            return Response({'status': 'impression lancÃ©e'})
+            return Response({'status': 'impression lancee'})
         except ImportError as e:
             return Response(
-                {'error': f"DÃ©pendance manquante pour ESC/POS: {e}. Installez python-escpos."},
+                {'error': f"Dependance manquante pour ESC/POS: {e}. Installez python-escpos et pywin32."},
                 status=501,
             )
+        except ValueError as e:
+            payload = {'error': str(e)}
+            try:
+                payload['printers'] = MP2258Printer.list_windows_printers()
+            except Exception:
+                pass
+            return Response(payload, status=503)
         except Exception as e:
-            return Response({'error': str(e)}, status=500)
+            return Response({'error': str(e)}, status=503)
         finally:
             try:
                 if printer:
@@ -1478,11 +1485,11 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         if backend == 'windows':
             printer_name = (getattr(settings, 'POS_PRINTER_NAME', '') or '').strip()
             if not printer_name:
-                return Response({'error': "Imprimante Windows non configurÃ©e (POS_PRINTER_NAME)."}, status=501)
+                return Response({'error': "Imprimante Windows non configuree (POS_PRINTER_NAME)."}, status=501)
         else:
             port = getattr(settings, 'POS_PRINTER_PORT', None)
             if not port:
-                return Response({'error': "Port imprimante non configurÃ© (POS_PRINTER_PORT)."}, status=501)
+                return Response({'error': "Port imprimante non configure (POS_PRINTER_PORT)."}, status=501)
 
         try:
             from pos.printer_service import MP2258Printer
@@ -1496,14 +1503,21 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         try:
             printer = MP2258Printer()
             printer.print_recu(sortie, entreprise, user)
-            return Response({'status': 'impression lancÃ©e'})
+            return Response({'status': 'impression lancee'})
         except ImportError as e:
             return Response(
-                {'error': f"DÃ©pendance manquante pour ESC/POS: {e}. Installez python-escpos."},
+                {'error': f"Dependance manquante pour ESC/POS: {e}. Installez python-escpos et pywin32."},
                 status=501,
             )
+        except ValueError as e:
+            payload = {'error': str(e)}
+            try:
+                payload['printers'] = MP2258Printer.list_windows_printers()
+            except Exception:
+                pass
+            return Response(payload, status=503)
         except Exception as e:
-            return Response({'error': str(e)}, status=500)
+            return Response({'error': str(e)}, status=503)
         finally:
             try:
                 if printer:
@@ -3523,7 +3537,12 @@ class DettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
     Paiements via `POST /api/paiements-dettes-clients/` (+ `Idempotency-Key`).
     """
 
-    queryset = DettesClients.objects.select_related('sortie', 'sortie__client').all()
+    queryset = DettesClients.objects.select_related(
+        'sortie',
+        'sortie__client',
+        'sortie__devise',
+        'sortie__devise_reference',
+    ).all()
     serializer_class = DettesClientsSerializer
     tenant_lookup = 'sortie__entreprise_id'
     ordering = ('-date', '-id')
@@ -3537,14 +3556,11 @@ class DettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         from stock.services.dettes_clients import filter_dettes_qs
 
         qs = super().get_queryset()
-        if self.action in ('list', 'retrieve'):
-            qs = qs.prefetch_related(
-                'sortie__lignes__devise',
-            )
         if self.action == 'retrieve':
             qs = qs.prefetch_related(
                 'paiements',
                 'sortie__lignes__article',
+                'sortie__lignes__devise',
             )
         p = self.request.query_params
         return filter_dettes_qs(
@@ -3603,26 +3619,25 @@ class DettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
     )
     @action(detail=False, methods=['get'], url_path='par-clients')
     def par_clients(self, request):
-        from stock.services.dettes_clients import totaux_par_client
+        from stock.services.dettes_clients import totaux_par_client_qs, totaux_reste, enrichir_clients_devise
 
         qs = self.get_queryset()
-        clients, total_all = totaux_par_client(qs, only_positif=True)
-        page = self.paginate_queryset(clients)
-        payload = {
-            'clients': page if page is not None else clients,
-            'total_reste': f'{total_all:.5f}',
-        }
+        rows = totaux_par_client_qs(qs, only_positif=True)
+        total_all = totaux_reste(qs)
+        page = self.paginate_queryset(rows)
         if page is not None:
-            resp = self.get_paginated_response(page)
-            # Conserver total_reste global hors page
+            clients = enrichir_clients_devise(qs, page)
+            resp = self.get_paginated_response(clients)
             data = resp.data
             if isinstance(data, dict):
-                data['total_reste'] = payload['total_reste']
-                # Alias lisible côté FE (clients == results)
-                if 'results' in data and 'clients' not in data:
-                    data['clients'] = data['results']
+                data['total_reste'] = f'{total_all:.5f}'
+                data['clients'] = data.get('results', clients)
             return resp
-        return Response(payload)
+        clients = enrichir_clients_devise(qs, list(rows))
+        return Response({
+            'clients': clients,
+            'total_reste': f'{total_all:.5f}',
+        })
 
 
 @swagger_auto_schema(tags=['Paiements dettes clients'])
@@ -3638,6 +3653,11 @@ class PaiementDettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, v
         'dettes_clients',
         'dettes_clients__sortie',
         'dettes_clients__sortie__client',
+        'dettes_clients__sortie__devise',
+        'dettes_clients__sortie__entreprise',
+    ).prefetch_related(
+        'dettes_clients__sortie__lignes__article',
+        'dettes_clients__sortie__lignes__devise',
     ).all()
     serializer_class = PaiementDettesClientsSerializer
     tenant_lookup = 'dettes_clients__sortie__entreprise_id'
@@ -3687,3 +3707,88 @@ class PaiementDettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, v
     )
     def create(self, request, *args, **kwargs):
         return super().create(request, *args, **kwargs)
+
+    @swagger_auto_schema(
+        operation_summary='PDF reçu paiement dette (ticket 58 mm)',
+        operation_description=(
+            'Même format que facture/reçu vente : produits de la vente à crédit + '
+            'résumé (montant facture, ce paiement, total payé, reste dû).'
+        ),
+        tags=['Paiements dettes clients'],
+    )
+    @action(detail=True, methods=['get'], url_path='recu-pos', permission_classes=[IsAuthenticated])
+    def recu_pos_pdf(self, request, pk=None):
+        user = request.user
+        paiement = self.get_object()
+        entreprise = user.get_entreprise(request)
+        from pos.printer_service import MP2258Printer
+        from caisse.services.recu_paiement_pos import ticket_lines_to_pdf_response
+
+        ticket_lines = MP2258Printer().build_recu_paiement_dette_ticket_lines(
+            paiement, entreprise, user,
+        )
+        return ticket_lines_to_pdf_response(ticket_lines, f"RECU_PAIEMENT_DETTE_{paiement.pk}.pdf")
+
+    @swagger_auto_schema(
+        operation_summary='Impression ESC/POS reçu paiement dette',
+        tags=['Paiements dettes clients'],
+    )
+    @action(detail=True, methods=['post'], url_path='recu-pos-print', permission_classes=[IsAuthenticated])
+    def recu_pos_print(self, request, pk=None):
+        user = request.user
+        paiement = self.get_object()
+        entreprise = user.get_entreprise(request)
+
+        backend = str(getattr(settings, 'POS_PRINTER_BACKEND', 'serial') or 'serial').lower()
+        if backend == 'windows':
+            printer_name = (getattr(settings, 'POS_PRINTER_NAME', '') or '').strip()
+            if not printer_name:
+                return Response({'error': "Imprimante Windows non configuree (POS_PRINTER_NAME)."}, status=501)
+        else:
+            port = getattr(settings, 'POS_PRINTER_PORT', None)
+            if not port:
+                return Response({'error': "Port imprimante non configure (POS_PRINTER_PORT)."}, status=501)
+
+        try:
+            from pos.printer_service import MP2258Printer
+        except Exception as e:
+            return Response({'error': f"Service ESC/POS indisponible: {e}"}, status=501)
+
+        printer = None
+        try:
+            printer = MP2258Printer()
+            printer.print_recu_paiement_dette(paiement, entreprise, user)
+            return Response({'status': 'impression lancee'})
+        except ImportError as e:
+            return Response(
+                {'error': f"Dependance manquante pour ESC/POS: {e}. Installez python-escpos et pywin32."},
+                status=501,
+            )
+        except ValueError as e:
+            payload = {'error': str(e)}
+            try:
+                payload['printers'] = MP2258Printer.list_windows_printers()
+            except Exception:
+                pass
+            return Response(payload, status=503)
+        except Exception as e:
+            return Response({'error': str(e)}, status=503)
+        finally:
+            try:
+                if printer:
+                    printer.close()
+            except Exception:
+                pass
+
+    @swagger_auto_schema(
+        operation_summary='URLs document reçu paiement dette',
+        tags=['Paiements dettes clients'],
+    )
+    @action(detail=True, methods=['get'], url_path='document-paiement', permission_classes=[IsAuthenticated])
+    def document_paiement(self, request, pk=None):
+        paiement = self.get_object()
+        from pos.printer_service import MP2258Printer
+        info = MP2258Printer.resolve_document_paiement_dette(paiement)
+        info['paiement_id'] = paiement.pk
+        info['dettes_clients_id'] = paiement.dettes_clients_id
+        return Response(info)
