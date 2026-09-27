@@ -95,20 +95,63 @@ def _succursales_for_membership(membership):
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     """Connexion : tokens + infos user ; claims session_start + contexte tenant (entreprise/succursale)."""
 
+    @staticmethod
+    def _resolve_user_by_identifier(candidate: str):
+        """Résout e-mail, username ou téléphone → User (sans créer de compte)."""
+        User = get_user_model()
+        raw = (candidate or '').strip()
+        if not raw:
+            return None
+        if '@' in raw:
+            return User.objects.filter(email__iexact=raw).first()
+        by_username = User.objects.filter(username__iexact=raw).first()
+        if by_username:
+            return by_username
+        digits = ''.join(ch for ch in raw if ch.isdigit() or ch == '+')
+        if digits and hasattr(User, 'telephone'):
+            return User.objects.filter(telephone=raw).first() or User.objects.filter(telephone=digits).first()
+        return None
+
     def validate(self, attrs):
         username_field = self.username_field
         candidate = attrs.get(username_field)
         password = attrs.get('password')
         User = get_user_model()
-        pending = User.objects.filter(**{username_field: candidate}).first()
-        if pending and not pending.email_verifie and pending.check_password(password):
+
+        resolved = self._resolve_user_by_identifier(candidate)
+        if resolved is None:
+            raise drf_serializers.ValidationError({
+                'detail': _(
+                    'Aucun compte trouvé pour cet identifiant. '
+                    'Créez un compte pour continuer.'
+                ),
+                'code': 'compte_inexistant',
+                'email': candidate if candidate and '@' in str(candidate) else '',
+                'suggest_register': True,
+            })
+
+        # Authentifier avec le username canonique (login e-mail → username)
+        attrs[username_field] = resolved.username
+
+        if not resolved.email_verifie and resolved.check_password(password):
             raise drf_serializers.ValidationError({
                 'detail': _('Veuillez confirmer votre adresse e-mail avant de vous connecter.'),
                 'code': 'email_not_verified',
-                'email': pending.email,
+                'email': resolved.email,
                 'statut_verification': 'EN_ATTENTE',
             })
-        super(TokenObtainPairSerializer, self).validate(attrs)
+
+        try:
+            super(TokenObtainPairSerializer, self).validate(attrs)
+        except Exception:
+            # Mot de passe incorrect (ou compte inactif) — ne pas confondre avec compte inexistant
+            if not resolved.check_password(password):
+                raise drf_serializers.ValidationError({
+                    'detail': _('Identifiants incorrects.'),
+                    'code': 'identifiants_invalides',
+                })
+            raise
+
         assurer_contexte_initial_utilisateur(self.user)
         refresh = self.get_token(self.user)
         refresh["session_start"] = int(time.time())

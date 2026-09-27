@@ -38,13 +38,15 @@ class ConnexionGoogleTests(TestCase):
         self.assertEqual(resp.status_code, 201)
         self.assertTrue(resp.data['est_nouveau_compte'])
         self.assertTrue(resp.data['connexion_google'])
-        self.assertEqual(resp.data['statut_verification'], 'EN_ATTENTE')
-        self.assertNotIn('tokens', resp.data)
+        # email_verified=True côté Google → compte actif, tokens, pas d'attente SMTP
+        self.assertIn('tokens', resp.data)
+        self.assertTrue(resp.data.get('email_verifie') or resp.data.get('statut_verification') != 'EN_ATTENTE')
         user = User.objects.get(email='test@gmail.com')
         self.assertFalse(user.has_usable_password())
-        self.assertFalse(user.email_verifie)
-        self.assertFalse(user.is_active)
+        self.assertTrue(user.email_verifie)
+        self.assertTrue(user.is_active)
         self.assertTrue(ProfilConnexionGoogle.objects.filter(utilisateur=user).exists())
+        mock_send.assert_not_called()
 
     @patch('inscription.views.verifier_id_token_google')
     def test_connexion_google_compte_existant(self, mock_verify):

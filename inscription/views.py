@@ -242,11 +242,14 @@ class ConnexionGoogleView(APIView):
 
         if est_nouveau:
 
-            message = _(
-
-                'Compte créé via Google. Un e-mail de confirmation vous a été envoyé.'
-
-            )
+            if user.email_verifie:
+                message = _(
+                    'Compte créé via Google. Poursuivez la configuration de votre entreprise.'
+                )
+            else:
+                message = _(
+                    'Compte créé via Google. Un e-mail de confirmation vous a été envoyé.'
+                )
 
             http_status = status.HTTP_201_CREATED
 

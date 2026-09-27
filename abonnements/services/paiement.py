@@ -59,21 +59,37 @@ def _creer_abonnement_et_paiement(
     fournisseur: str,
     user=None,
 ) -> tuple[AbonnementEntreprise, PaiementAbonnement]:
-    courant = get_abonnement_courant(entreprise.id)
-    if courant and courant.statut == AbonnementEntreprise.STATUT_EN_ATTENTE:
+    if AbonnementEntreprise.objects.filter(
+        entreprise_id=entreprise.id,
+        statut=AbonnementEntreprise.STATUT_EN_ATTENTE,
+    ).exists():
         raise ErreurPaiement(_('Une demande de paiement est déjà en cours.'), code='paiement_en_cours')
 
-    if courant:
+    courant = get_abonnement_courant(entreprise.id)
+    montant = _montant_formule(formule, periode)
+    if montant is None or Decimal(montant) <= 0:
+        raise ErreurPaiement(
+            _('Ce plan n\'a pas encore de prix catalogue. Contactez l\'équipe technique ou utilisez la demande manuelle.'),
+            code='prix_non_defini',
+        )
+
+    # Garder l'essai / licence active jusqu'à confirmation du paiement
+    conserver_courant = bool(
+        courant and courant.statut in (
+            AbonnementEntreprise.STATUT_ESSAI,
+            AbonnementEntreprise.STATUT_ACTIF,
+        )
+    )
+    if courant and not conserver_courant:
         courant.est_courant = False
         courant.save(update_fields=['est_courant', 'updated_at'])
 
-    montant = _montant_formule(formule, periode)
     abonnement = AbonnementEntreprise.objects.create(
         entreprise=entreprise,
         formule=formule,
         statut=AbonnementEntreprise.STATUT_EN_ATTENTE,
         periode=periode,
-        est_courant=True,
+        est_courant=not conserver_courant,
     )
     paiement = PaiementAbonnement.objects.create(
         abonnement=abonnement,
@@ -93,6 +109,7 @@ def _creer_abonnement_et_paiement(
         montant=str(montant),
         fournisseur=fournisseur,
         reference_interne=paiement.reference_interne,
+        conserve_essai=conserver_courant,
     )
     return abonnement, paiement
 
@@ -193,6 +210,11 @@ def activer_abonnement_apres_paiement_confirme(
     now = timezone.now()
     abonnement = paiement.abonnement
     date_fin = calculer_date_fin_abonnement(abonnement.periode, maintenant=now)
+
+    AbonnementEntreprise.objects.filter(
+        entreprise_id=abonnement.entreprise_id,
+        est_courant=True,
+    ).exclude(pk=abonnement.pk).update(est_courant=False)
 
     abonnement.statut = AbonnementEntreprise.STATUT_ACTIF
     abonnement.date_debut = now

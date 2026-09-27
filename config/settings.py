@@ -292,6 +292,39 @@ DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="UhakikaApp <noreply@u
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 EMAIL_TRANSACTIONAL_FROM = config("EMAIL_TRANSACTIONAL_FROM", default="").strip()
 
+
+def _smtp_credentials_are_placeholder(user: str, password: str) -> bool:
+    u = (user or "").strip().lower()
+    p = (password or "").strip().lower()
+    if not u or not p:
+        return True
+    if "votre_login" in u or u.endswith("_smtp_brevo") and "votre" in u:
+        return True
+    if "votre_cle" in p or p.startswith("xsmtpsib_votre") or p in ("password", "secret", "changeme"):
+        return True
+    return False
+
+
+# Placeholders .env.example → bascule console en DEBUG (évite 535 → 503 silencieux).
+if str(EMAIL_BACKEND).endswith("smtp.EmailBackend") and _smtp_credentials_are_placeholder(
+    EMAIL_HOST_USER, EMAIL_HOST_PASSWORD
+):
+    if DEBUG:
+        EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "EMAIL_HOST_USER/PASSWORD sont des placeholders : "
+            "EMAIL_BACKEND basculé sur console (DEBUG). "
+            "Renseignez les vrais identifiants Brevo pour un envoi réel."
+        )
+    else:
+        import logging as _logging
+        _logging.getLogger(__name__).error(
+            "SMTP configuré avec des identifiants placeholder/vides en production. "
+            "Les e-mails échoueront (535). Configurez EMAIL_HOST_USER / EMAIL_HOST_PASSWORD (Brevo)."
+        )
+
+
 FRONTEND_BASE_URL = config("FRONTEND_BASE_URL", default="http://localhost:5173").rstrip("/")
 # Préfixe i18n du frontend Next.js (ex. /fr → /fr/verify-email)
 FRONTEND_LOCALE_PREFIX = config("FRONTEND_LOCALE_PREFIX", default="/fr").rstrip("/")
@@ -409,6 +442,10 @@ GOOGLE_OAUTH_CLOCK_SKEW_SECONDS = config('GOOGLE_OAUTH_CLOCK_SKEW_SECONDS', defa
 
 # --- Contrôle licence SaaS (étape 3) ---
 LICENCE_CONTROLE_ACTIF = config('LICENCE_CONTROLE_ACTIF', default=True, cast=bool)
+
+# Prix catalogue formule « À vie » (USD, paiement unique).
+# Vide ou 0 = prix à fixer avec l'équipe technique (catalogue affiche « sur devis »).
+FORMULE_A_VIE_PRIX_USD = config('FORMULE_A_VIE_PRIX_USD', default='')
 
 # --- Paiements en ligne (étape 5) ---
 PAIEMENT_GATEWAY_SANDBOX = config('PAIEMENT_GATEWAY_SANDBOX', default=DEBUG, cast=bool)

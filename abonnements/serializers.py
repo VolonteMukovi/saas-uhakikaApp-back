@@ -10,13 +10,52 @@ from abonnements.models import (
 
 
 class FormuleAbonnementSerializer(serializers.ModelSerializer):
+    """Catalogue formules — inclut aides frontend pour le plan à vie."""
+
+    est_a_vie = serializers.SerializerMethodField()
+    periodes_disponibles = serializers.SerializerMethodField()
+    acces_illimite = serializers.SerializerMethodField()
+    prix_sur_demande = serializers.SerializerMethodField()
+
     class Meta:
         model = FormuleAbonnement
         fields = [
             'id', 'code', 'nom', 'description',
             'prix_mensuel', 'prix_annuel', 'prix_a_vie', 'devise',
             'fonctionnalites', 'limites', 'ordre_affichage',
+            'est_a_vie', 'periodes_disponibles', 'acces_illimite',
+            'prix_sur_demande',
         ]
+
+    def get_est_a_vie(self, obj) -> bool:
+        return obj.code == FormuleAbonnement.CODE_A_VIE
+
+    def get_periodes_disponibles(self, obj) -> list[str]:
+        if obj.code == FormuleAbonnement.CODE_A_VIE:
+            return [AbonnementEntreprise.PERIODE_A_VIE]
+        if obj.code in (FormuleAbonnement.CODE_ESSAI, FormuleAbonnement.CODE_DECOUVERTE_PRO):
+            return [AbonnementEntreprise.PERIODE_ESSAI]
+        return [
+            AbonnementEntreprise.PERIODE_MENSUEL,
+            AbonnementEntreprise.PERIODE_ANNUEL,
+        ]
+
+    def get_acces_illimite(self, obj) -> bool:
+        """True = toutes fonctionnalités + quotas illimités (essai / à vie / premium)."""
+        if obj.code in (
+            FormuleAbonnement.CODE_A_VIE,
+            FormuleAbonnement.CODE_ESSAI,
+            FormuleAbonnement.CODE_PREMIUM_ENTREPRISE,
+        ):
+            return True
+        limites = obj.limites or {}
+        return limites.get('utilisateurs_max') is None and limites.get('succursales_max') is None
+
+    def get_prix_sur_demande(self, obj) -> bool:
+        """True si le tarif n'est pas encore publié (ex. À vie à fixer avec l'équipe)."""
+        if obj.code != FormuleAbonnement.CODE_A_VIE:
+            return False
+        return float(obj.prix_a_vie or 0) <= 0
 
 
 class PaiementAbonnementSerializer(serializers.ModelSerializer):

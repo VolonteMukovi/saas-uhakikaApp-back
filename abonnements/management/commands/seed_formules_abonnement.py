@@ -103,11 +103,12 @@ FORMULES = [
         'nom': 'À vie',
         'description': (
             'Accès permanent à toutes les fonctionnalités UHAKIKAAPP, '
-            'sans date d\'expiration — un seul paiement.'
+            'sans date d\'expiration. Utilisateurs et succursales illimités. '
+            'Le tarif est fixé avec l\'équipe technique (après l\'essai gratuit de 2 mois).'
         ),
         'prix_mensuel': 0,
         'prix_annuel': 0,
-        'prix_a_vie': 1999,
+        'prix_a_vie': 0,  # publié via FORMULE_A_VIE_PRIX_USD ou admin quand validé
         'ordre_affichage': 4,
         'fonctionnalites': _fonctionnalites_essai_complet(),
         'limites': {'utilisateurs_max': None, 'succursales_max': None},
@@ -119,6 +120,8 @@ class Command(BaseCommand):
     help = 'Initialise ou met à jour les formules d\'abonnement SaaS.'
 
     def handle(self, *args, **options):
+        from django.conf import settings
+
         # Migration douce des anciens codes vers les codes officiels.
         remap = {
             'essai_gratuit': FormuleAbonnement.CODE_ESSAI,
@@ -141,13 +144,30 @@ class Command(BaseCommand):
         get_formule_a_vie()
         self.stdout.write(self.style.SUCCESS('Formule À vie OK'))
 
+        prix_env = getattr(settings, 'FORMULE_A_VIE_PRIX_USD', None)
+        try:
+            prix_a_vie = float(prix_env) if prix_env is not None and str(prix_env).strip() != '' else None
+            if prix_a_vie is not None and prix_a_vie <= 0:
+                prix_a_vie = None
+        except (TypeError, ValueError):
+            prix_a_vie = None
+
         for data in FORMULES:
-            code = data.pop('code')
+            payload = dict(data)
+            code = payload.pop('code')
+            if code == FormuleAbonnement.CODE_A_VIE:
+                # 0 = prix sur devis ; sinon env override
+                payload['prix_a_vie'] = prix_a_vie if prix_a_vie is not None else 0
             obj, created = FormuleAbonnement.objects.update_or_create(
                 code=code,
-                defaults={**data, 'devise': 'USD', 'est_visible_catalogue': True, 'est_active': True},
+                defaults={**payload, 'devise': 'USD', 'est_visible_catalogue': True, 'est_active': True},
             )
             action = 'Créée' if created else 'Mise à jour'
-            self.stdout.write(f'  {action} : {obj.nom} ({obj.code})')
+            label_prix = (
+                f'prix_a_vie={obj.prix_a_vie}'
+                if float(obj.prix_a_vie or 0) > 0
+                else 'prix_a_vie=sur devis'
+            )
+            self.stdout.write(f'  {action} : {obj.nom} ({obj.code}) — {label_prix}')
 
         self.stdout.write(self.style.SUCCESS('Catalogue formules terminé.'))

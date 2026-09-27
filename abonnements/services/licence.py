@@ -65,26 +65,61 @@ def _fonctionnalites_essai_complet():
     }
 
 
+def _prix_a_vie_depuis_settings() -> float | None:
+    """Prix USD fixe via env ; None = à confirmer avec l'équipe technique (catalogue à 0)."""
+    from django.conf import settings
+
+    raw = getattr(settings, 'FORMULE_A_VIE_PRIX_USD', None)
+    if raw is None or str(raw).strip() == '':
+        return None
+    try:
+        valeur = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return valeur if valeur > 0 else None
+
+
 def get_formule_a_vie() -> FormuleAbonnement:
-    """Formule catalogue : paiement unique, accès permanent, toutes les features."""
-    formule, _ = FormuleAbonnement.objects.get_or_create(
+    """Formule catalogue : accès permanent, toutes les features. Prix = env ou 0 (sur devis)."""
+    prix_force = _prix_a_vie_depuis_settings()
+    prix_a_vie = prix_force if prix_force is not None else 0
+
+    defaults = {
+        'nom': 'À vie',
+        'description': (
+            'Accès permanent à toutes les fonctionnalités UHAKIKAAPP, '
+            'sans date d\'expiration. Utilisateurs et succursales illimités. '
+            'Le tarif est fixé avec l\'équipe technique (après l\'essai gratuit de 2 mois).'
+        ),
+        'prix_mensuel': 0,
+        'prix_annuel': 0,
+        'prix_a_vie': prix_a_vie,
+        'duree_essai_jours': 0,
+        'fonctionnalites': _fonctionnalites_essai_complet(),
+        'limites': {'utilisateurs_max': None, 'succursales_max': None},
+        'est_visible_catalogue': True,
+        'est_active': True,
+        'ordre_affichage': 4,
+        'devise': 'USD',
+    }
+    formule, created = FormuleAbonnement.objects.get_or_create(
         code=FormuleAbonnement.CODE_A_VIE,
-        defaults={
-            'nom': 'À vie',
-            'description': (
-                'Accès permanent à toutes les fonctionnalités UHAKIKAAPP, '
-                'sans date d\'expiration — un seul paiement.'
-            ),
-            'prix_mensuel': 0,
-            'prix_annuel': 0,
-            'prix_a_vie': 1999,
-            'duree_essai_jours': 0,
-            'fonctionnalites': _fonctionnalites_essai_complet(),
-            'limites': {'utilisateurs_max': None, 'succursales_max': None},
-            'est_visible_catalogue': True,
-            'ordre_affichage': 4,
-        },
+        defaults=defaults,
     )
+    if not created:
+        update_fields = []
+        for key, value in defaults.items():
+            if key == 'prix_a_vie':
+                if prix_force is not None:
+                    value = prix_force
+                elif float(getattr(formule, 'prix_a_vie', 0) or 0) > 0:
+                    # Prix déjà fixé en admin : ne pas le remettre à 0 sans env
+                    continue
+            if getattr(formule, key) != value:
+                setattr(formule, key, value)
+                update_fields.append(key)
+        if update_fields:
+            formule.save(update_fields=[*update_fields, 'updated_at'])
     return formule
 
 
@@ -270,10 +305,20 @@ def fonctionnalite_autorisee(entreprise_id: int, cle: str) -> bool:
     return bool(etat.get('fonctionnalites', {}).get(cle, False))
 
 
+def _a_demande_en_attente(entreprise_id: int) -> bool:
+    return AbonnementEntreprise.objects.filter(
+        entreprise_id=entreprise_id,
+        statut=AbonnementEntreprise.STATUT_EN_ATTENTE,
+    ).exists()
+
+
 @transaction.atomic
 def demander_abonnement(entreprise, formule_code: str, periode: str, user=None) -> AbonnementEntreprise:
     """
     Enregistre une demande d'abonnement payant (en attente de paiement / validation manuelle).
+
+    Si un essai (ou une licence active) est en cours, il reste courant jusqu'à activation :
+    l'utilisateur conserve l'accès gratuit 2 mois avant de passer éventuellement à vie / payant.
     """
     try:
         formule = FormuleAbonnement.objects.get(code=formule_code, est_active=True)
@@ -291,9 +336,10 @@ def demander_abonnement(entreprise, formule_code: str, periode: str, user=None) 
     if periode not in periodes_ok:
         raise ValueError(_('Période invalide.'))
 
-    courant = get_abonnement_courant(entreprise.id)
-    if courant and courant.statut == AbonnementEntreprise.STATUT_EN_ATTENTE:
+    if _a_demande_en_attente(entreprise.id):
         raise ValueError(_('Une demande est déjà en attente de validation.'))
+
+    courant = get_abonnement_courant(entreprise.id)
 
     # Formule à vie ⇒ période forcée à « a_vie »
     if formule.code == FormuleAbonnement.CODE_A_VIE:
@@ -308,8 +354,14 @@ def demander_abonnement(entreprise, formule_code: str, periode: str, user=None) 
     else:
         montant = formule.prix_annuel
 
-    # Marquer l'ancien comme non courant si on remplace par une demande
-    if courant:
+    # Garder l'essai / licence active tant que la demande n'est pas validée
+    conserver_courant = bool(
+        courant and courant.statut in (
+            AbonnementEntreprise.STATUT_ESSAI,
+            AbonnementEntreprise.STATUT_ACTIF,
+        )
+    )
+    if courant and not conserver_courant:
         courant.est_courant = False
         courant.save(update_fields=['est_courant', 'updated_at'])
 
@@ -318,7 +370,7 @@ def demander_abonnement(entreprise, formule_code: str, periode: str, user=None) 
         formule=formule,
         statut=AbonnementEntreprise.STATUT_EN_ATTENTE,
         periode=periode,
-        est_courant=True,
+        est_courant=not conserver_courant,
     )
     PaiementAbonnement.objects.create(
         abonnement=abonnement,
@@ -335,6 +387,7 @@ def demander_abonnement(entreprise, formule_code: str, periode: str, user=None) 
         formule=formule.code,
         periode=periode,
         montant=str(montant),
+        conserve_essai=conserver_courant,
     )
     return abonnement
 
@@ -351,6 +404,11 @@ def activer_abonnement_manuellement(
 
     now = timezone.now()
     date_fin = calculer_date_fin_abonnement(abonnement.periode, maintenant=now)
+
+    AbonnementEntreprise.objects.filter(
+        entreprise_id=abonnement.entreprise_id,
+        est_courant=True,
+    ).exclude(pk=abonnement.pk).update(est_courant=False)
 
     abonnement.statut = AbonnementEntreprise.STATUT_ACTIF
     abonnement.date_debut = now
@@ -420,10 +478,10 @@ def get_abonnement_en_attente(entreprise_id: int) -> AbonnementEntreprise | None
     return (
         AbonnementEntreprise.objects.filter(
             entreprise_id=entreprise_id,
-            est_courant=True,
             statut=AbonnementEntreprise.STATUT_EN_ATTENTE,
         )
         .select_related('formule', 'entreprise')
+        .order_by('-created_at')
         .first()
     )
 

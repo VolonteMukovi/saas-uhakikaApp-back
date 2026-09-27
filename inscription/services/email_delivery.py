@@ -25,6 +25,18 @@ def classifier_erreur_smtp(detail: str) -> str:
     if any(
         phrase in d
         for phrase in (
+            'authentication failed',
+            '535',
+            '5.7.8',
+            'username and password not accepted',
+            'invalid login',
+            'auth failed',
+        )
+    ):
+        return 'smtp_auth_failed'
+    if any(
+        phrase in d
+        for phrase in (
             'domain is not verified',
             'domain not authenticated',
             'not authenticated',

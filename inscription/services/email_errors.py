@@ -3,6 +3,13 @@ from django.utils.translation import gettext as _
 
 
 def message_erreur_envoi_email(code: str | None) -> str:
+    if code == 'smtp_auth_failed':
+        return _(
+            'Authentification SMTP refusée (Brevo). '
+            'Vérifiez EMAIL_HOST_USER et EMAIL_HOST_PASSWORD '
+            '(clé SMTP réelle sur https://app.brevo.com → SMTP & API), '
+            'pas les valeurs d\'exemple du fichier .env.'
+        )
     if code == 'domaine_non_verifie':
         return _(
             'Le domaine uhakikaapp.store n\'est pas authentifié chez Brevo. '

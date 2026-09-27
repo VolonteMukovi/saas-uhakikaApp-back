@@ -185,7 +185,9 @@ class PlateformeAbonnementViewSet(viewsets.ReadOnlyModelViewSet):
             .annotate(total=Count('id'))
             .order_by('formule__code')
         )
-        demandes_en_attente = courants.filter(statut=AbonnementEntreprise.STATUT_EN_ATTENTE).count()
+        demandes_en_attente = AbonnementEntreprise.objects.filter(
+            statut=AbonnementEntreprise.STATUT_EN_ATTENTE,
+        ).count()
         licences_actives = courants.filter(statut__in=[
             AbonnementEntreprise.STATUT_ACTIF,
             AbonnementEntreprise.STATUT_ESSAI,

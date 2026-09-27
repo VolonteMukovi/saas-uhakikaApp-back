@@ -358,14 +358,17 @@ def connecter_ou_inscrire_via_google(payload: dict) -> tuple[User, bool]:
     """
     Retourne (utilisateur, est_nouveau_compte).
     - Existant via google_sub → connexion
-    - Existant via e-mail → liaison du profil Google
+    - Existant via e-mail → liaison du profil Google (pas de doublon)
     - Sinon → création compte admin + profil Google
+    Si Google affirme email_verified : compte immédiatement actif (pas de renvoi SMTP).
     """
     google_sub = payload['sub']
     email = (payload.get('email') or '').strip().lower()
     given_name = (payload.get('given_name') or '').strip()
     family_name = (payload.get('family_name') or '').strip()
     avatar_url = (payload.get('picture') or '').strip()
+    email_verified_claim = payload.get('email_verified')
+    email_verified = email_verified_claim is True or str(email_verified_claim).lower() == 'true'
 
     profil = (
         ProfilConnexionGoogle.objects.select_related('utilisateur')
@@ -374,6 +377,12 @@ def connecter_ou_inscrire_via_google(payload: dict) -> tuple[User, bool]:
     )
     if profil:
         user = profil.utilisateur
+        if not user.is_active and not user.email_verifie:
+            # Compte Google créé avant correction : activer si Google confirme l'e-mail
+            if email_verified:
+                user.is_active = True
+                user.email_verifie = True
+                user.save(update_fields=['is_active', 'email_verifie'])
         if not user.is_active:
             raise ErreurConnexionGoogle(
                 _('Ce compte est désactivé. Contactez le support.'),
@@ -387,23 +396,38 @@ def connecter_ou_inscrire_via_google(payload: dict) -> tuple[User, bool]:
         user = User.objects.filter(email__iexact=email).first()
 
     if user:
-        if ProfilConnexionGoogle.objects.filter(utilisateur=user).exists():
+        existing_profil = ProfilConnexionGoogle.objects.filter(utilisateur=user).first()
+        if existing_profil and existing_profil.google_sub != google_sub:
             raise ErreurConnexionGoogle(
                 _('Ce compte est déjà lié à un autre profil Google.'),
                 code='google_already_linked',
             )
-        if not user.is_active:
+        if not user.is_active and not (email_verified or user.email_verifie):
             raise ErreurConnexionGoogle(
                 _('Ce compte est désactivé. Contactez le support.'),
                 code='account_disabled',
             )
-        ProfilConnexionGoogle.objects.create(
-            utilisateur=user,
-            google_sub=google_sub,
-            email_google=email,
-            avatar_url=avatar_url,
-        )
+        # Liaison Google → même utilisateur (pas de 2e compte)
+        if email_verified and (not user.email_verifie or not user.is_active):
+            user.email_verifie = True
+            user.is_active = True
+            user.save(update_fields=['email_verifie', 'is_active'])
+        if not existing_profil:
+            ProfilConnexionGoogle.objects.create(
+                utilisateur=user,
+                google_sub=google_sub,
+                email_google=email,
+                avatar_url=avatar_url,
+            )
+        else:
+            _maj_profil_google(existing_profil, email, avatar_url)
         return user, False
+
+    if not email:
+        raise ErreurConnexionGoogle(
+            _('Google n\'a pas fourni d\'adresse e-mail. Autorisez le partage de l\'e-mail.'),
+            code='email_required',
+        )
 
     username_base = email.split('@')[0] if email else f'google_{google_sub[:8]}'
     user = User.objects.create_user(
@@ -412,8 +436,8 @@ def connecter_ou_inscrire_via_google(payload: dict) -> tuple[User, bool]:
         first_name=given_name,
         last_name=family_name,
         role='admin',
-        is_active=False,
-        email_verifie=False,
+        is_active=bool(email_verified),
+        email_verifie=bool(email_verified),
     )
     user.set_unusable_password()
     user.save(update_fields=['password'])

@@ -115,7 +115,7 @@ class PlanAVieTests(TestCase):
             code=FormuleAbonnement.CODE_A_VIE,
             defaults={
                 'nom': 'À vie',
-                'prix_a_vie': 1999,
+                'prix_a_vie': 0,
                 'prix_mensuel': 0,
                 'prix_annuel': 0,
                 'fonctionnalites': {
@@ -162,6 +162,32 @@ class PlanAVieTests(TestCase):
         self.assertIsNone(abo.date_fin)
         etat = build_etat_licence(ent.id)
         self.assertTrue(etat['est_a_vie'])
+        self.assertTrue(etat['est_actif'])
+
+    def test_essai_puis_demande_a_vie_conserve_acces(self):
+        """Parcours : essai 2 mois d'abord, demande à vie sans couper l'essai."""
+        user = User.objects.create_user(username='trialuser', password='testpass123', role='admin')
+        admin = User.objects.create_superuser(username='supertrial', password='superpass123', email='st@t.com')
+        ent = Entreprise.objects.create(nom='Essai puis À vie')
+        essai = AbonnementEntreprise.objects.get(entreprise=ent, est_courant=True)
+        self.assertEqual(essai.statut, AbonnementEntreprise.STATUT_ESSAI)
+
+        demande = demander_abonnement(
+            ent, FormuleAbonnement.CODE_A_VIE, AbonnementEntreprise.PERIODE_A_VIE, user=user,
+        )
+        self.assertEqual(demande.statut, AbonnementEntreprise.STATUT_EN_ATTENTE)
+        self.assertFalse(demande.est_courant)
+
+        essai.refresh_from_db()
+        self.assertTrue(essai.est_courant)
+        etat = build_etat_licence(ent.id)
+        self.assertTrue(etat['est_actif'])
+        self.assertTrue(etat['est_essai'])
+
+        activer_abonnement_manuellement(demande, admin, notes='Devis validé')
+        etat = build_etat_licence(ent.id)
+        self.assertTrue(etat['est_a_vie'])
+        self.assertFalse(etat['est_essai'])
         self.assertTrue(etat['est_actif'])
 
     def test_a_vie_ne_expire_pas(self):
