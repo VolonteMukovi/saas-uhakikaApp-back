@@ -49,6 +49,7 @@ class AgentEntrepriseBrandingTests(APITestCase):
             username="agent_brand",
             email="agent@example.com",
             password="secretpass123",
+            email_verifie=True,
         )
         Membership.objects.create(
             user=self.agent,

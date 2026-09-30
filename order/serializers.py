@@ -5,6 +5,8 @@ from django.utils.translation import gettext as _
 from django.db.models import Sum
 from rest_framework import serializers
 
+from stock.tenant_fields import TenantPrimaryKeyRelatedField
+
 from stock.models import Article, Devise
 from stock.serializers import ArticleSerializer, LocalizedDecimalField
 from stock.services.tenant_context import get_tenant_ids
@@ -96,7 +98,7 @@ class FournisseurSerializer(serializers.ModelSerializer):
 
 
 class FraisLotSerializer(serializers.ModelSerializer):
-    devise_id = serializers.PrimaryKeyRelatedField(
+    devise_id = TenantPrimaryKeyRelatedField(
         source="devise",
         queryset=Devise.objects.all(),
         allow_null=False,
@@ -158,7 +160,7 @@ class FraisLotSerializer(serializers.ModelSerializer):
 class LotItemSerializer(serializers.ModelSerializer):
     """En écriture : `article_id` (PK métier). En lecture : objet `article` complet + `article_id` rappel."""
 
-    article_id = serializers.PrimaryKeyRelatedField(
+    article_id = TenantPrimaryKeyRelatedField(
         source="article",
         queryset=Article.objects.all(),
         write_only=True,
@@ -234,7 +236,7 @@ class LotItemSerializer(serializers.ModelSerializer):
 
 
 class LotSerializer(serializers.ModelSerializer):
-    fournisseur_id = serializers.PrimaryKeyRelatedField(
+    fournisseur_id = TenantPrimaryKeyRelatedField(
         source="fournisseur",
         queryset=Fournisseur.objects.all(),
         required=False,

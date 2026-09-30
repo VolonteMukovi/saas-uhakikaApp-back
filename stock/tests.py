@@ -788,6 +788,7 @@ class EntreeSortieUpdateTests(APITestCase):
     def _create_cash_sortie(self, quantite='3', prix='10'):
         payload = {
             'statut': 'PAYEE',
+            'type_caisse_id': self.type_caisse.pk,
             'client_id': self.client_fiche.pk,
             'lignes': [{
                 'article_id': self.article.pk,

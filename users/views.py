@@ -20,6 +20,7 @@ from .permissions import IsSuperAdmin, IsSuperAdminOrAdmin, IsAdminFullEnterpris
 from inscription.services.bootstrap_saas import assurer_contexte_initial_utilisateur
 from stock.models import Entreprise, Succursale
 from stock.serializers import entreprise_public_read_dict
+from .exceptions import ErreurConnexion
 from .models import Membership, UserBranch
 
 # Durée max de la session (24 h) en secondes ; au-delà, l'utilisateur doit se reconnecter
@@ -120,36 +121,36 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
         resolved = self._resolve_user_by_identifier(candidate)
         if resolved is None:
-            raise drf_serializers.ValidationError({
-                'detail': _(
+            raise ErreurConnexion(
+                _(
                     'Aucun compte trouvé pour cet identifiant. '
                     'Créez un compte pour continuer.'
                 ),
-                'code': 'compte_inexistant',
-                'email': candidate if candidate and '@' in str(candidate) else '',
-                'suggest_register': True,
-            })
+                code='compte_inexistant',
+                email=candidate if candidate and '@' in str(candidate) else '',
+                suggest_register=True,
+            )
 
         # Authentifier avec le username canonique (login e-mail → username)
         attrs[username_field] = resolved.username
 
         if not resolved.email_verifie and resolved.check_password(password):
-            raise drf_serializers.ValidationError({
-                'detail': _('Veuillez confirmer votre adresse e-mail avant de vous connecter.'),
-                'code': 'email_not_verified',
-                'email': resolved.email,
-                'statut_verification': 'EN_ATTENTE',
-            })
+            raise ErreurConnexion(
+                _('Veuillez confirmer votre adresse e-mail avant de vous connecter.'),
+                code='email_not_verified',
+                email=resolved.email,
+                statut_verification='EN_ATTENTE',
+            )
 
         try:
             super(TokenObtainPairSerializer, self).validate(attrs)
         except Exception:
             # Mot de passe incorrect (ou compte inactif) — ne pas confondre avec compte inexistant
             if not resolved.check_password(password):
-                raise drf_serializers.ValidationError({
-                    'detail': _('Identifiants incorrects.'),
-                    'code': 'identifiants_invalides',
-                })
+                raise ErreurConnexion(
+                    _('Identifiants incorrects.'),
+                    code='identifiants_invalides',
+                )
             raise
 
         assurer_contexte_initial_utilisateur(self.user)
@@ -878,7 +879,7 @@ class UserViewSet(viewsets.ModelViewSet):
         entreprise_id = request.data.get('entreprise_id')
         if not entreprise_id:
             return Response({'error': _('entreprise_id est requis')}, status=400)
-        deleted, _ = Membership.objects.filter(user=user, entreprise_id=entreprise_id).delete()
+        deleted, _details = Membership.objects.filter(user=user, entreprise_id=entreprise_id).delete()
         return Response({
             'message': _('Association entreprise retirée pour %(user)s') % {'user': user.username},
             'user_id': user.id,

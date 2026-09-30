@@ -16,7 +16,7 @@ from stock.services.currency import build_conversion_snapshot
 import json
 
 # Colonne optionnelle type export inventaire / listing (ex. FOAG0001) — non utilisée à la création.
-_ARTICLE_CODE_RE = re.compile(r'^[A-Z]{4}\d{4}$')
+_ARTICLE_CODE_RE = re.compile(r'^[A-Z]{4}\d{4,6}$')
 
 
 def _leading_column_is_article_code(val) -> bool:

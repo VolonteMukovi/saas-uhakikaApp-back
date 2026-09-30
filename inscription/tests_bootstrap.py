@@ -38,6 +38,10 @@ class BootstrapSaasTests(TestCase):
             password='testpass123',
             role='admin',
             email='nobiz@test.com',
+            email_verifie=True,
+            onboarding_complete=True,
+            workspace_activated=True,
+            welcome_seen=True,
         )
         self.client.force_authenticate(user=user)
         resp = self.client.post('/api/inscription/bootstrap/', {}, format='json')

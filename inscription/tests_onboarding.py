@@ -33,6 +33,7 @@ class OnboardingFlowTests(TestCase):
         self.client.force_authenticate(user=self.user)
 
     def _creer_entreprise_provisoire(self):
+        # Provisoire = incomplète (secteur manquant), comme après l'inscription.
         ent = Entreprise.objects.create(
             nom='Ma Boutique',
             email='shop@test.com',
@@ -40,7 +41,7 @@ class OnboardingFlowTests(TestCase):
             adresse='12 rue Test',
             pays='RDC',
             responsable='Jean Dupont',
-            secteur='Commerce',
+            secteur='',
         )
         Membership.objects.create(user=self.user, entreprise=ent, role='admin', is_active=True)
         return ent
@@ -85,7 +86,7 @@ class OnboardingFlowTests(TestCase):
             'adresse': ent.adresse,
             'pays': ent.pays,
             'responsable': ent.responsable,
-            'secteur': ent.secteur,
+            'secteur': 'Commerce',
         }, format='json')
         resp = self.client.post('/api/onboarding/complete/', {}, format='json')
         self.assertEqual(resp.status_code, 200)
@@ -98,6 +99,7 @@ class OnboardingFlowTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.data['onboarding']['workspace_activated'])
 
+        self.user.refresh_from_db()  # workspace_activated vient d'être posé en base
         self.client.force_authenticate(user=self.user)
         resp = self.client.post('/api/onboarding/mark-welcome-seen/', {}, format='json')
         self.assertEqual(resp.status_code, 200)

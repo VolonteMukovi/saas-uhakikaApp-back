@@ -72,6 +72,28 @@ def exception_handler(exc, context):
             type_uri='urn:uhakika:problem:caisse-error',
         )
 
+    from users.exceptions import ErreurConnexion
+
+    if isinstance(exc, ErreurConnexion):
+        detail = str(exc.detail)
+        return problem_response(
+            request=request,
+            status_code=exc.status_code,
+            title=_status_title(exc.status_code),
+            detail=detail,
+            type_uri=f'urn:uhakika:problem:{exc.code_metier}',
+            extra={
+                'code': exc.code_metier,
+                **exc.champs,
+                # Forme historique (listes) conservée pour les clients qui lisent `errors`.
+                'errors': {
+                    'detail': [detail],
+                    'code': [exc.code_metier],
+                    **{k: [str(v)] for k, v in exc.champs.items()},
+                },
+            },
+        )
+
     from abonnements.exceptions import FonctionnaliteNonAutorisee, LicenceInactive, LimiteQuotaAtteinte
 
     if isinstance(exc, LicenceInactive):

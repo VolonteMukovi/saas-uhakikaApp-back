@@ -2,6 +2,8 @@ from django.db import transaction
 from django.utils.translation import gettext as _
 from rest_framework import serializers
 
+from stock.tenant_fields import TenantPrimaryKeyRelatedField
+
 from stock.models import Article, Client
 from stock.serializers import ArticleSerializer, LocalizedDecimalField
 from stock.services.tenant_context import get_tenant_ids
@@ -44,7 +46,7 @@ def _check_commande_items_catalogue(items, tenant_id, commande_succursale_id):
 class CommandeItemWriteSerializer(serializers.ModelSerializer):
     """Création / mise à jour de ligne : article catalogue OU nom libre (exclusif)."""
 
-    article_id = serializers.PrimaryKeyRelatedField(
+    article_id = TenantPrimaryKeyRelatedField(
         queryset=Article.objects.all(),
         source="article",
         required=False,
@@ -183,8 +185,9 @@ class CommandeDetailSerializer(serializers.ModelSerializer):
 
 class CommandeCreateSerializer(serializers.ModelSerializer):
     items = CommandeItemWriteSerializer(many=True)
-    client_id = serializers.PrimaryKeyRelatedField(
+    client_id = TenantPrimaryKeyRelatedField(
         queryset=Client.objects.all(),
+        tenant_lookup='liens_entreprise__entreprise_id',
         source="client",
         required=False,
         allow_null=True,

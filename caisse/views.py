@@ -63,7 +63,7 @@ class TypeCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mod
 
     @action(detail=False, methods=['get'], url_path='actives')
     def actives(self, request):
-        """Caisses actives du contexte courant (pour listes dÃ©roulantes frontend)."""
+        """Caisses actives du contexte courant (pour listes déroulantes frontend)."""
         qs = self.get_queryset().filter(is_active=True)
         return Response(TypeCaisseSerializer(qs, many=True, context={'request': request}).data)
 
@@ -180,18 +180,18 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
     @action(detail=False, methods=['get'])
     def resume(self, request):
         """
-        Retourne des statistiques dÃ©taillÃ©es par devise avec plus d'informations :
-        - Nombre d'entrÃ©es et sorties par devise
-        - Montants totaux par devise (entrÃ©es et sorties sÃ©parÃ©ment)
+        Retourne des statistiques détaillées par devise avec plus d'informations :
+        - Nombre d'entrées et sorties par devise
+        - Montants totaux par devise (entrées et sorties séparément)
         - Solde par devise
         - Pourcentages et ratios
-        - Ã‰volution rÃ©cente
+        - Évolution récente
         """
         qs = self.get_queryset()
         user = request.user
 
         
-        # Devise principale pour rÃ©fÃ©rence
+        # Devise principale pour référence
         principal_devise = _get_principal_devise()
         
         # Statistiques par devise
@@ -214,7 +214,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             if sigle not in stats_by_devise:
                 stats_by_devise[sigle] = {
                     'devise_sigle': sigle,
-                    'devise_nom': devise_obj.nom if devise_obj else 'Non spÃ©cifiÃ©e',
+                    'devise_nom': devise_obj.nom if devise_obj else 'Non spécifiée',
                     'devise_symbole': devise_obj.symbole if devise_obj else '',
                     'est_principale': devise_obj and devise_obj.est_principal if devise_obj else False,
                     'nb_entrees': 0,
@@ -237,7 +237,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                 stats_by_devise[sigle]['total_sorties'] += mv.montant
                 stats_by_devise[sigle]['solde'] -= mv.montant
             
-            # Ajouter aux mouvements rÃ©cents (max 5)
+            # Ajouter aux mouvements récents (max 5)
             if len(stats_by_devise[sigle]['mouvements_recent']) < 5:
                 stats_by_devise[sigle]['mouvements_recent'].append({
                     'id': mv.id,
@@ -281,13 +281,13 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             else:
                 devise_stats['statut_solde'] = 'equilibre'
         
-        # Trier par devise principale d'abord, puis par solde dÃ©croissant
+        # Trier par devise principale d'abord, puis par solde décroissant
         stats_list = sorted(
             stats_by_devise.values(),
             key=lambda x: (not x['est_principale'], -float(x['solde']))
         )
         
-        # RÃ©sumÃ© global
+        # Résumé global
         resume_global = {
             'nb_devises_actives': len(stats_by_devise),
             'total_mouvements': qs.count(),
@@ -308,8 +308,8 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
     @action(detail=False, methods=['get'], url_path='solde')
     def solde_caisse(self, request):
         """
-        Retourne les soldes de caisse sÃ©parÃ©s par devise.
-        Chaque devise a son propre solde indÃ©pendant.
+        Retourne les soldes de caisse séparés par devise.
+        Chaque devise a son propre solde indépendant.
         """
         qs = self.get_queryset()
         user = request.user
@@ -325,11 +325,11 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             devise_obj = mv.devise or principal_devise
             sigle = devise_obj.sigle if devise_obj else 'N/A'
             
-            # Initialisation si premiÃ¨re fois
+            # Initialisation si première fois
             if sigle not in soldes_par_devise:
                 soldes_par_devise[sigle] = {
                     'devise_sigle': sigle,
-                    'devise_nom': devise_obj.nom if devise_obj else 'Non spÃ©cifiÃ©e',
+                    'devise_nom': devise_obj.nom if devise_obj else 'Non spécifiée',
                     'devise_symbole': devise_obj.symbole if devise_obj else '',
                     'est_principale': devise_obj and devise_obj.est_principal if devise_obj else False,
                     'solde': Decimal('0.00'),
@@ -354,7 +354,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             devise_info['total_entrees'] = devise_info['total_entrees'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             devise_info['total_sorties'] = devise_info['total_sorties'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
         
-        # Conversion de dict vers liste triÃ©e (devise principale en premier)
+        # Conversion de dict vers liste triée (devise principale en premier)
         soldes_list = list(soldes_par_devise.values())
         soldes_list.sort(key=lambda x: (not x['est_principale'], x['devise_sigle']))
 
@@ -370,7 +370,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
 
         return Response({
             'rapport': 'etat-caisse',
-            'titre': str(_('Ã‰TAT DE LA CAISSE')),
+            'titre': str(_('ÉTAT DE LA CAISSE')),
             'entreprise': serialize_entreprise(entreprise, request) if entreprise else None,
             'agence': serialize_agence(branch_id, entreprise),
             'devise': get_devise_principale(entreprise),
@@ -392,8 +392,8 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
     @action(detail=False, methods=['get'], url_path='tableau-bord')
     def tableau_bord_multi_devises(self, request):
         """
-        Tableau de bord complet avec sÃ©paration par devise.
-        Retourne toutes les informations nÃ©cessaires pour l'affichage frontend.
+        Tableau de bord complet avec séparation par devise.
+        Retourne toutes les informations nécessaires pour l'affichage frontend.
         """
         qs = self.get_queryset()
         user = request.user
@@ -402,19 +402,19 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         # Devise principale
         principal_devise = _get_principal_devise()
         
-        # Dictionnaire pour accumuler les donnÃ©es par devise
+        # Dictionnaire pour accumuler les données par devise
         devises_data = {}
         
         for mv in qs:
             devise_obj = mv.devise or principal_devise
             sigle = devise_obj.sigle if devise_obj else 'N/A'
             
-            # Initialisation de la devise si premiÃ¨re fois
+            # Initialisation de la devise si première fois
             if sigle not in devises_data:
                 devises_data[sigle] = {
                     'devise_info': {
                         'sigle': sigle,
-                        'nom': devise_obj.nom if devise_obj else 'Non spÃ©cifiÃ©e',
+                        'nom': devise_obj.nom if devise_obj else 'Non spécifiée',
                         'symbole': devise_obj.symbole if devise_obj else '',
                         'est_principale': devise_obj and devise_obj.est_principal if devise_obj else False,
                     },
@@ -439,7 +439,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                 devise_data['total_sorties'] += mv.montant
                 devise_data['nb_sorties'] += 1
             
-            # Mouvements rÃ©cents (garder les 10 derniers)
+            # Mouvements récents (garder les 10 derniers)
             mouvement_info = {
                 'id': mv.id,
                 'date': mv.date,
@@ -458,7 +458,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             data['total_entrees'] = data['total_entrees'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             data['total_sorties'] = data['total_sorties'].quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             
-            # Tri des mouvements rÃ©cents par date (plus rÃ©cents en premier)
+            # Tri des mouvements récents par date (plus récents en premier)
             data['mouvements_recents'].sort(key=lambda x: x['date'], reverse=True)
             data['mouvements_recents'] = data['mouvements_recents'][:10]  # Garder seulement les 10 derniers
             
@@ -466,9 +466,9 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             data['statut_solde'] = 'positif' if data['solde_actuel'] >= 0 else 'negatif'
             
             # Calcul du pourcentage de variation (factice pour l'instant)
-            data['variation_pourcentage'] = 0  # Ã€ calculer selon la pÃ©riode prÃ©cÃ©dente si besoin
+            data['variation_pourcentage'] = 0  # À calculer selon la période précédente si besoin
         
-        # Conversion en liste triÃ©e (devise principale en premier)
+        # Conversion en liste triée (devise principale en premier)
         devises_list = list(devises_data.values())
         devises_list.sort(key=lambda x: (not x['devise_info']['est_principale'], x['devise_info']['sigle']))
         
@@ -496,8 +496,8 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
     @action(detail=False, methods=['get'], url_path='soldes-simples')
     def soldes_simples(self, request):
         """
-        Endpoint simple pour rÃ©cupÃ©rer juste les soldes par devise.
-        OptimisÃ© pour l'affichage de widgets frontend.
+        Endpoint simple pour récupérer juste les soldes par devise.
+        Optimisé pour l'affichage de widgets frontend.
         """
         qs = self.get_queryset()
         user = request.user
@@ -516,7 +516,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         # Consolidation
         soldes_finaux = {}
         
-        # Traitement des entrÃ©es
+        # Traitement des entrées
         for entree in soldes_entrees:
             sigle = entree['devise__sigle'] or (principal_devise.sigle if principal_devise else 'N/A')
             if sigle not in soldes_finaux:
@@ -561,8 +561,8 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
     @action(detail=False, methods=['get'], url_path='mouvements-par-devise')
     def mouvements_par_devise(self, request):
         """
-        RÃ©cupÃ¨re les mouvements filtrÃ©s par devise.
-        ParamÃ¨tres : ?devise=USD&limit=20
+        Récupère les mouvements filtrés par devise.
+        Paramètres : ?devise=USD&limit=20
         """
         qs = self.get_queryset()
         
@@ -578,10 +578,10 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         if devise_param:
             qs = qs.filter(devise__sigle=devise_param)
         
-        # Tri par date dÃ©croissante et limitation
+        # Tri par date décroissante et limitation
         mouvements = qs.order_by('-date')[:limit]
         
-        # SÃ©rialisation simplifiÃ©e
+        # Sérialisation simplifiée
         mouvements_data = []
         for mv in mouvements:
             mouvements_data.append({
@@ -595,7 +595,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                 'devise': {
                     'sigle': mv.devise.sigle if mv.devise else 'N/A',
                     'symbole': mv.devise.symbole if mv.devise else '',
-                    'nom': mv.devise.nom if mv.devise else 'Non spÃ©cifiÃ©e'
+                    'nom': mv.devise.nom if mv.devise else 'Non spécifiée'
                 },
                 'sortie_id': mv.sortie_id,
                 'entree_id': mv.entree_id
@@ -611,7 +611,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
     @action(detail=False, methods=['get'], url_path='comparaison-devises')
     def comparaison_devises(self, request):
         """
-        Compare les performances entre devises avec des mÃ©triques utiles.
+        Compare les performances entre devises avec des métriques utiles.
         """
         qs = self.get_queryset()
         user = request.user
@@ -619,7 +619,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         # Calculs par devise
         from django.db.models import Sum, Count, Avg
         
-        # AgrÃ©gations par devise
+        # Agrégations par devise
         stats_devises = qs.values(
             'devise__sigle', 'devise__nom', 'devise__symbole', 'devise__est_principal'
         ).annotate(
@@ -634,7 +634,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         # Devise principale
         principal_devise = _get_principal_devise()
         
-        # Traitement des rÃ©sultats
+        # Traitement des résultats
         devises_comparaison = []
         total_volume_global = Decimal('0.00')
         
@@ -672,7 +672,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             
             devises_comparaison.append(devise_info)
         
-        # Calcul des pourcentages aprÃ¨s avoir le total global
+        # Calcul des pourcentages après avoir le total global
         for devise_info in devises_comparaison:
             volume = devise_info['totaux']['volume_total']
             if total_volume_global > 0:
@@ -682,7 +682,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             else:
                 devise_info['pourcentage_volume'] = Decimal('0.00')
         
-        # Tri par volume dÃ©croissant
+        # Tri par volume décroissant
         devises_comparaison.sort(
             key=lambda x: (not x['devise']['est_principale'], -float(x['totaux']['volume_total']))
         )
@@ -705,7 +705,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = 'attachment; filename="mouvements_caisse.csv"'
         writer = csv.writer(response)
-        writer.writerow(['Date','Type','Montant','Motif','Moyen','RÃ©fÃ©rence'])
+        writer.writerow(['Date','Type','Montant','Motif','Moyen','Référence'])
         for m in self.get_queryset():
             montant_str = _format_amount(m.montant, m.devise if hasattr(m, 'devise') else None, request.user.get_entreprise(request))
             writer.writerow([
@@ -717,9 +717,9 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
     def bon_pos(self, request, pk=None):
         """
         Ticket POS pour un mouvement de caisse (design type facture).
-        - LiÃ© Ã  une sortie â†’ BON DE SORTIE avec dÃ©tail des articles.
-        - LiÃ© Ã  une entrÃ©e â†’ BON D'ENTRÃ‰E avec dÃ©tail des articles.
-        - Sinon â†’ BON CAISSE (entrÃ©e/sortie) avec motif et montant.
+        - Lié à une sortie → BON DE SORTIE avec détail des articles.
+        - Lié à une entrée → BON D'ENTRÉE avec détail des articles.
+        - Sinon → BON CAISSE (entrée/sortie) avec motif et montant.
         """
         mv = self.get_object()
         entreprise = request.user.get_entreprise(request) or Entreprise.objects.first()
@@ -737,7 +737,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
 
         elements = []
 
-        # En-tÃªte simplifiÃ© : nom, logo, slogan, tÃ©lÃ©phone uniquement
+        # En-tête simplifié : nom, logo, slogan, téléphone uniquement
         from rapports.utils.entete import get_entete_entreprise
         from rapports.utils.pdf_generator import PDFGenerator
         entete = get_entete_entreprise(entreprise)
@@ -748,20 +748,20 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
         if mv.sortie_id:
             sortie = mv.sortie
             elements.append(Paragraph("<b>BON DE SORTIE</b>", subtitle_style))
-            elements.append(Paragraph(f"NÂ° {sortie.pk}  Â·  Mvt caisse #{mv.pk}", info_style))
+            elements.append(Paragraph(f"N° {sortie.pk}  ·  Mvt caisse #{mv.pk}", info_style))
             elements.append(Paragraph(f"Date: {mv.date.strftime('%d/%m/%Y %H:%M')}", info_style))
             devise_obj = getattr(mv, 'devise', None) or (getattr(sortie, 'devise', None) or Devise.objects.filter(est_principal=True).first())
             if devise_obj:
                 elements.append(Paragraph(f"Devise: {devise_obj.sigle}", info_style))
             elements.append(Spacer(1, 1*mm))
-            elements.append(Paragraph("â”€" * 42, info_style))
+            elements.append(Paragraph("─" * 42, info_style))
             elements.append(Spacer(1, 1*mm))
 
             lignes = sortie.lignes.select_related('article').all()
             col_w = [POS_WIDTH * 0.42, POS_WIDTH * 0.18, POS_WIDTH * 0.20, POS_WIDTH * 0.20]
             data = [[
                 Paragraph("<b>Article</b>", header_style),
-                Paragraph("<b>QtÃ©</b>", header_style),
+                Paragraph("<b>Qté</b>", header_style),
                 Paragraph("<b>P.U.</b>", header_style),
                 Paragraph("<b>Total</b>", header_style)
             ]]
@@ -795,13 +795,13 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
 
         elif mv.entree_id:
             entree = mv.entree
-            elements.append(Paragraph("<b>BON D'ENTRÃ‰E</b>", subtitle_style))
-            elements.append(Paragraph(f"NÂ° EntrÃ©e {entree.pk}  Â·  Mvt caisse #{mv.pk}", info_style))
+            elements.append(Paragraph("<b>BON D'ENTRÉE</b>", subtitle_style))
+            elements.append(Paragraph(f"N° Entrée {entree.pk}  ·  Mvt caisse #{mv.pk}", info_style))
             elements.append(Paragraph(f"Date: {mv.date.strftime('%d/%m/%Y %H:%M')}", info_style))
             if entree.libele:
-                elements.append(Paragraph(f"LibellÃ©: {entree.libele}", info_style))
+                elements.append(Paragraph(f"Libellé: {entree.libele}", info_style))
             elements.append(Spacer(1, 1*mm))
-            elements.append(Paragraph("â”€" * 42, info_style))
+            elements.append(Paragraph("─" * 42, info_style))
             elements.append(Spacer(1, 1*mm))
 
             lignes = entree.lignes.select_related('article', 'devise').all()
@@ -809,7 +809,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             col_w = [POS_WIDTH * 0.42, POS_WIDTH * 0.18, POS_WIDTH * 0.20, POS_WIDTH * 0.20]
             data = [[
                 Paragraph("<b>Article</b>", header_style),
-                Paragraph("<b>QtÃ©</b>", header_style),
+                Paragraph("<b>Qté</b>", header_style),
                 Paragraph("<b>P.U.</b>", header_style),
                 Paragraph("<b>Total</b>", header_style)
             ]]
@@ -843,12 +843,12 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
 
         else:
             elements.append(Paragraph(
-                "<b>BON D'ENTRÃ‰E CAISSE</b>" if mv.type == 'ENTREE' else "<b>BON DE SORTIE CAISSE</b>",
+                "<b>BON D'ENTRÉE CAISSE</b>" if mv.type == 'ENTREE' else "<b>BON DE SORTIE CAISSE</b>",
                 subtitle_style
             ))
-            elements.append(Paragraph(f"Mvt #{mv.pk}  Â·  {mv.date.strftime('%d/%m/%Y %H:%M')}", info_style))
+            elements.append(Paragraph(f"Mvt #{mv.pk}  ·  {mv.date.strftime('%d/%m/%Y %H:%M')}", info_style))
             elements.append(Spacer(1, 1*mm))
-            elements.append(Paragraph("â”€" * 42, info_style))
+            elements.append(Paragraph("─" * 42, info_style))
             elements.append(Spacer(1, 1*mm))
 
             montant_fmt = _format_amount(mv.montant, getattr(mv, 'devise', None))
@@ -857,7 +857,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
                 [Paragraph("<b>Motif</b>", header_style), Paragraph((mv.motif_affiche() or '-')[:80], normal)],
             ]
             if mv.reference_piece:
-                data.append([Paragraph("<b>RÃ©f.</b>", header_style), Paragraph(mv.reference_piece[:30], normal)])
+                data.append([Paragraph("<b>Réf.</b>", header_style), Paragraph(mv.reference_piece[:30], normal)])
             col_w = [POS_WIDTH * 0.35, POS_WIDTH * 0.65]
             table = Table(data, colWidths=col_w)
             table.setStyle(TableStyle([
@@ -870,7 +870,7 @@ class MouvementCaisseViewSet(TenantFilterMixin, BusinessPermissionMixin, viewset
             elements.append(table)
 
         elements.append(Spacer(1, 3*mm))
-        elements.append(Paragraph("â”€" * 42, footer_style))
+        elements.append(Paragraph("─" * 42, footer_style))
         elements.append(Paragraph("Merci pour votre confiance", footer_style))
 
         lm = rm = 5*mm

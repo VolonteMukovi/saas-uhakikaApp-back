@@ -14,12 +14,12 @@ from config.pagination import StandardResultsSetPagination
 
 
 class InventaireResultsSetPagination(StandardResultsSetPagination):
-    """Pagination uniquement si complet=false : plafond Ã©levÃ© pour les gros inventaires."""
+    """Pagination uniquement si complet=false : plafond élevé pour les gros inventaires."""
     max_page_size = 5000
 
 
 class InventaireStockLine:
-    """Ligne d'inventaire : article + quantitÃ©s (stock rÃ©el ou 0 si aucune fiche Stock)."""
+    """Ligne d'inventaire : article + quantités (stock réel ou 0 si aucune fiche Stock)."""
     __slots__ = ('article', 'Qte', 'seuilAlert')
 
     def __init__(self, article, qte=0, seuil=0):
@@ -55,9 +55,9 @@ from .utils.report_envelope import wrap_report_response
 
 class RapportsViewSet(viewsets.ViewSet):
     """
-    ViewSet pour les rapports mÃ©tier (donnÃ©es JSON uniquement).
-    Le frontend gÃ¨re l'affichage, l'impression et l'export PDF/Excel.
-    AccÃ¨s rÃ©servÃ© aux Admin et User (Agent). SuperAdmin n'a pas accÃ¨s aux rapports mÃ©tier.
+    ViewSet pour les rapports métier (données JSON uniquement).
+    Le frontend gère l'affichage, l'impression et l'export PDF/Excel.
+    Accès réservé aux Admin et User (Agent). SuperAdmin n'a pas accès aux rapports métier.
     """
     permission_classes = [IsAdminOrUser]
 
@@ -80,7 +80,7 @@ class RapportsViewSet(viewsets.ViewSet):
         """
         Contexte multi-tenant :
         - entreprise obligatoire (via membership / JWT).
-        - succursale : depuis JWT ou default_succursale ; peut Ãªtre None (agent sans succursale).
+        - succursale : depuis JWT ou default_succursale ; peut être None (agent sans succursale).
         """
         user = request.user
         entreprise = user.get_entreprise(request)
@@ -95,27 +95,27 @@ class RapportsViewSet(viewsets.ViewSet):
 
     def _build_bon_achat_data(self, request, *, complet: bool = False):
         """
-        Construit les donnÃ©es du bon d'achat (JSON).
+        Construit les données du bon d'achat (JSON).
         - complet=False: pagination JSON active
-        - complet=True: liste intÃ©grale sans pagination
+        - complet=True: liste intégrale sans pagination
         """
         user = request.user
 
-        # RÃ©cupÃ©ration des paramÃ¨tres
+        # Récupération des paramètres
         date_debut = request.query_params.get('date_debut')
         date_fin = request.query_params.get('date_fin')
         article_id = request.query_params.get('article_id')
         entree_id = request.query_params.get('entree_id')
         
-        # Mode 1: entree_id fourni -> filtre direct par entrÃ©e, sans dates obligatoires.
-        # Mode 2: pas de entree_id -> filtrage par pÃ©riode (date_debut requis).
+        # Mode 1: entree_id fourni -> filtre direct par entrée, sans dates obligatoires.
+        # Mode 2: pas de entree_id -> filtrage par période (date_debut requis).
         if entree_id:
             try:
                 entree_id_int = int(str(entree_id).strip())
             except (TypeError, ValueError):
                 return Response(
                     {
-                        'error': 'Le paramÃ¨tre "entree_id" doit Ãªtre un entier valide',
+                        'error': 'Le paramètre "entree_id" doit être un entier valide',
                         'exemple': '/api/rapports/bon-achat/?entree_id=12'
                     },
                     status=status.HTTP_400_BAD_REQUEST
@@ -125,7 +125,7 @@ class RapportsViewSet(viewsets.ViewSet):
         else:
             if not date_debut:
                 return Response({
-                    'error': 'Le paramÃ¨tre "date_debut" est obligatoire (sauf si entree_id est fourni)',
+                    'error': 'Le paramètre "date_debut" est obligatoire (sauf si entree_id est fourni)',
                     'exemple': '/api/rapports/bon-achat/?date_debut=2025-11-01'
                 }, status=status.HTTP_400_BAD_REQUEST)
             try:
@@ -158,7 +158,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 date_entree__date__lte=date_fin_obj,
             )
         
-        # Filtrage par article si spÃ©cifiÃ©
+        # Filtrage par article si spécifié
         if article_id:
             lignes_entree = lignes_entree.filter(article__article_id=article_id)
         
@@ -224,7 +224,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 }
         
         resp = {
-            'titre': _("BON D'ACHAT - APPROVISIONNEMENTS EFFECTUÃ‰S"),
+            'titre': _("BON D'ACHAT - APPROVISIONNEMENTS EFFECTUÉS"),
             'periode': {
                 'date_debut': date_debut,
                 'date_fin': (date_fin or timezone.now().date().strftime('%Y-%m-%d')) if not entree_id else None
@@ -264,15 +264,15 @@ class RapportsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='bon-achat')
     def bon_achat(self, request):
         """
-        Bon d'achat - Liste des approvisionnements effectuÃ©s.
+        Bon d'achat - Liste des approvisionnements effectués.
         
-        Liste tous les approvisionnements (entrÃ©es) Ã  partir d'une date donnÃ©e.
+        Liste tous les approvisionnements (entrées) à partir d'une date donnée.
         
-        ParamÃ¨tres:
-        - entree_id: Filtrer par NÂ° d'entrÃ©e spÃ©cifique (optionnel, prioritaire)
-        - date_debut: Date de dÃ©but (obligatoire si entree_id absent, format: YYYY-MM-DD)
+        Paramètres:
+        - entree_id: Filtrer par N° d'entrée spécifique (optionnel, prioritaire)
+        - date_debut: Date de début (obligatoire si entree_id absent, format: YYYY-MM-DD)
         - date_fin: Date de fin (optionnel, format: YYYY-MM-DD)
-        - article_id: Filtrer par article spÃ©cifique (optionnel)
+        - article_id: Filtrer par article spécifique (optionnel)
         
         GET /api/rapports/bon-achat/?entree_id=12
         GET /api/rapports/bon-achat/?date_debut=2025-11-01
@@ -746,19 +746,19 @@ class RapportsViewSet(viewsets.ViewSet):
             return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
 
     def _build_fiche_stock_data(self, request, pk=None):
-        """Construit les donnÃ©es JSON de la fiche de stock avec calcul FIFO."""
+        """Construit les données JSON de la fiche de stock avec calcul FIFO."""
         user = request.user
         if not user.is_authenticated:
-            raise PermissionDenied(_("Utilisateur non authentifiÃ©."))
+            raise PermissionDenied(_("Utilisateur non authentifié."))
         eid, branch_id = self._get_tenant_ids_strict(request)
-        article_qs = Article.objects.filter(pk=pk)
-        if eid:
-            article_qs = article_qs.filter(entreprise_id=eid)
+        if not eid:
+            raise PermissionDenied(_("Contexte entreprise manquant."))
+        article_qs = Article.objects.filter(pk=pk, entreprise_id=eid)
         if user.is_agent(request) and branch_id is not None:
             article_qs = article_qs.filter(succursale_id=branch_id)
         article = article_qs.first()
         if not article:
-            raise NotFound(_("Article non trouvÃ© ou accÃ¨s refusÃ©."))
+            raise NotFound(_("Article non trouvé ou accès refusé."))
 
         date_min = request.query_params.get('date_min')
         date_max = request.query_params.get('date_max')
@@ -766,7 +766,7 @@ class RapportsViewSet(viewsets.ViewSet):
         stock_row = Stock.objects.filter(article=article).first()
         type_article = getattr(getattr(article, 'sous_type_article', None), 'type_article', None)
 
-        # RÃ©cupÃ©ration des mouvements
+        # Récupération des mouvements
         entrees_qs = LigneEntree.objects.filter(article=article)
         sorties_qs = LigneSortie.objects.filter(article=article)
         if user.is_agent(request) and branch_id is not None:
@@ -788,7 +788,7 @@ class RapportsViewSet(viewsets.ViewSet):
         for e in entrees:
             mouvements.append({
                 'datetime': e['date_entree'],
-                'designation': e['entree__libele'] or _("EntrÃ©e"),
+                'designation': e['entree__libele'] or _("Entrée"),
                 'q_in': e['quantite'],
                 'pu_in': e['prix_unitaire'] or Decimal('0'),
                 'q_out': 0
@@ -802,7 +802,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 'q_out': s['quantite']
             })
         
-        # Tri chronologique (entrÃ©es avant sorties pour mÃªme datetime)
+        # Tri chronologique (entrées avant sorties pour même datetime)
         mouvements.sort(key=lambda m: (m['datetime'], 0 if m['q_in']>0 else 1))
 
         # Calcul FIFO
@@ -819,7 +819,7 @@ class RapportsViewSet(viewsets.ViewSet):
             pt_out = Decimal('0')
 
             if q_in:
-                # EntrÃ©e
+                # Entrée
                 fifo_layers.append([q_in, pu_in])
                 stock_qty += q_in
                 stock_val += pt_in
@@ -837,7 +837,7 @@ class RapportsViewSet(viewsets.ViewSet):
                 stock_qty -= q_out
                 stock_val -= pt_out
 
-            # PU sortie = coÃ»t moyen sorti (PT / QtÃ©)
+            # PU sortie = coût moyen sorti (PT / Qté)
             pu_out = (pt_out / q_out) if q_out else Decimal('0')
             stock_pu = (stock_val / stock_qty) if stock_qty else Decimal('0')
             rows.append(
@@ -894,7 +894,7 @@ class RapportsViewSet(viewsets.ViewSet):
 
     @action(detail=True, methods=['get'], url_path='fiche-stock/json')
     def fiche_stock_article_json(self, request, pk=None):
-        """Alias JSON de fiche-stock (rÃ©trocompatibilitÃ©)."""
+        """Alias JSON de fiche-stock (rétrocompatibilité)."""
         return self.fiche_stock_article(request, pk=pk)
 
     @action(detail=True, methods=['get'], url_path='fiche-stock')

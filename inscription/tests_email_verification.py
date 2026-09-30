@@ -68,6 +68,16 @@ class EmailVerificationTests(APITestCase):
         }, format='json')
         self.assertEqual(resp.status_code, 400, resp.content)
         self.assertEqual(resp.data.get('code'), 'email_not_verified')
+        self.assertEqual(resp.data.get('email'), self.user.email)
+
+    def test_login_compte_inexistant_suggere_inscription(self):
+        resp = self.client.post('/api/auth/', {
+            'username': 'inconnu@example.com',
+            'password': 'SecretPass123',
+        }, format='json')
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.data.get('code'), 'compte_inexistant')
+        self.assertIs(resp.data.get('suggest_register'), True)
 
     def test_jeton_expire(self):
         token, jeton = creer_jeton_verification(self.user)

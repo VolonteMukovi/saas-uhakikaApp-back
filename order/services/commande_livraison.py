@@ -8,7 +8,6 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_DOWN
 
 from django.db import transaction
-from django.db.models import Sum
 from django.utils.translation import gettext as _
 from rest_framework.exceptions import ValidationError
 
@@ -16,15 +15,14 @@ from order.models import Commande
 from stock.models import (
     BeneficeLot,
     Devise,
-    LigneEntree,
     LigneSortie,
     LigneSortieLot,
     Sortie,
-    Stock,
 )
 from caisse.services.caisse import creer_mouvement_caisse
 from caisse.services.caisse_defaut import MSG_CAISSE_REQUISE
 from stock.services.currency import build_conversion_snapshot
+from stock.services.stock_adjustment import apply_stock_delta, lots_fifo_verrouilles
 
 
 @transaction.atomic
@@ -97,14 +95,9 @@ def apply_sortie_on_commande_livree(commande: Commande, *, type_caisse_id: int |
         if qte <= 0:
             raise ValidationError({"statut": _("Quantité invalide sur une ligne de commande.")})
 
-        stock_disponible = (
-            LigneEntree.objects.filter(
-                article=article_obj,
-                quantite_restante__gt=0,
-                entree__entreprise_id=tenant_id,
-            ).aggregate(total=Sum("quantite_restante"))["total"]
-            or 0
-        )
+        # Lots verrouillés (FOR UPDATE) : quantités à jour malgré les ventes concurrentes
+        lots_disponibles = lots_fifo_verrouilles(article_obj, entree__entreprise_id=tenant_id)
+        stock_disponible = sum((lot.quantite_restante for lot in lots_disponibles), Decimal("0"))
 
         if stock_disponible < qte:
             raise ValidationError(
@@ -131,16 +124,6 @@ def apply_sortie_on_commande_livree(commande: Commande, *, type_caisse_id: int |
                     )
                 }
             )
-
-        lots_disponibles = (
-            LigneEntree.objects.filter(
-                article=article_obj,
-                quantite_restante__gt=0,
-                entree__entreprise_id=tenant_id,
-            )
-            .select_related("entree")
-            .order_by("date_entree", "id")
-        )
 
         quantite_restante_a_sortir = qte
         lots_utilises_data = []
@@ -215,12 +198,7 @@ def apply_sortie_on_commande_livree(commande: Commande, *, type_caisse_id: int |
             totaux_par_devise[devise_key] = {"devise_obj": devise_obj, "total": Decimal("0.00")}
         totaux_par_devise[devise_key]["total"] += montant_ligne
 
-        stock_obj, _created = Stock.objects.get_or_create(
-            article=article_obj,
-            defaults={"Qte": 0, "seuilAlert": 0},
-        )
-        stock_obj.Qte -= qte
-        stock_obj.save(update_fields=["Qte"])
+        apply_stock_delta(article_obj, -qte)
 
     if totaux_par_devise:
         sortie.devise = (

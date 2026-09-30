@@ -37,6 +37,27 @@ class FlowSaasTests(TestCase):
         self.assertTrue(resp.data['licence_active'])
         self.assertIn('tokens', resp.data)
 
+    def test_flow_expose_etat_onboarding(self):
+        """Le frontend redirige à partir de ces champs : ils ne doivent pas être filtrés par le serializer."""
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.get('/api/inscription/flow/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data['onboarding_completed'])
+        self.assertTrue(resp.data['workspace_activated'])
+        self.assertTrue(resp.data['welcome_seen'])
+        self.assertIn('next_step', resp.data)
+        self.assertIn('redirection', resp.data)
+        self.assertEqual(resp.data['onboarding']['next_step'], resp.data['next_step'])
+
+    def test_flow_onboarding_non_finalise(self):
+        self.user.onboarding_complete = False
+        self.user.save(update_fields=['onboarding_complete'])
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.get('/api/inscription/flow/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data['onboarding_completed'])
+        self.assertNotEqual(resp.data['next_step'], 'dashboard')
+
     def test_creer_entreprise_minimale_essai(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post('/api/inscription/entreprise-minimale/', {
@@ -47,7 +68,9 @@ class FlowSaasTests(TestCase):
             'source_activation': 'essai_gratuit',
         }, format='json')
         self.assertEqual(resp.status_code, 201)
-        self.assertFalse(resp.data['acces_dashboard'])
+        # Onboarding terminé : dashboard accessible, mais opérations métier bloquées
+        # tant que l'entreprise n'est pas configurée.
+        self.assertTrue(resp.data['acces_dashboard'])
         self.assertFalse(resp.data['configuration_entreprise_complete'])
         self.assertFalse(resp.data['operations_metier_autorisees'])
         self.assertIn('tokens', resp.data)

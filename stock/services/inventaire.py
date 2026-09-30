@@ -26,6 +26,7 @@ from stock.models import (
     Stock,
 )
 from stock.services.currency import build_conversion_snapshot
+from stock.services.stock_adjustment import apply_stock_delta, lots_fifo_verrouilles
 from stock.services.conditionnement_pricing import get_or_create_conditionnement_defaut
 
 
@@ -245,10 +246,7 @@ def mettre_a_jour_ligne(
 
 
 def _consommer_fifo(article: Article, qte: Decimal, devise: Devise | None) -> list[dict]:
-    lots = (
-        LigneEntree.objects.filter(article=article, quantite_restante__gt=0)
-        .order_by('date_entree', 'id')
-    )
+    lots = lots_fifo_verrouilles(article)
     restant = qte
     lots_utilises = []
     for lot in lots:
@@ -332,12 +330,7 @@ def _creer_sortie_ajustement(
                 ),
             )
 
-        stock_obj, _ = Stock.objects.get_or_create(
-            article=article,
-            defaults={'Qte': 0, 'seuilAlert': 0},
-        )
-        stock_obj.Qte -= qte
-        stock_obj.save(update_fields=['Qte'])
+        apply_stock_delta(article, -qte)
 
     return sortie
 

@@ -210,10 +210,12 @@ class InscriptionApiTests(TestCase):
             'password': 'motdepasse1',
             'password_confirm': 'motdepasse1',
         }, format='json')
+        # Inscription manuelle : pas de session tant que l'e-mail n'est pas confirmé.
         self.assertEqual(resp.status_code, 201)
-        self.assertIn('tokens', resp.data)
-        self.assertTrue(resp.data['a_entreprise'])
-        self.assertEqual(resp.data['prochaine_etape'], 'utiliser_application')
+        self.assertNotIn('tokens', resp.data)
+        self.assertEqual(resp.data['statut_verification'], 'EN_ATTENTE')
+        self.assertFalse(resp.data['email_verifie'])
+        self.assertTrue(resp.data['email_envoye'])
 
     def test_formules_catalogue_public(self):
         FormuleAbonnement.objects.create(
@@ -248,7 +250,9 @@ class ControleLicenceEcritureTests(TestCase):
         )
         from users.models import Membership
 
-        self.user = User.objects.create_user(username='adminlic', password='testpass123', role='admin')
+        self.user = User.objects.create_user(
+            username='adminlic', password='testpass123', role='admin', email_verifie=True,
+        )
         self.ent = Entreprise.objects.create(nom='Ent Expiree')
         self.membership = Membership.objects.create(
             user=self.user, entreprise=self.ent, role='admin', is_active=True,
@@ -320,7 +324,9 @@ class LimitesPlanTests(TestCase):
                 'limites': {'utilisateurs_max': 2, 'succursales_max': 1},
             },
         )
-        self.user = User.objects.create_user(username='starteradmin', password='testpass123', role='admin')
+        self.user = User.objects.create_user(
+            username='starteradmin', password='testpass123', role='admin', email_verifie=True,
+        )
         self.ent = Entreprise.objects.create(nom='Boutique Starter')
         self.membership = Membership.objects.create(
             user=self.user, entreprise=self.ent, role='admin', is_active=True,

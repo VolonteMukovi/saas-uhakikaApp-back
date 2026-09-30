@@ -117,18 +117,25 @@ def _update_ligne_entree(entree: Entree, ligne: LigneEntree, payload: dict, *, d
     else:
         new_article = old_article
 
-    ligne_values = build_ligne_entree_values(new_article, payload | {
+    # Les valeurs actuelles de la ligne ne complètent un groupe (quantité, prix d'achat,
+    # prix de vente) que si le client n'en a envoyé aucun champ : sinon l'ancienne
+    # quantite_saisie / prix_*_conditionnement, prioritaires dans build_ligne_entree_values,
+    # masqueraient la nouvelle valeur envoyée en unité de base (quantite, prix_unitaire…).
+    valeurs_actuelles = {
         'conditionnement_id': payload.get('conditionnement_id') or payload.get('conditionnement') or getattr(ligne, 'conditionnement_id', None),
-        'quantite': payload.get('quantite', ligne.quantite),
-        'quantite_saisie': payload.get('quantite_saisie', ligne.quantite_saisie),
-        'quantite_base': payload.get('quantite_base', ligne.quantite_base),
-        'prix_unitaire': payload.get('prix_unitaire', ligne.prix_unitaire),
-        'prix_vente': payload.get('prix_vente', ligne.prix_vente),
-        'prix_achat_conditionnement': payload.get('prix_achat_conditionnement', ligne.prix_achat_conditionnement),
-        'prix_vente_conditionnement': payload.get('prix_vente_conditionnement', ligne.prix_vente_conditionnement),
-        'prix_achat_unitaire_base': payload.get('prix_achat_unitaire_base', ligne.prix_achat_unitaire_base),
-        'prix_vente_unitaire_base': payload.get('prix_vente_unitaire_base', ligne.prix_vente_unitaire_base),
-    })
+    }
+    groupes = (
+        (('quantite', 'quantite_saisie', 'quantite_base'),
+         {'quantite_saisie': ligne.quantite_saisie, 'quantite_base': ligne.quantite_base}),
+        (('prix_unitaire', 'prix_achat_conditionnement', 'prix_achat_unitaire_base'),
+         {'prix_achat_conditionnement': ligne.prix_achat_conditionnement}),
+        (('prix_vente', 'prix_vente_conditionnement', 'prix_vente_unitaire_base'),
+         {'prix_vente_conditionnement': ligne.prix_vente_conditionnement}),
+    )
+    for champs, defauts in groupes:
+        if not any(payload.get(champ) is not None for champ in champs):
+            valeurs_actuelles.update(defauts)
+    ligne_values = build_ligne_entree_values(new_article, payload | valeurs_actuelles)
     new_quantite = ligne_values['quantite']
 
     if new_article.pk != old_article.pk:

@@ -18,6 +18,36 @@ def quantite_vendue_ligne_entree(ligne: LigneEntree) -> Decimal:
     return quantize_qty(ligne.quantite) - quantize_qty(ligne.quantite_restante)
 
 
+def verrouiller_lots_articles(article_ids) -> None:
+    """
+    Verrouille (SELECT ... FOR UPDATE) les lots disponibles de plusieurs articles,
+    triés par article : deux ventes concurrentes prennent les verrous dans le même
+    ordre, ce qui évite les interblocages. À appeler dans une transaction.
+    """
+    ids = sorted({str(a) for a in article_ids if a})
+    if not ids:
+        return
+    list(
+        LigneEntree.objects.select_for_update()
+        .filter(article_id__in=ids, quantite_restante__gt=0)
+        .order_by('article_id', 'date_entree', 'id')
+        .values_list('id', flat=True)
+    )
+
+
+def lots_fifo_verrouilles(article: Article, **filters) -> list[LigneEntree]:
+    """
+    Lots disponibles de l'article, verrouillés, en ordre FIFO.
+    Lecture verrouillante : renvoie les quantités à jour même si une vente
+    concurrente vient de valider (une lecture simple reverrait l'instantané MySQL).
+    """
+    return list(
+        LigneEntree.objects.select_for_update()
+        .filter(article=article, quantite_restante__gt=0, **filters)
+        .order_by('date_entree', 'id')
+    )
+
+
 def apply_stock_delta(article: Article, delta: Decimal, *, seuil_alerte: Decimal | None = None) -> Stock:
     stock_obj, _ = Stock.objects.select_for_update().get_or_create(
         article=article,

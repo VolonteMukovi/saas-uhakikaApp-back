@@ -13,9 +13,20 @@ pymysql.install_as_MySQLdb()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = config("SECRET_KEY", default="django-insecure-saz6n+tnl=6h)&14$j_mm6nt+fuhias)89#&co=i3sb(tr=25%")
-
 DEBUG = config("DEBUG", default=True, cast=bool)
+
+# Clé de signature des JWT : la valeur de repli est publique (dans le dépôt), elle ne doit
+# servir qu'en développement local. Hors DEBUG ou sur Coolify, SECRET_KEY est obligatoire.
+_INSECURE_DEV_SECRET_KEY = "django-insecure-saz6n+tnl=6h)&14$j_mm6nt+fuhias)89#&co=i3sb(tr=25%"
+SECRET_KEY = config("SECRET_KEY", default="").strip()
+if not SECRET_KEY:
+    if not DEBUG or os.environ.get("COOLIFY_URL"):
+        from django.core.exceptions import ImproperlyConfigured
+
+        raise ImproperlyConfigured(
+            "SECRET_KEY doit être défini (variable d'environnement) en production."
+        )
+    SECRET_KEY = _INSECURE_DEV_SECRET_KEY
 
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="*").split(",")  # Dev uniquement, limiter en prod
 
@@ -66,10 +77,12 @@ MIDDLEWARE = [
     "config.http.etag.ETagMiddleware",
 ]
 
+# Cache partagé entre les workers gunicorn (idempotence, limite chatbot) : une table MySQL,
+# créée par la migration uhakika_config.0001. LocMemCache ne vaut que pour un seul processus.
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'uhakika-idempotency',
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'uhakika_cache',
     }
 }
 
@@ -80,7 +93,12 @@ IDEMPOTENCY_LOCK_SECONDS = config('IDEMPOTENCY_LOCK_SECONDS', default=120, cast=
 # n'envoie que OPTIONS et jamais GET/POST : écran vide).
 from corsheaders.defaults import default_headers, default_methods
 
-CORS_ALLOW_ALL_ORIGINS = True  # Dev, à limiter en prod
+# Origines autorisées : CORS_ALLOWED_ORIGINS (séparées par des virgules) en production.
+# Vide = toutes les origines (développement).
+CORS_ALLOWED_ORIGINS = [
+    o.strip() for o in config("CORS_ALLOWED_ORIGINS", default="").split(",") if o.strip()
+]
+CORS_ALLOW_ALL_ORIGINS = not CORS_ALLOWED_ORIGINS
 CORS_ALLOW_METHODS = list(default_methods)
 CORS_ALLOW_HEADERS = (
     *default_headers,
@@ -178,9 +196,11 @@ REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'config.pagination.UhakikaPagination',
     'PAGE_SIZE': 25,
     'EXCEPTION_HANDLER': 'config.exception_handlers.exception_handler',
-    # 'DEFAULT_PERMISSION_CLASSES': (
-    #     'rest_framework.permissions.IsAuthenticated',
-    # ),
+    # Sécurité par défaut : les vues publiques (inscription, webhooks, portail client,
+    # formules…) déclarent explicitement AllowAny.
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
+    ),
 }
 
 # Configuration JWT : session sécurisée (expiration à 48 h)

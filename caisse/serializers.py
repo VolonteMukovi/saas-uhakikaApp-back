@@ -5,6 +5,8 @@ from django.utils import timezone
 from django.utils.translation import gettext as _
 from rest_framework import serializers
 
+from stock.tenant_fields import TenantPrimaryKeyRelatedField
+
 from caisse.constants import CODE_TYPE_CAISSE_CHOICES
 from caisse.models import DetailMouvementCaisse, MouvementCaisse, TypeCaisse
 from caisse.services.caisse import creer_mouvement_caisse, mouvement_moyen_affiche
@@ -18,7 +20,7 @@ class TypeCaisseSerializer(serializers.ModelSerializer):
     """CRUD caisses (canaux d'encaissement) par entreprise / succursale."""
 
     devise = DeviseSerializer(read_only=True)
-    devise_id = serializers.PrimaryKeyRelatedField(
+    devise_id = TenantPrimaryKeyRelatedField(
         queryset=Devise.objects.all(),
         source='devise',
         write_only=True,
@@ -71,7 +73,7 @@ class TypeCaisseSerializer(serializers.ModelSerializer):
 
 class DetailMouvementCaisseSerializer(serializers.ModelSerializer):
     type_caisse = TypeCaisseSerializer(read_only=True)
-    type_caisse_id = serializers.PrimaryKeyRelatedField(
+    type_caisse_id = TenantPrimaryKeyRelatedField(
         queryset=TypeCaisse.objects.all(), source='type_caisse', write_only=True, required=False, allow_null=True
     )
 
@@ -86,7 +88,7 @@ class MouvementCaisseSerializer(serializers.ModelSerializer):
     """
     devise = DeviseSerializer(read_only=True)
     devise_reference = DeviseSerializer(read_only=True)
-    devise_id = serializers.PrimaryKeyRelatedField(
+    devise_id = TenantPrimaryKeyRelatedField(
         queryset=Devise.objects.all(),
         source='devise',
         write_only=True,
@@ -95,7 +97,7 @@ class MouvementCaisseSerializer(serializers.ModelSerializer):
     )
     taux_change = serializers.DecimalField(max_digits=20, decimal_places=8, required=False, allow_null=True)
     type_caisse_detail = TypeCaisseSerializer(source='type_caisse', read_only=True)
-    type_caisse_id = serializers.PrimaryKeyRelatedField(
+    type_caisse_id = TenantPrimaryKeyRelatedField(
         queryset=TypeCaisse.objects.filter(is_active=True),
         source='type_caisse',
         write_only=True,
@@ -212,8 +214,8 @@ class ConversionPreviewSerializer(serializers.Serializer):
     """Prévisualisation conversion opération → devise caisse (source de vérité backend)."""
 
     montant = serializers.DecimalField(max_digits=14, decimal_places=5)
-    devise_id = serializers.PrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise')
-    type_caisse_id = serializers.PrimaryKeyRelatedField(
+    devise_id = TenantPrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise')
+    type_caisse_id = TenantPrimaryKeyRelatedField(
         queryset=TypeCaisse.objects.filter(is_active=True),
         source='type_caisse',
     )

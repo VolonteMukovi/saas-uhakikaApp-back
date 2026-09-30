@@ -229,7 +229,7 @@ def _create_entree_from_prefill(requisition: Requisition, prefill: dict) -> Entr
 
     for ligne_data in prefill['lignes']:
         from stock.models import Article
-        article = Article.objects.get(article_id=ligne_data['article_id'])
+        article = Article.objects.get(article_id=ligne_data['article_id'], entreprise_id=entreprise_id)
         ligne_values = build_ligne_entree_values(
             article,
             {

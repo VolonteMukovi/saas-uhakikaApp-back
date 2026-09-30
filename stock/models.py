@@ -1,6 +1,6 @@
 import uuid
 
-from django.db import models
+from django.db import IntegrityError, models, transaction
 from django.db.models import Sum
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, is_password_usable, make_password
@@ -147,32 +147,46 @@ class Article(models.Model):
     def save(self, *args, **kwargs):
         if self.nom_scientifique is not None:
             self.nom_scientifique = ' '.join(self.nom_scientifique.split())
-        if not self.article_id:
-            # Préfixe 4 lettres (2 type + 2 sous-type) : plusieurs sous-types peuvent partager le même
-            # préfixe → l'ancien comptage par sous-type seul provoquait des 1062 (FOAG0001 deux fois).
-            ta = (self.sous_type_article.type_article.libelle or 'XX')[:2].upper()
-            st = (self.sous_type_article.libelle or 'XX')[:2].upper()
-            prefix = f'{ta}{st}'
-            qs = Article.objects.filter(article_id__startswith=prefix)
-            if self.entreprise_id:
-                qs = qs.filter(entreprise_id=self.entreprise_id)
-            max_num = 0
-            plen = len(prefix)
-            for aid in qs.values_list('article_id', flat=True):
-                if not aid or len(aid) <= plen:
-                    continue
-                try:
-                    max_num = max(max_num, int(aid[plen:]))
-                except ValueError:
-                    continue
-            next_n = max_num + 1
-            if next_n > 9999:
-                raise ValueError(
-                    'Limite de codes article atteinte pour ce préfixe (9999). '
-                    'Renommez un libellé de type ou sous-type pour obtenir un autre préfixe.'
-                )
-            self.article_id = f'{prefix}{str(next_n).zfill(4)}'
-        super().save(*args, **kwargs)
+        if self.article_id:
+            super().save(*args, **kwargs)
+            return
+        # article_id est une clé primaire globale (toutes entreprises) : la numérotation
+        # doit donc être globale par préfixe, sinon deux entreprises génèrent le même code.
+        # Nouvelle tentative si une création concurrente prend le même numéro.
+        # force_insert : avec une PK déjà renseignée, Django tenterait d'abord un UPDATE
+        # et écraserait l'article existant portant ce code.
+        kwargs = {**kwargs, 'force_insert': True}
+        for tentative in range(5):
+            self.article_id = self._generer_article_id()
+            try:
+                with transaction.atomic():
+                    super().save(*args, **kwargs)
+                return
+            except IntegrityError:
+                self.article_id = None
+                if tentative == 4:
+                    raise
+
+    def _generer_article_id(self) -> str:
+        # Préfixe 4 lettres (2 type + 2 sous-type) : plusieurs sous-types peuvent partager le même
+        # préfixe → l'ancien comptage par sous-type seul provoquait des 1062 (FOAG0001 deux fois).
+        ta = (self.sous_type_article.type_article.libelle or 'XX')[:2].upper()
+        st = (self.sous_type_article.libelle or 'XX')[:2].upper()
+        prefix = f'{ta}{st}'
+        plen = len(prefix)
+        max_num = 0
+        for aid in Article.objects.filter(article_id__startswith=prefix).values_list('article_id', flat=True):
+            suffix = (aid or '')[plen:]
+            if suffix.isdigit():
+                max_num = max(max_num, int(suffix))
+        next_n = max_num + 1
+        # 4 chiffres habituellement ; jusqu'à remplir les 10 caractères de la colonne si besoin.
+        if len(str(next_n)) > self._meta.get_field('article_id').max_length - plen:
+            raise ValueError(
+                'Limite de codes article atteinte pour ce préfixe. '
+                'Renommez un libellé de type ou sous-type pour obtenir un autre préfixe.'
+            )
+        return f'{prefix}{str(next_n).zfill(4)}'
 
 
 class ConditionnementArticle(models.Model):

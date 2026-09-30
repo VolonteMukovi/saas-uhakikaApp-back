@@ -1,4 +1,6 @@
 from rest_framework import serializers
+
+from stock.tenant_fields import TenantPrimaryKeyRelatedField, TenantSlugRelatedField
 from .models import (
     Entreprise,
     Succursale,
@@ -57,9 +59,9 @@ class DeviseSerializer(serializers.ModelSerializer):
 
 class TauxChangeSerializer(serializers.ModelSerializer):
     devise_source = DeviseSerializer(read_only=True)
-    devise_source_id = serializers.PrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise_source', write_only=True)
+    devise_source_id = TenantPrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise_source', write_only=True)
     devise_cible = DeviseSerializer(read_only=True)
-    devise_cible_id = serializers.PrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise_cible', write_only=True)
+    devise_cible_id = TenantPrimaryKeyRelatedField(queryset=Devise.objects.all(), source='devise_cible', write_only=True)
 
     class Meta:
         model = TauxChange
@@ -102,7 +104,7 @@ class TypeArticleSerializer(serializers.ModelSerializer):
         fields = '__all__'
 class SousTypeArticleSerializer(serializers.ModelSerializer):
     type_article = TypeArticleSerializer(read_only=True)
-    type_article_id = serializers.PrimaryKeyRelatedField(queryset=TypeArticle.objects.all(), source='type_article', write_only=True)
+    type_article_id = TenantPrimaryKeyRelatedField(queryset=TypeArticle.objects.all(), source='type_article', write_only=True)
     class Meta:
         model = SousTypeArticle
         fields = ['id', 'libelle', 'description', 'type_article', 'type_article_id']
@@ -122,9 +124,9 @@ class ArticleSerializer(serializers.ModelSerializer):
     en écriture ils acceptent l'id.
     """
     sous_type_article = SousTypeArticleSerializer(read_only=True)
-    sous_type_article_id = serializers.PrimaryKeyRelatedField(queryset=SousTypeArticle.objects.all(), source='sous_type_article', write_only=True)
+    sous_type_article_id = TenantPrimaryKeyRelatedField(queryset=SousTypeArticle.objects.all(), source='sous_type_article', write_only=True)
     unite = UniteSerializer(read_only=True)
-    unite_id = serializers.PrimaryKeyRelatedField(queryset=Unite.objects.all(), source='unite', write_only=True)
+    unite_id = TenantPrimaryKeyRelatedField(queryset=Unite.objects.all(), source='unite', write_only=True)
 
     type_article = serializers.SerializerMethodField(read_only=True)
 
@@ -189,7 +191,7 @@ class ArticleSearchSerializer(ArticleSerializer):
 
 
 class ConditionnementArticleSerializer(serializers.ModelSerializer):
-    article_id = serializers.SlugRelatedField(
+    article_id = TenantSlugRelatedField(
         slug_field='article_id',
         queryset=Article.objects.all(),
         source='article',
@@ -205,15 +207,16 @@ class ConditionnementArticleSerializer(serializers.ModelSerializer):
 
 
 class CodeBarresArticleSerializer(serializers.ModelSerializer):
-    article_id = serializers.SlugRelatedField(
+    article_id = TenantSlugRelatedField(
         slug_field='article_id',
         queryset=Article.objects.all(),
         source='article',
         write_only=True,
     )
     article = serializers.SlugRelatedField(slug_field='article_id', read_only=True)
-    conditionnement_id = serializers.PrimaryKeyRelatedField(
+    conditionnement_id = TenantPrimaryKeyRelatedField(
         queryset=ConditionnementArticle.objects.all(),
+        tenant_lookup='article__entreprise_id',
         source='conditionnement',
         write_only=True,
     )
@@ -287,19 +290,21 @@ class CodeBarresArticleSerializer(serializers.ModelSerializer):
 
 
 class PrixConditionnementEntreeSerializer(serializers.ModelSerializer):
-    ligne_entree_id = serializers.PrimaryKeyRelatedField(
+    ligne_entree_id = TenantPrimaryKeyRelatedField(
         queryset=LigneEntree.objects.all(),
+        tenant_lookup='entree__entreprise_id',
         source='ligne_entree',
         write_only=True,
     )
     ligne_entree = serializers.PrimaryKeyRelatedField(read_only=True)
-    conditionnement_id = serializers.PrimaryKeyRelatedField(
+    conditionnement_id = TenantPrimaryKeyRelatedField(
         queryset=ConditionnementArticle.objects.all(),
+        tenant_lookup='article__entreprise_id',
         source='conditionnement',
         write_only=True,
     )
     conditionnement = ConditionnementArticleSerializer(read_only=True)
-    devise_id = serializers.PrimaryKeyRelatedField(
+    devise_id = TenantPrimaryKeyRelatedField(
         queryset=Devise.objects.all(),
         source='devise',
         write_only=True,
@@ -403,7 +408,7 @@ class LigneSortieSerializer(serializers.ModelSerializer):
     En lecture, retourne l'objet complet de la devise et de l'article avec inner join.
     """
     article = ArticleSerializer(read_only=True)
-    article_id = serializers.PrimaryKeyRelatedField(
+    article_id = TenantPrimaryKeyRelatedField(
         queryset=Article.objects.all(), 
         source='article', 
         write_only=True, 
@@ -411,7 +416,7 @@ class LigneSortieSerializer(serializers.ModelSerializer):
     )
     devise = DeviseSerializer(read_only=True)
     devise_reference = DeviseSerializer(read_only=True)
-    devise_id = serializers.PrimaryKeyRelatedField(
+    devise_id = TenantPrimaryKeyRelatedField(
         queryset=Devise.objects.all(), 
         source='devise', 
         write_only=True, 
@@ -696,8 +701,9 @@ class SortieSerializer(serializers.ModelSerializer):
     """
     lignes = LigneSortieSerializer(many=True)
     client = ClientSerializer(read_only=True)
-    client_id = serializers.PrimaryKeyRelatedField(
+    client_id = TenantPrimaryKeyRelatedField(
         queryset=Client.objects.all(),
+        tenant_lookup='liens_entreprise__entreprise_id',
         source='client',
         write_only=True,
         required=False,
@@ -935,7 +941,7 @@ class LigneEntreeSerializer(serializers.ModelSerializer):
     En lecture, retourne l'objet complet de la devise et de l'article avec inner join.
     """
     article = ArticleSerializer(read_only=True)
-    article_id = serializers.PrimaryKeyRelatedField(
+    article_id = TenantPrimaryKeyRelatedField(
         queryset=Article.objects.all(), 
         source='article', 
         write_only=True, 
@@ -944,8 +950,9 @@ class LigneEntreeSerializer(serializers.ModelSerializer):
     devise = DeviseSerializer(read_only=True)
     devise_reference = DeviseSerializer(read_only=True)
     conditionnement = ConditionnementArticleSerializer(read_only=True)
-    conditionnement_id = serializers.PrimaryKeyRelatedField(
+    conditionnement_id = TenantPrimaryKeyRelatedField(
         queryset=ConditionnementArticle.objects.all(),
+        tenant_lookup='article__entreprise_id',
         source='conditionnement',
         write_only=True,
         required=False,
@@ -962,7 +969,7 @@ class LigneEntreeSerializer(serializers.ModelSerializer):
     prix_vente = LocalizedDecimalField(max_digits=10, decimal_places=5, required=False, allow_null=True)
     prix_conditionnements = PrixConditionnementEntreeSerializer(many=True, required=False)
     seuil_alerte = LocalizedDecimalField(max_digits=12, decimal_places=5)
-    devise_id = serializers.PrimaryKeyRelatedField(
+    devise_id = TenantPrimaryKeyRelatedField(
         queryset=Devise.objects.all(), 
         source='devise', 
         write_only=True, 
@@ -1176,7 +1183,7 @@ class EntreeSerializer(serializers.ModelSerializer):
                     ligne.get('prix_conditionnements'),
                     devise_obj or devise_principale,
                 )
-                stock_obj, _ = Stock.objects.get_or_create(
+                stock_obj, _created = Stock.objects.get_or_create(
                     article=article_obj,
                     defaults={'Qte': 0, 'seuilAlert': ligne.get('seuil_alerte', 0)},
                 )

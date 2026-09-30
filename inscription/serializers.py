@@ -157,3 +157,11 @@ class EtatFlowSaasSerializer(serializers.Serializer):
     messages = serializers.ListField(child=serializers.CharField())
     actions_recommandees = serializers.ListField(child=serializers.DictField())
     regles_verification = serializers.DictField()
+    # Parcours onboarding : sans ces champs le frontend ne voit jamais l'onboarding
+    # comme finalisé et renvoie l'utilisateur à l'étape « Vérification » à chaque connexion.
+    onboarding_completed = serializers.BooleanField(required=False, default=False)
+    workspace_activated = serializers.BooleanField(required=False, default=False)
+    welcome_seen = serializers.BooleanField(required=False, default=False)
+    next_step = serializers.CharField(required=False, allow_null=True)
+    redirection = serializers.CharField(required=False, allow_null=True)
+    onboarding = serializers.DictField(required=False)
