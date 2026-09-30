@@ -311,6 +311,9 @@ class MP2258Printer:
         _ = doc_prefix
         lines.append(f"Date: {invoice_dt.strftime('%d/%m/%Y %H:%M')}\n")
         lines.append(f"Client: {client_name}\n")
+        retire_par = (getattr(sortie, "retire_par", None) or "").strip()
+        if retire_par and (mode_paiement or "").upper().startswith("CR"):
+            lines.append(f"Retire par: {retire_par}\n")
         if currency:
             lines.append(f"Devise: {currency}\n")
         if mode_paiement:
@@ -567,6 +570,9 @@ class MP2258Printer:
 
         lines.append(f"Date: {date_s}\n")
         lines.append(f"Client: {client_name}\n")
+        retire_par = (getattr(sortie, "retire_par", None) or "").strip() if sortie else ""
+        if retire_par:
+            lines.append(f"Retire par: {retire_par}\n")
         if currency:
             lines.append(f"Devise: {currency}\n")
         lines.append("Mode: PAIEMENT DETTE\n")

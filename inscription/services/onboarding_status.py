@@ -48,12 +48,14 @@ def resoudre_next_step(user, request=None) -> str:
     profile_ok = profil_est_complet(user)
     ent = user.get_entreprise(request) if hasattr(user, 'get_entreprise') else None
     company_ok = entreprise_est_configuree(ent)
+    onboarding_ok = bool(getattr(user, 'onboarding_complete', False))
 
     if not profile_ok:
         return NEXT_PROFILE
-    if not company_ok:
+    # Parcours entreprise une seule fois : ne pas renvoyer au wizard si déjà finalisé.
+    if not company_ok and not onboarding_ok:
         return NEXT_COMPANY
-    if not getattr(user, 'onboarding_complete', False):
+    if not onboarding_ok:
         return NEXT_REVIEW
     if not getattr(user, 'workspace_activated', False):
         return NEXT_ACTIVATION

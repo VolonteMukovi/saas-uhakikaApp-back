@@ -777,11 +777,18 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             # RÃ©cupÃ©rer le client si fourni
             client = serializer.validated_data.get('client')
             
+            from stock.services.retrait_marchandise import nettoyer_retire_par
+
             lib = serializer.validated_data.get('motif', '')
+            statut_sortie = serializer.validated_data.get('statut', 'PAYEE')
             sortie = Sortie.objects.create(
                 motif=lib,
-                statut=serializer.validated_data.get('statut', 'PAYEE'),
+                statut=statut_sortie,
                 client=client,
+                retire_par=nettoyer_retire_par(
+                    serializer.validated_data.get('retire_par', ''),
+                    statut_sortie,
+                ),
                 entreprise_id=tenant_id,
                 succursale_id=branch_id,
                 devise_reference=default_dev,
@@ -2812,21 +2819,14 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             total=Sum('benefice_total')
         )['total'] or Decimal('0.00')
 
-        total_gain = benefices.filter(benefice_total__gte=0).aggregate(
-            total=Sum('benefice_total')
-        )['total'] or Decimal('0.00')
+        from stock.services.benefices_performance import synthese_par_article
 
-        # Pertes : on n'inclut PAS les ventes Ã  crÃ©dit (EN_CREDIT) car ce n'est pas une perte dÃ©finitive ;
-        # le client doit rembourser ; la perte ne sera Ã©ventuellement considÃ©rÃ©e qu'au remboursement.
-        benefices_perte = benefices.filter(benefice_total__lt=0).exclude(
-            ligne_sortie__sortie__statut='EN_CREDIT'
-        )
-        total_perte = abs(benefices_perte.aggregate(
-            total=Sum('benefice_total')
-        )['total'] or Decimal('0.00'))
+        synthese = synthese_par_article(benefices)
+        total_gain = synthese['total_gain']
+        total_perte = synthese['total_perte']
 
-        nombre_lots_gagnants = benefices.filter(benefice_total__gte=0).count()
-        nombre_lots_perdants = benefices_perte.count()
+        nombre_lots_gagnants = benefices.filter(benefice_total__gt=0).count()
+        nombre_lots_perdants = benefices.filter(benefice_total__lt=0).count()
         nombre_lots_total = benefices.count()
 
         # Top 10 articles par bÃ©nÃ©fice (agrÃ©gation SQL, pas de boucle Python sur tous les lots)
@@ -2896,6 +2896,8 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 'total_perte': str(total_perte),
                 'nombre_lots_gagnants': nombre_lots_gagnants,
                 'nombre_lots_perdants': nombre_lots_perdants,
+                'nombre_produits_gagnants': synthese['nombre_produits_gagnants'],
+                'nombre_produits_perdants': synthese['nombre_produits_perdants'],
                 'nombre_lots_total': nombre_lots_total,
                 'taux_reussite': f"{(nombre_lots_gagnants / nombre_lots_total * 100):.5f}%" if nombre_lots_total > 0 else "0%"
             },

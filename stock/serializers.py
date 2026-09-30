@@ -703,10 +703,17 @@ class SortieSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True
     )
+    retire_par = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        max_length=150,
+        help_text="Personne venue retirer la marchandise. Uniquement si statut=EN_CREDIT. Optionnel.",
+    )
 
     class Meta:
         model = Sortie
-        fields = ['id', 'motif', 'statut', 'client', 'client_id', 'date_creation', 'lignes']
+        fields = ['id', 'motif', 'statut', 'client', 'client_id', 'retire_par', 'date_creation', 'lignes']
         read_only_fields = ['date_creation']
 
     @transaction.atomic
@@ -714,10 +721,14 @@ class SortieSerializer(serializers.ModelSerializer):
         lignes_data = validated_data.pop('lignes', [])
         user = self.context['request'].user
 
+        from stock.services.retrait_marchandise import nettoyer_retire_par
+
+        statut = validated_data.get('statut', 'PAYEE')
         sortie = Sortie.objects.create(
             motif=validated_data.get('motif', ''),
-            statut=validated_data.get('statut', 'PAYEE'),
+            statut=statut,
             client=validated_data.get('client'),
+            retire_par=nettoyer_retire_par(validated_data.get('retire_par', ''), statut),
         )
 
         for ligne in lignes_data:
@@ -1308,6 +1319,7 @@ class DettesClientsListSerializer(serializers.ModelSerializer):
 
     client_id = serializers.CharField(source='sortie.client_id', read_only=True, allow_null=True)
     client_nom = serializers.CharField(source='sortie.client.nom', read_only=True, default=None)
+    retire_par = serializers.CharField(source='sortie.retire_par', read_only=True, default='')
     sortie_id = serializers.IntegerField(source='sortie.id', read_only=True)
     devise_sigle = serializers.SerializerMethodField()
 
@@ -1318,6 +1330,7 @@ class DettesClientsListSerializer(serializers.ModelSerializer):
             'sortie_id',
             'client_id',
             'client_nom',
+            'retire_par',
             'date',
             'montant',
             'paye',

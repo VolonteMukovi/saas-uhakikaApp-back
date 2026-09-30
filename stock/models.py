@@ -477,6 +477,12 @@ class Sortie(models.Model):
         ],
         default='PAYEE'
     )
+    retire_par = models.CharField(
+        max_length=150,
+        blank=True,
+        default='',
+        help_text="Personne venue retirer la marchandise (vente à crédit uniquement, optionnel).",
+    )
     date_creation = models.DateTimeField(auto_now_add=True)
     entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='sorties', null=True, blank=True)
     succursale = models.ForeignKey(Succursale, on_delete=models.CASCADE, related_name='sorties', null=True, blank=True)

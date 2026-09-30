@@ -1,9 +1,9 @@
 """
 Performance commerciale : gains / pertes / CA par article (source BeneficeLot).
 
-- Gain  : benefice_total >= 0
-- Perte : benefice_total < 0 (hors crédit EN_CREDIT par défaut pour les totaux « perte »)
-- CA    : sum(prix_vente × quantite_vendue)
+Un produit est en gain ou en perte selon son bénéfice net du mois
+(crédit inclus). Les totaux du résumé sont la somme de ces nets :
+total des gains − total des pertes = bénéfice net.
 """
 from __future__ import annotations
 
@@ -148,6 +148,44 @@ def _performance(benefice_net: Decimal) -> dict[str, str]:
     }
 
 
+def synthese_par_article(qs) -> dict[str, Any]:
+    """
+    Même règle que le tableau produits : un article est en perte si la somme
+    de ses bénéfices du mois est négative (ventes au comptant et à crédit).
+    """
+    rows = qs.values('lot_entree__article_id').annotate(
+        benefice_net=Coalesce(Sum('benefice_total'), Decimal('0')),
+        chiffre_affaires=Coalesce(Sum(_ca_expr()), Decimal('0')),
+    )
+    total_gain = Decimal('0')
+    total_perte = Decimal('0')
+    ca_gains = Decimal('0')
+    ca_pertes = Decimal('0')
+    n_gain = n_perte = n_neutre = 0
+    for row in rows:
+        benef = _q(row['benefice_net'])
+        ca = _q(row['chiffre_affaires'])
+        if benef > 0:
+            n_gain += 1
+            total_gain += benef
+            ca_gains += ca
+        elif benef < 0:
+            n_perte += 1
+            total_perte += abs(benef)
+            ca_pertes += ca
+        else:
+            n_neutre += 1
+    return {
+        'total_gain': _q(total_gain),
+        'total_perte': _q(total_perte),
+        'ca_gains': _q(ca_gains),
+        'ca_pertes': _q(ca_pertes),
+        'nombre_produits_gagnants': n_gain,
+        'nombre_produits_perdants': n_perte,
+        'nombre_produits_neutres': n_neutre,
+    }
+
+
 def build_resume(
     *,
     entreprise_id: int,
@@ -162,9 +200,6 @@ def build_resume(
         month=month,
         include_credit=True,
     )
-    qs_perte = qs.filter(benefice_total__lt=0).exclude(
-        ligne_sortie__sortie__statut='EN_CREDIT',
-    )
 
     ca_expr = _ca_expr()
     cout_expr = _cout_expr()
@@ -176,20 +211,13 @@ def build_resume(
         quantite=Sum('quantite_vendue'),
         nb=Count('id'),
     )
-    gains = qs.filter(benefice_total__gte=0).aggregate(
-        total=Sum('benefice_total'),
-        ca=Sum(ca_expr),
-        nb=Count('id'),
-    )
-    pertes = qs_perte.aggregate(
-        total=Sum('benefice_total'),
-        ca=Sum(ca_expr),
-        nb=Count('id'),
-    )
+    lots_gagnants = qs.filter(benefice_total__gt=0).count()
+    lots_perdants = qs.filter(benefice_total__lt=0).count()
+    synthese = synthese_par_article(qs)
 
     benefice_net = _q(agg['benefice_net'])
-    total_gain = _q(gains['total'])
-    total_perte = abs(_q(pertes['total']))
+    total_gain = synthese['total_gain']
+    total_perte = synthese['total_perte']
 
     return {
         'rapport': 'benefices_resume',
@@ -210,8 +238,11 @@ def build_resume(
             'total_perte': _fmt(total_perte),
             'quantite_totale': _fmt(agg['quantite']),
             'nombre_mouvements': agg['nb'] or 0,
-            'nombre_mouvements_gagnants': gains['nb'] or 0,
-            'nombre_mouvements_perdants': pertes['nb'] or 0,
+            'nombre_mouvements_gagnants': synthese['nombre_produits_gagnants'],
+            'nombre_mouvements_perdants': synthese['nombre_produits_perdants'],
+            'nombre_produits_gagnants': synthese['nombre_produits_gagnants'],
+            'nombre_produits_perdants': synthese['nombre_produits_perdants'],
+            'nombre_produits_neutres': synthese['nombre_produits_neutres'],
             'nombre_articles': qs.values('lot_entree__article_id').distinct().count(),
         },
         'performance': {
@@ -220,14 +251,25 @@ def build_resume(
         },
         'gains': {
             'montant': _fmt(total_gain),
-            'chiffre_affaires': _fmt(gains['ca']),
-            'nombre_mouvements': gains['nb'] or 0,
+            'chiffre_affaires': _fmt(synthese['ca_gains']),
+            'nombre_mouvements': synthese['nombre_produits_gagnants'],
+            'nombre_produits': synthese['nombre_produits_gagnants'],
         },
         'pertes': {
             'montant': _fmt(total_perte),
-            'chiffre_affaires': _fmt(pertes['ca']),
-            'nombre_mouvements': pertes['nb'] or 0,
-            'note': 'Les ventes à crédit déficitaires sont exclues des pertes (non définitives).',
+            'chiffre_affaires': _fmt(synthese['ca_pertes']),
+            'nombre_mouvements': synthese['nombre_produits_perdants'],
+            'nombre_produits': synthese['nombre_produits_perdants'],
+            'note': (
+                'Total des pertes = somme des bénéfices nets des produits en perte, '
+                'ventes au comptant et à crédit comprises. '
+                'Le nombre est celui de ces produits, le même que l’onglet En perte.'
+            ),
+        },
+        'mouvements_lots': {
+            'gagnants': lots_gagnants,
+            'perdants': lots_perdants,
+            'total': agg['nb'] or 0,
         },
     }
 
@@ -277,18 +319,6 @@ def aggregate_par_article(
             benefice_net=Coalesce(Sum('benefice_total'), Decimal('0')),
             quantite_vendue=Coalesce(Sum('quantite_vendue'), Decimal('0')),
             nombre_mouvements=Count('id'),
-            gain_brut=Coalesce(
-                Sum('benefice_total', filter=Q(benefice_total__gte=0)),
-                Decimal('0'),
-            ),
-            perte_brute=Coalesce(
-                Sum(
-                    'benefice_total',
-                    filter=Q(benefice_total__lt=0)
-                    & ~Q(ligne_sortie__sortie__statut='EN_CREDIT'),
-                ),
-                Decimal('0'),
-            ),
         )
         .order_by('benefice_net')  # pertes d'abord si on filtre pertes ; on réordonne après
     )
@@ -296,8 +326,12 @@ def aggregate_par_article(
     results: list[dict[str, Any]] = []
     for row in rows:
         benef = _q(row['benefice_net'])
-        perte = abs(_q(row['perte_brute']))
-        gain = _q(row['gain_brut'])
+        if benef > 0:
+            gain, perte = benef, Decimal('0')
+        elif benef < 0:
+            gain, perte = Decimal('0'), abs(benef)
+        else:
+            gain, perte = Decimal('0'), Decimal('0')
         if filtre == 'gains' and benef < 0:
             continue
         if filtre == 'pertes' and benef >= 0:
@@ -377,11 +411,6 @@ def detail_article(
         benefice_net=Sum('benefice_total'),
         quantite=Sum('quantite_vendue'),
         nb=Count('id'),
-        gain=Sum('benefice_total', filter=Q(benefice_total__gte=0)),
-        perte=Sum(
-            'benefice_total',
-            filter=Q(benefice_total__lt=0) & ~Q(ligne_sortie__sortie__statut='EN_CREDIT'),
-        ),
     )
 
     mouvements: list[dict[str, Any]] = []
@@ -404,7 +433,7 @@ def detail_article(
             elif origine['type'] == 'VENTE_CREDIT':
                 statut, explication = 'PERTE', (
                     f"Vente à crédit sous le coût : PV {_fmt(b.prix_vente)} < achat {_fmt(b.prix_achat)} "
-                    f"(écart {_fmt(b.benefice_unitaire)} / unité). Non comptée dans total_perte tant que non soldée."
+                    f"(écart {_fmt(b.benefice_unitaire)} / unité). Comptée dans le bénéfice net du produit."
                 )
             else:
                 statut, explication = 'PERTE', (
@@ -435,10 +464,13 @@ def detail_article(
     benef_net = _q(agg['benefice_net'])
     if benef_net > 0:
         statut_art = 'GAIN'
+        gain_art, perte_art = benef_net, Decimal('0')
     elif benef_net < 0:
         statut_art = 'PERTE'
+        gain_art, perte_art = Decimal('0'), abs(benef_net)
     else:
         statut_art = 'NEUTRE'
+        gain_art, perte_art = Decimal('0'), Decimal('0')
 
     return {
         'rapport': 'benefices_article_detail',
@@ -458,8 +490,8 @@ def detail_article(
             'chiffre_affaires': _fmt(agg['ca']),
             'cout_achat': _fmt(agg['cout']),
             'benefice_net': _fmt(benef_net),
-            'total_gain': _fmt(agg['gain']),
-            'total_perte': _fmt(abs(_q(agg['perte']))),
+            'total_gain': _fmt(gain_art),
+            'total_perte': _fmt(perte_art),
             'quantite_vendue': _fmt(agg['quantite']),
             'nombre_mouvements': agg['nb'] or 0,
             'statut': statut_art,

@@ -308,6 +308,52 @@ class ClientLifecycleApiTests(APITestCase):
         self.assertEqual(response.status_code, 201, response.content)
         return response.json()
 
+    def test_en_credit_retire_par_optionnel_visible_apres_vente(self):
+        payload = {
+            'statut': 'EN_CREDIT',
+            'client_id': self.client_fiche.pk,
+            'retire_par': '  Junior Kabila  ',
+            'lignes': [{
+                'article_id': self.article.pk,
+                'quantite': '1',
+                'prix_unitaire': '10',
+                'devise_id': self.devise.pk,
+            }],
+        }
+        created = self.client.post('/api/sorties/', payload, format='json')
+        self.assertEqual(created.status_code, 201, created.content)
+        self.assertEqual(created.json()['retire_par'], 'Junior Kabila')
+        sortie_id = created.json()['id']
+
+        detail = self.client.get(f'/api/sorties/{sortie_id}/')
+        self.assertEqual(detail.status_code, 200, detail.content)
+        self.assertEqual(detail.json()['retire_par'], 'Junior Kabila')
+
+        dettes = self.client.get('/api/dettes-clients/')
+        self.assertEqual(dettes.status_code, 200, dettes.content)
+        body = dettes.json()
+        rows = body['results'] if isinstance(body, dict) and 'results' in body else body
+        match = next(row for row in rows if row['sortie_id'] == sortie_id)
+        self.assertEqual(match['retire_par'], 'Junior Kabila')
+
+        sans = self._creer_sortie(statut='EN_CREDIT', quantite='1', prix='10')
+        self.assertEqual(sans.get('retire_par', ''), '')
+
+        cash = {
+            'statut': 'PAYEE',
+            'client_id': self.client_fiche.pk,
+            'retire_par': 'Junior',
+            'type_caisse_id': self.type_caisse.pk,
+            'lignes': [{
+                'article_id': self.article.pk,
+                'quantite': '1',
+                'prix_unitaire': '10',
+                'devise_id': self.devise.pk,
+            }],
+        }
+        refused = self.client.post('/api/sorties/', cash, format='json')
+        self.assertEqual(refused.status_code, 400, refused.content)
+
     def test_en_credit_sortie_creates_dette(self):
         response_data = self._creer_sortie(statut='EN_CREDIT', quantite='1', prix='10')
         sortie = Sortie.objects.get(pk=response_data['id'])
@@ -318,6 +364,76 @@ class ClientLifecycleApiTests(APITestCase):
         self.assertEqual(dette.paye, Decimal('0.00000'))
         self.assertEqual(dette.reste, Decimal('10.00000'))
         self.assertEqual(dette.status, DettesClients.STATUS_ENCOURS)
+
+    def test_benefices_resume_aligne_pertes_sur_produits_credit_inclus(self):
+        """Le total des pertes égale la somme des produits en perte, crédit compris."""
+        from django.utils import timezone
+
+        article_gain = Article.objects.create(
+            nom_scientifique='article gain mixte',
+            nom_commercial='article gain mixte',
+            sous_type_article=self.sous_type,
+            unite=self.unite,
+            emplacement='B1',
+            entreprise=self.entreprise,
+        )
+        entree = Entree.objects.create(libele='Appro benef', entreprise=self.entreprise)
+        LigneEntree.objects.create(
+            article=article_gain,
+            entree=entree,
+            quantite=Decimal('20'),
+            quantite_restante=Decimal('20'),
+            prix_unitaire=Decimal('5'),
+            prix_vente=Decimal('10'),
+            devise=self.devise,
+            seuil_alerte=Decimal('0'),
+        )
+        Stock.objects.update_or_create(
+            article=article_gain,
+            defaults={'Qte': Decimal('20'), 'seuilAlert': Decimal('0')},
+        )
+
+        def vendre(article, statut, prix):
+            payload = {
+                'statut': statut,
+                'client_id': self.client_fiche.pk,
+                'lignes': [{
+                    'article_id': article.pk,
+                    'quantite': '1',
+                    'prix_unitaire': prix,
+                    'devise_id': self.devise.pk,
+                }],
+            }
+            if statut == 'PAYEE':
+                payload['type_caisse_id'] = self.type_caisse.pk
+            response = self.client.post('/api/sorties/', payload, format='json')
+            self.assertEqual(response.status_code, 201, response.content)
+
+        vendre(self.article, 'EN_CREDIT', '1')
+        vendre(self.article, 'PAYEE', '4')
+        vendre(article_gain, 'PAYEE', '20')
+        vendre(article_gain, 'PAYEE', '1')
+
+        now = timezone.now()
+        resume = self.client.get('/api/benefices/resume/', {'year': now.year, 'month': now.month})
+        self.assertEqual(resume.status_code, 200, resume.content)
+        body = resume.json()
+        self.assertEqual(body['resume']['total_perte'], '5.00000')
+        self.assertEqual(body['resume']['total_gain'], '11.00000')
+        self.assertEqual(body['resume']['benefice_net'], '6.00000')
+        self.assertEqual(body['resume']['nombre_produits_perdants'], 1)
+        self.assertEqual(body['resume']['nombre_mouvements_perdants'], 1)
+        self.assertEqual(body['pertes']['montant'], '5.00000')
+        self.assertEqual(body['pertes']['nombre_produits'], 1)
+
+        pertes = self.client.get(
+            '/api/benefices/articles/',
+            {'year': now.year, 'month': now.month, 'filtre': 'pertes', 'page_size': 200},
+        )
+        self.assertEqual(pertes.status_code, 200, pertes.content)
+        self.assertEqual(pertes.json()['count'], 1)
+        self.assertEqual(pertes.json()['results'][0]['benefice_net'], '-5.00000')
+        self.assertEqual(pertes.json()['results'][0]['total_perte'], '5.00000')
 
     def test_dashboard_client_sans_achat(self):
         response = self.client.get(f'/api/clients/{self.client_fiche.pk}/dashboard/')

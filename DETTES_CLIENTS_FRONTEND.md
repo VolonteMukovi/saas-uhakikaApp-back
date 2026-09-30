@@ -8,7 +8,22 @@ Alignement **CURSOR.md** (HTTP natif) : ETag / 304, `Idempotency-Key`, paginatio
 
 ## Création automatique
 
-`POST /api/sorties/` avec `statut: "EN_CREDIT"` + `client_id` obligatoire → crée `DettesClients` :
+`POST /api/sorties/` avec `statut: "EN_CREDIT"` + `client_id` obligatoire → crée `DettesClients`.
+
+Champ optionnel `retire_par` (string, max 150) : personne qui retire la marchandise à la place du client. Absent ou `""` = pas de ligne sur la facture. Refusé (`400`) si la vente n’est pas `EN_CREDIT`.
+
+```json
+{
+  "statut": "EN_CREDIT",
+  "client_id": "CLI0001",
+  "retire_par": "Junior Kabila",
+  "lignes": []
+}
+```
+
+La facture `GET /api/sorties/{id}/facture-pos/` imprime `Retire par: Junior Kabila` sous le client. Le même nom revient dans `GET /api/sorties/{id}/` et dans chaque dette (`retire_par`), pour qu’un responsable le revoie après l’opération.
+
+Pour le corriger plus tard : `PATCH /api/sorties/{id}/` avec `{ "retire_par": "Nouveau nom" }` (vente encore `EN_CREDIT`). Envoyer `""` efface le nom.
 
 | Champ   | Valeur initiale                          |
 |---------|------------------------------------------|
@@ -49,7 +64,9 @@ GET /api/dettes-clients/?cursor=...&page_size=25
 GET /api/dettes-clients/?page=1&page_size=25
 ```
 
-Champs liste : `id`, `sortie_id`, `client_id`, `client_nom`, `date`, `montant`, `paye`, `reste`, `status`, `devise_sigle`, `updated_at`.
+Champs liste : `id`, `sortie_id`, `client_id`, `client_nom`, `retire_par`, `date`, `montant`, `paye`, `reste`, `status`, `devise_sigle`, `updated_at`.
+
+`retire_par` : nom de la personne venue retirer la marchandise (enfant, coursier, etc.). Chaîne vide si personne n’a été indiquée. Reste visible après la vente, y compris quand la dette passe à `TERMINE`.
 
 Pagination :
 

@@ -138,3 +138,26 @@ class OnboardingFlowTests(TestCase):
         resp = self.client.get('/api/inscription/flow/')
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data['acces_dashboard'])
+
+    def test_onboarding_complete_skips_company_wizard_even_if_ent_incomplete(self):
+        """Reconnexion Google : ne pas renvoyer au formulaire identité si onboarding déjà finalisé."""
+        self._auth()
+        ent = Entreprise.objects.create(
+            nom='À compléter',
+            email='shop@test.com',
+            telephone='+243900000000',
+            adresse='12 rue Test',
+            pays='RDC',
+            responsable='Jean Dupont',
+            secteur='Commerce',
+        )
+        Membership.objects.create(user=self.user, entreprise=ent, role='admin', is_active=True)
+        self.user.first_name = 'Jean'
+        self.user.last_name = 'Dupont'
+        self.user.onboarding_complete = True
+        self.user.save(update_fields=['first_name', 'last_name', 'onboarding_complete'])
+
+        resp = self.client.get('/api/onboarding/status/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotEqual(resp.data['next_step'], 'company')
+        self.assertIn(resp.data['next_step'], ('activation', 'welcome', 'dashboard', 'review'))

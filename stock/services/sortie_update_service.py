@@ -196,6 +196,14 @@ def update_sortie_from_payload(
         raise serializers.ValidationError({
             'client': _('Un client est obligatoire pour une vente à crédit.'),
         })
+    from stock.services.retrait_marchandise import nettoyer_retire_par
+
+    if str(new_statut).upper() != 'EN_CREDIT':
+        if str(data.get('retire_par') or '').strip():
+            nettoyer_retire_par(data.get('retire_par'), new_statut)
+        sortie.retire_par = ''
+    elif 'retire_par' in data:
+        sortie.retire_par = nettoyer_retire_par(data.get('retire_par', ''), new_statut)
     sortie.statut = new_statut
     sortie.save()
 
