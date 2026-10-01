@@ -441,9 +441,14 @@ def valider_session(session: InventaireSession, user) -> InventaireSession:
     return session
 
 
-def annuler_session(session: InventaireSession) -> InventaireSession:
+def annuler_session(session: InventaireSession, user=None, *, motif: str = '') -> InventaireSession:
     if session.statut == InventaireSession.STATUT_VALIDE:
-        raise ValidationError('Un inventaire validé ne peut plus être annulé.')
+        # Restaure la situation antérieure à la validation (stocks, lots, ajustements).
+        from stock.services.inventaire_annulation import annuler_validation_session
+
+        return annuler_validation_session(session, user, motif=motif)
+    if session.statut == InventaireSession.STATUT_ANNULE:
+        raise ValidationError('Cet inventaire est déjà annulé.')
     session.statut = InventaireSession.STATUT_ANNULE
     session.save(update_fields=['statut'])
     return session

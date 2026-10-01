@@ -1,6 +1,7 @@
 from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
 from stock.inventaire_serializers import (
@@ -16,6 +17,7 @@ from stock.inventaire_serializers import (
 from stock.models import InventaireLigne, InventaireSession
 from stock.permissions import IsAdminOrUser as StockIsAdminOrUser
 from stock.services import inventaire as inventaire_service
+from stock.services.inventaire_annulation import diagnostiquer_annulation_validation
 from stock.views import TenantFilterMixin
 
 
@@ -29,7 +31,8 @@ class InventaireSessionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
     3. PATCH /inventaires/{id}/lignes/{ligne_id}/ — saisir stock_physique
     4. POST /inventaires/{id}/lignes/bulk/ — saisie groupée
     5. POST /inventaires/{id}/valider/ — ajustements tracés (Entree/Sortie)
-    6. POST /inventaires/{id}/annuler/ — annuler
+    6. POST /inventaires/{id}/annuler/ — annuler (si validé : restaure la situation antérieure)
+    7. GET /inventaires/{id}/annulation-validation/ — diagnostic avant annulation
     """
     queryset = InventaireSession.objects.all()
     permission_classes = [StockIsAdminOrUser]
@@ -38,7 +41,7 @@ class InventaireSessionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
         return (
             super()
             .get_queryset()
-            .select_related('cree_par', 'valide_par', 'entree_ajustement', 'sortie_ajustement')
+            .select_related('cree_par', 'valide_par', 'annule_par', 'entree_ajustement', 'sortie_ajustement')
             .prefetch_related(
                 'lignes__article__unite',
                 'lignes__article__sous_type_article',
@@ -83,7 +86,8 @@ class InventaireSessionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
-        if instance.statut == InventaireSession.STATUT_VALIDE:
+        if instance.statut == InventaireSession.STATUT_VALIDE or instance.validation_annulee:
+            # Conserve la trace des inventaires validés, même annulés ensuite.
             return Response(
                 {'detail': 'Un inventaire validé ne peut pas être supprimé.'},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -171,15 +175,45 @@ class InventaireSessionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
+    def _verifier_admin_annulation_validation(self, request):
+        # Annuler une validation restaure massivement des stocks : réservé aux administrateurs.
+        if not request.user.is_admin(request):
+            raise PermissionDenied(
+                "Seul un administrateur de l'entreprise peut annuler un inventaire validé."
+            )
+
     @action(detail=True, methods=['post'], url_path='annuler')
     def annuler(self, request, pk=None):
+        """
+        Annule un inventaire. S'il est déjà validé, ses ajustements de stock sont
+        annulés et la situation antérieure restaurée (administrateur uniquement).
+        Corps optionnel : {"motif": "..."}.
+        """
         session = self.get_object()
-        inventaire_service.annuler_session(session)
-        session.refresh_from_db()
+        if session.statut == InventaireSession.STATUT_VALIDE:
+            self._verifier_admin_annulation_validation(request)
+        inventaire_service.annuler_session(
+            session,
+            request.user,
+            motif=str(request.data.get('motif') or ''),
+        )
+        session = self.get_queryset().get(pk=session.pk)
         return Response(
             InventaireSessionDetailSerializer(session).data,
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=True, methods=['get'], url_path='annulation-validation')
+    def annulation_validation(self, request, pk=None):
+        """Diagnostic : la validation peut-elle être annulée, et avec quel impact ?"""
+        session = self.get_object()
+        diagnostic = diagnostiquer_annulation_validation(session)
+        diagnostic['autorise'] = bool(request.user.is_admin(request))
+        if diagnostic['possible'] and not diagnostic['autorise']:
+            diagnostic['raisons'] = [
+                "Seul un administrateur de l'entreprise peut annuler un inventaire validé."
+            ]
+        return Response(diagnostic)
 
     @action(detail=True, methods=['get'], url_path='resume')
     def resume(self, request, pk=None):

@@ -944,6 +944,26 @@ class InventaireSession(models.Model):
         'Sortie', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='inventaires_ajustement_negatif',
     )
+    # Annulation d'un inventaire validé : traçabilité (les ajustements générés sont
+    # retirés, leur détail exact est conservé dans journal_annulation).
+    validation_annulee = models.BooleanField(
+        default=False,
+        help_text="True si l'inventaire avait été validé puis ses ajustements annulés.",
+    )
+    annule_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='inventaires_annules',
+    )
+    date_annulation = models.DateTimeField(null=True, blank=True)
+    motif_annulation = models.TextField(blank=True, default='')
+    journal_annulation = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Détail des mouvements annulés et des quantités restaurées (audit).",
+    )
 
     class Meta:
         ordering = ['-date_creation']

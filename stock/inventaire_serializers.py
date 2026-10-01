@@ -100,6 +100,8 @@ class InventaireSessionListSerializer(serializers.ModelSerializer):
             'date_validation',
             'cree_par_nom',
             'resume',
+            'validation_annulee',
+            'date_annulation',
         ]
 
     def get_cree_par_nom(self, obj):
@@ -116,6 +118,7 @@ class InventaireSessionDetailSerializer(InventaireSessionListSerializer):
     entree_ajustement_id = serializers.IntegerField(read_only=True, allow_null=True)
     sortie_ajustement_id = serializers.IntegerField(read_only=True, allow_null=True)
     valide_par_nom = serializers.SerializerMethodField()
+    annule_par_nom = serializers.SerializerMethodField()
 
     class Meta(InventaireSessionListSerializer.Meta):
         fields = InventaireSessionListSerializer.Meta.fields + [
@@ -123,11 +126,19 @@ class InventaireSessionDetailSerializer(InventaireSessionListSerializer):
             'entree_ajustement_id',
             'sortie_ajustement_id',
             'valide_par_nom',
+            'annule_par_nom',
+            'motif_annulation',
+            'journal_annulation',
         ]
 
     def get_valide_par_nom(self, obj):
         if obj.valide_par:
             return obj.valide_par.get_full_name() or obj.valide_par.username
+        return None
+
+    def get_annule_par_nom(self, obj):
+        if obj.annule_par:
+            return obj.annule_par.get_full_name() or obj.annule_par.username
         return None
 
 
