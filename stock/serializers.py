@@ -3,6 +3,7 @@ from rest_framework import serializers
 from stock.tenant_fields import TenantPrimaryKeyRelatedField, TenantSlugRelatedField
 from .models import (
     Entreprise,
+    LogSuppression,
     Succursale,
     Devise,
     TauxChange,
@@ -1392,3 +1393,44 @@ from caisse.serializers import (  # noqa: E402, F401
     MouvementCaisseSerializer,
     TypeCaisseSerializer,
 )
+
+
+class LogSuppressionSerializer(serializers.ModelSerializer):
+    """Ligne du journal des suppressions (écran « Stock supprimé »)."""
+
+    article_id = serializers.CharField(read_only=True, allow_null=True)
+    entreprise_nom = serializers.CharField(source='entreprise.nom', read_only=True)
+    succursale_nom = serializers.CharField(source='succursale.nom', read_only=True, default=None)
+    motif_libelle = serializers.CharField(source='get_motif_display', read_only=True)
+    date_suppression_formatee = serializers.SerializerMethodField()
+    temps_ecoule = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LogSuppression
+        fields = [
+            'id',
+            'article_id',
+            'article_nom',
+            'sortie_numero',
+            'quantite',
+            'prix_unitaire',
+            'devise_sigle',
+            'motif',
+            'motif_libelle',
+            'entreprise_nom',
+            'succursale_nom',
+            'utilisateur_nom',
+            'date_suppression',
+            'date_suppression_formatee',
+            'temps_ecoule',
+        ]
+        read_only_fields = fields
+
+    def get_date_suppression_formatee(self, obj):
+        # Format attendu par le front : « JJ/MM/AAAA à HH:MM ».
+        return timezone.localtime(obj.date_suppression).strftime('%d/%m/%Y à %H:%M')
+
+    def get_temps_ecoule(self, obj):
+        from django.utils.timesince import timesince
+
+        return _("il y a %(duree)s") % {'duree': timesince(obj.date_suppression, depth=1)}

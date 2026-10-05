@@ -2,16 +2,20 @@ import jwt
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import status
-from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from rest_framework.decorators import api_view, authentication_classes, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle
 
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import validate_email
 from django.utils.translation import gettext as _
 
 from django.db.models import Count
 
-from stock.models import Client, ClientEntreprise, Sortie, Succursale
-from stock.serializers import EntrepriseSerializer, SuccursaleSerializer
+from stock.models import Client, ClientEntreprise, Entreprise, Sortie, Succursale
+from stock.serializers import ClientSerializer, EntrepriseSerializer, SuccursaleSerializer
 
 from .authentication import ClientJWTAuthentication
 from .branch_scope import branch_q_for_membership
@@ -328,4 +332,139 @@ def client_portal_dashboard(request):
             "achats_recents": achats_recents,
             "commandes": commandes_data,
         }
+    )
+
+
+class ClientRegisterThrottle(AnonRateThrottle):
+    """Inscription publique : limite anti-spam par IP."""
+
+    rate = "10/hour"
+
+
+@swagger_auto_schema(
+    method="post",
+    operation_summary="Inscription portail client (lien d’invitation entreprise)",
+    operation_description=(
+        "Crée une fiche **Client** avec mot de passe portail et la lie à l’entreprise du lien "
+        "d’invitation (`liens[0].entreprise`, succursale optionnelle). Public (sans JWT), limité à "
+        "10 requêtes/heure/IP. Si l’e-mail existe déjà : **400** sans divulguer la fiche existante."
+    ),
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        required=["nom", "email", "password", "liens"],
+        properties={
+            "nom": openapi.Schema(type=openapi.TYPE_STRING),
+            "telephone": openapi.Schema(type=openapi.TYPE_STRING),
+            "adresse": openapi.Schema(type=openapi.TYPE_STRING),
+            "email": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_EMAIL),
+            "password": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_PASSWORD),
+            "liens": openapi.Schema(
+                type=openapi.TYPE_ARRAY,
+                items=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "entreprise": openapi.Schema(type=openapi.TYPE_INTEGER),
+                        "succursale": openapi.Schema(type=openapi.TYPE_INTEGER, nullable=True),
+                    },
+                ),
+            ),
+        },
+    ),
+    responses={201: "Client créé", 400: "Données invalides ou e-mail déjà utilisé"},
+    tags=[TAG_PORTAIL_CLIENT],
+)
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([ClientRegisterThrottle])
+def client_portal_register(request):
+    data = request.data
+    nom = (data.get("nom") or "").strip()
+    email = (data.get("email") or "").strip()
+    password = data.get("password") or ""
+    errors = {}
+    if not nom:
+        errors["nom"] = [_("Le nom est obligatoire.")]
+    if not email:
+        errors["email"] = [_("L’e-mail est obligatoire (il sert d’identifiant de connexion).")]
+    else:
+        try:
+            validate_email(email)
+        except DjangoValidationError:
+            errors["email"] = [_("Adresse e-mail invalide.")]
+    if not password.strip():
+        errors["password"] = [_("Le mot de passe est obligatoire.")]
+    if errors:
+        return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+
+    liens = data.get("liens") or []
+    lien = liens[0] if isinstance(liens, list) and liens and isinstance(liens[0], dict) else {}
+    try:
+        entreprise_id = int(lien.get("entreprise"))
+    except (TypeError, ValueError):
+        return Response(
+            {"detail": _("Lien d’invitation invalide : entreprise manquante.")},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    entreprise = Entreprise.objects.filter(pk=entreprise_id).first()
+    if entreprise is None:
+        return Response(
+            {"detail": _("Lien d’invitation invalide : entreprise introuvable.")},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    succursale_id = lien.get("succursale")
+    if succursale_id not in (None, ""):
+        try:
+            succursale_id = int(succursale_id)
+        except (TypeError, ValueError):
+            succursale_id = None
+        if succursale_id is not None and not Succursale.objects.filter(
+            pk=succursale_id, entreprise_id=entreprise.pk
+        ).exists():
+            return Response(
+                {"detail": _("Succursale invalide pour cette entreprise.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    else:
+        succursale_id = None
+
+    # Ne jamais renvoyer la fiche existante ni la liste des entreprises à un appel anonyme.
+    if Client.objects.filter(email__iexact=email).exists():
+        return Response(
+            {
+                "code": "email_deja_utilise",
+                "detail": _(
+                    "Un compte client existe déjà avec cet e-mail. Connectez-vous, ou demandez à "
+                    "l’entreprise de vous associer à votre compte existant."
+                ),
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        validate_password(password)
+    except DjangoValidationError as exc:
+        return Response({"password": list(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
+
+    payload = {
+        "nom": nom,
+        "telephone": (data.get("telephone") or "").strip(),
+        "adresse": (data.get("adresse") or "").strip(),
+        "email": email,
+        "password": password,
+        "liens": [
+            {
+                "entreprise": entreprise.pk,
+                **({"succursale": succursale_id} if succursale_id is not None else {}),
+                "is_special": False,
+            }
+        ],
+    }
+    serializer = ClientSerializer(data=payload, context={"request": request})
+    serializer.is_valid(raise_exception=True)
+    client = serializer.save()
+    return Response(
+        {"client": _client_public_dict(client), "entreprise_id": entreprise.pk},
+        status=status.HTTP_201_CREATED,
     )

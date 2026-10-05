@@ -65,5 +65,8 @@ urlpatterns = [
     ),
 ]
 
+# Route API inconnue : Problem Details JSON (DEBUG=False uniquement ; en DEBUG Django affiche sa page technique).
+handler404 = 'config.http.problem_details.api_page_not_found'
+
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

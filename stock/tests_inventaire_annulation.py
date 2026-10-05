@@ -351,3 +351,43 @@ class InventaireAnnulationTests(APITestCase):
         session = InventaireSession.objects.get(pk=create.json()['id'])
         with self.assertRaises(ValidationError):
             annuler_validation_session(session, self.admin)
+
+
+@override_settings(ALLOWED_HOSTS=['testserver', 'localhost', '127.0.0.1'])
+class RapportInventaireRouteTests(APITestCase):
+    """
+    Régression : GET /api/rapports/inventaire/ avait disparu (404 HTML Django)
+    → impossible d'imprimer le rapport d'un inventaire validé.
+    """
+
+    # Mêmes données que les tests d'annulation (sans hériter de leurs tests).
+    setUp = InventaireAnnulationTests.setUp
+    _article = InventaireAnnulationTests._article
+    _lot = InventaireAnnulationTests._lot
+    _inventaire_valide = InventaireAnnulationTests._inventaire_valide
+
+    def test_rapport_session_validee_disponible(self):
+        session = self._inventaire_valide({self.article_a: 70, self.article_b: 40})
+        resp = self.client.get(
+            '/api/rapports/inventaire/', {'session_id': session.pk, 'complet': 'true'},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        body = resp.json()
+        payload = body.get('data', body)
+        self.assertEqual(payload['mode'], 'session')
+        self.assertEqual(payload['session']['statut'], InventaireSession.STATUT_VALIDE)
+        self.assertEqual(len(payload['articles']), 2)
+
+    def test_rapport_catalogue_disponible(self):
+        resp = self.client.get('/api/rapports/inventaire/')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        payload = resp.json().get('data', resp.json())
+        self.assertEqual(payload['mode'], 'catalogue')
+
+    def test_rapport_session_brouillon_refuse_en_problem_json(self):
+        session = InventaireSession.objects.create(
+            libelle='Brouillon', date_inventaire=timezone.now().date(), entreprise=self.entreprise,
+        )
+        resp = self.client.get('/api/rapports/inventaire/', {'session_id': session.pk})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('application/problem+json', resp['Content-Type'])

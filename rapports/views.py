@@ -93,6 +93,594 @@ class RapportsViewSet(viewsets.ViewSet):
 
         return eid, branch_id
 
+    @staticmethod
+    def _default_exercice_dates(request):
+        """
+        Période d'exercice par défaut (comptabilité courante) : 1er janv. → 31 déc.
+        de l'année de référence (année courante si date_fin absente, sinon année de date_fin).
+        """
+        date_debut = request.query_params.get('date_debut')
+        date_fin = request.query_params.get('date_fin')
+        y_now = timezone.now().year
+        if not date_fin:
+            date_fin = f'{y_now}-12-31'
+        if not date_debut:
+            try:
+                y = int(str(date_fin).strip()[:4])
+            except (ValueError, TypeError):
+                y = y_now
+            date_debut = f'{y}-01-01'
+        return date_debut, date_fin
+
+    @staticmethod
+    def _parse_inventaire_date_bounds(request):
+        """Valide date_debut / date_fin (YYYY-MM-DD) et retourne (str, str, date, date)."""
+        date_debut_s, date_fin_s = RapportsViewSet._default_exercice_dates(request)
+        try:
+            d0 = date.fromisoformat(str(date_debut_s).strip()[:10])
+            d1 = date.fromisoformat(str(date_fin_s).strip()[:10])
+        except ValueError:
+            raise ValidationError(
+                {
+                    'detail': _(
+                        'date_debut et date_fin doivent être au format ISO YYYY-MM-DD '
+                        '(ex. 2026-01-01).'
+                    )
+                }
+            )
+        if d0 > d1:
+            raise ValidationError(
+                {'detail': _('date_debut doit être antérieure ou égale à date_fin.')}
+            )
+        return date_debut_s, date_fin_s, d0, d1
+
+    def _filter_articles_mouvements_periode(self, article_qs, request, d_debut: date, d_fin: date):
+        """
+        Garde les articles ayant au moins une ligne d'entrée ou de sortie sur la période
+        (date du bon d'entrée / de la sortie, partie date uniquement, bornes inclusives).
+        """
+        user = request.user
+        eid, branch_id = self._get_tenant_ids_strict(request)
+        if not eid:
+            return article_qs.none()
+
+        le = LigneEntree.objects.filter(
+            article_id=OuterRef('article_id'),
+            entree__entreprise_id=eid,
+            entree__date_op__date__gte=d_debut,
+            entree__date_op__date__lte=d_fin,
+        )
+        if user.is_agent(request) and branch_id is not None:
+            le = le.filter(entree__succursale_id=branch_id)
+
+        ls = LigneSortie.objects.filter(
+            article_id=OuterRef('article_id'),
+            sortie__entreprise_id=eid,
+            sortie__date_creation__date__gte=d_debut,
+            sortie__date_creation__date__lte=d_fin,
+        )
+        if user.is_agent(request) and branch_id is not None:
+            ls = ls.filter(sortie__succursale_id=branch_id)
+
+        return article_qs.filter(Q(Exists(le)) | Q(Exists(ls)))
+
+    def _inventaire_article_queryset(self, request):
+        """
+        Tous les articles du tenant (entreprise + succursale si agent avec branche),
+        avec quantités issues de Stock (0 si aucune fiche Stock pour l'article).
+        """
+        user = request.user
+        eid, branch_id = self._get_tenant_ids_strict(request)
+        if not eid:
+            return Article.objects.none()
+
+        stock_sq = Stock.objects.filter(article_id=OuterRef('article_id'))
+        qs = (
+            Article.objects.filter(entreprise_id=eid)
+            .annotate(
+                inv_qte=Coalesce(
+                    F('stock__Qte'),
+                    Subquery(stock_sq.values('Qte')[:1]),
+                    Value(Decimal('0.000')),
+                    output_field=DecimalField(max_digits=12, decimal_places=5),
+                ),
+                inv_seuil=Coalesce(
+                    F('stock__seuilAlert'),
+                    Subquery(stock_sq.values('seuilAlert')[:1]),
+                    Value(Decimal('0.000')),
+                    output_field=DecimalField(max_digits=12, decimal_places=5),
+                ),
+            )
+            .select_related(
+                'sous_type_article',
+                'sous_type_article__type_article',
+                'unite',
+            )
+            .order_by('nom_scientifique', 'article_id')
+        )
+        if user.is_agent(request) and branch_id is not None:
+            qs = qs.filter(succursale_id=branch_id)
+        return qs
+
+    @staticmethod
+    def _inventaire_stats_catalogue(lines):
+        total = len(lines)
+        en_rupture = sum(1 for L in lines if L.Qte <= 0)
+        en_alerte = sum(
+            1 for L in lines
+            if L.Qte > 0 and L.seuilAlert > 0 and L.Qte <= L.seuilAlert
+        )
+        normaux = sum(
+            1 for L in lines
+            if L.Qte > 0 and (L.seuilAlert <= 0 or L.Qte > L.seuilAlert)
+        )
+        return {
+            'total_articles': total,
+            'en_alerte': en_alerte,
+            'en_rupture': en_rupture,
+            'normaux': normaux,
+            'lignes_comptees': 0,
+            'lignes_non_comptees': total,
+            'ecarts_positifs': 0,
+            'ecarts_negatifs': 0,
+            'ecarts_nuls': 0,
+            'conformes': 0,
+        }
+
+    @staticmethod
+    def _inventaire_stats_session(lignes_qs):
+        from decimal import Decimal, ROUND_DOWN
+
+        lignes = list(lignes_qs)
+        total = len(lignes)
+        comptees = sum(1 for l in lignes if l.stock_physique is not None)
+        ecarts_pos = sum(1 for l in lignes if l.ecart is not None and l.ecart > 0)
+        ecarts_neg = sum(1 for l in lignes if l.ecart is not None and l.ecart < 0)
+        ecarts_nuls = sum(1 for l in lignes if l.ecart is not None and l.ecart == 0)
+        en_rupture = sum(
+            1 for l in lignes
+            if _stock_statut_code(l.stock_theorique, _seuil_article(l.article)) == 'RUPTURE'
+        )
+        en_alerte = sum(
+            1 for l in lignes
+            if _stock_statut_code(l.stock_theorique, _seuil_article(l.article)) == 'ALERTE'
+        )
+        normaux = sum(
+            1 for l in lignes
+            if _stock_statut_code(l.stock_theorique, _seuil_article(l.article)) == 'NORMAL'
+        )
+        capital_logiciel = sum((l.montant_logiciel for l in lignes), Decimal('0'))
+        capital_physique = sum(
+            (l.montant_physique for l in lignes if l.montant_physique is not None),
+            Decimal('0'),
+        )
+        ecart_financier = capital_physique - capital_logiciel
+        ecarts_montant = [
+            l.ecart_montant for l in lignes if l.ecart_montant is not None
+        ]
+        total_ecart_positif = sum((m for m in ecarts_montant if m > 0), Decimal('0'))
+        total_ecart_negatif = sum((-m for m in ecarts_montant if m < 0), Decimal('0'))
+        total_ecart_montant = sum(ecarts_montant, Decimal('0'))
+
+        def _money(value: Decimal) -> str:
+            return str(value.quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
+
+        return {
+            'total_articles': total,
+            'en_alerte': en_alerte,
+            'en_rupture': en_rupture,
+            'normaux': normaux,
+            'lignes_comptees': comptees,
+            'lignes_non_comptees': total - comptees,
+            'ecarts_positifs': ecarts_pos,
+            'ecarts_negatifs': ecarts_neg,
+            'ecarts_nuls': ecarts_nuls,
+            'conformes': ecarts_nuls,
+            'capital_logiciel': _money(capital_logiciel),
+            'capital_physique': _money(capital_physique),
+            'ecart_financier': _money(ecart_financier),
+            'capital_reel_stock': _money(capital_physique),
+            'total_montant_logiciel': _money(capital_logiciel),
+            'total_montant_physique': _money(capital_physique),
+            'total_ecart_montant': _money(total_ecart_montant),
+            'total_ecart_positif': _money(total_ecart_positif),
+            'total_ecart_negatif': _money(total_ecart_negatif),
+        }
+
+    def _serialize_inventaire_session(self, request, session, *, force_complet: bool = False):
+        """Rapport d'inventaire basé sur une session opérationnelle (comptage + écarts)."""
+        statut_filtre = request.query_params.get('statut')
+        statut_ligne_filtre = request.query_params.get('statut_ligne')
+        if force_complet:
+            complet = True
+        else:
+            complet = request.query_params.get('complet', 'true').lower() not in (
+                'false', '0', 'no', 'non',
+            )
+
+        lignes_qs = (
+            session.lignes.select_related(
+                'article__unite',
+                'article__sous_type_article',
+                'article__sous_type_article__type_article',
+            )
+            .order_by('article__nom_scientifique', 'article_id')
+        )
+
+        if statut_ligne_filtre:
+            code = statut_ligne_filtre.upper().replace(' ', '_')
+            if code == 'NON_COMPTÉ' or code == 'NON_COMpte':
+                lignes_qs = lignes_qs.filter(stock_physique__isnull=True)
+            elif code == 'CONFORME':
+                lignes_qs = lignes_qs.filter(ecart=0)
+            elif code == 'ECART_POSITIF':
+                lignes_qs = lignes_qs.filter(ecart__gt=0)
+            elif code == 'ECART_NEGATIF':
+                lignes_qs = lignes_qs.filter(ecart__lt=0)
+
+        if statut_filtre:
+            # Filtre stock sur stock théorique figé — post-filter en Python
+            statut_upper = statut_filtre.upper()
+            filtered = []
+            for ligne in lignes_qs:
+                code = _stock_statut_code(ligne.stock_theorique, _seuil_article(ligne.article))
+                if code == statut_upper:
+                    filtered.append(ligne.pk)
+            lignes_qs = lignes_qs.filter(pk__in=filtered)
+
+        stats = self._inventaire_stats_session(
+            session.lignes.select_related('article').order_by('article__nom_scientifique')
+        )
+
+        resp = {
+            'titre': _("RAPPORT D'INVENTAIRE"),
+            'mode': 'session',
+            'session': {
+                'id': session.pk,
+                'libelle': session.libelle,
+                'statut': session.statut,
+                'statut_libelle': session.get_statut_display(),
+                'date_inventaire': session.date_inventaire.isoformat(),
+                'date_demarrage': session.date_demarrage.isoformat() if session.date_demarrage else None,
+                'date_validation': session.date_validation.isoformat() if session.date_validation else None,
+                'perimetre': session.perimetre,
+                'entree_ajustement_id': session.entree_ajustement_id,
+                'sortie_ajustement_id': session.sortie_ajustement_id,
+            },
+            'periode': {
+                'date_debut': session.date_inventaire.isoformat(),
+                'date_fin': session.date_inventaire.isoformat(),
+            },
+            'filtres': {
+                'session_id': session.pk,
+                'statut': statut_filtre,
+                'statut_ligne': statut_ligne_filtre,
+                'complet': complet,
+            },
+            'statuts': INVENTAIRE_STATUTS_REFERENCE,
+            'statistiques': stats,
+            # Bloc totaux financiers pour le PDF / affichage FE.
+            'totaux_financiers': {
+                'total_logiciel': stats.get('capital_logiciel'),
+                'total_physique': stats.get('capital_physique'),
+                'ecart_financier': stats.get('ecart_financier'),
+                'capital_reel_stock': stats.get('capital_reel_stock'),
+                'total_ecart_montant': stats.get('total_ecart_montant'),
+                'total_ecart_positif': stats.get('total_ecart_positif'),
+                'total_ecart_negatif': stats.get('total_ecart_negatif'),
+            },
+            'complet': complet,
+        }
+
+        if complet:
+            data = RapportInventaireSessionLigneSerializer(lignes_qs, many=True).data
+            resp['articles'] = data
+            resp['details'] = data
+            return resp
+
+        paginator = InventaireResultsSetPagination()
+        page_qs = paginator.paginate_queryset(list(lignes_qs), request)
+        data = RapportInventaireSessionLigneSerializer(page_qs, many=True).data
+        resp['articles'] = data
+        resp['details'] = data
+        if page_qs is not None:
+            resp['count'] = paginator.page.paginator.count
+            resp['next'] = paginator.get_next_link()
+            resp['previous'] = paginator.get_previous_link()
+            resp['page_size'] = paginator.get_page_size(request)
+        return resp
+
+    def _serialize_inventaire(self, request, *, force_complet: bool = False):
+        """
+        Corps du rapport d'inventaire (dict prêt pour JSON ou PDF).
+        Par défaut (complet=true) : tous les articles, sans pagination.
+        complet=false : pagination (page_size jusqu'à 5000).
+        Si filtrer_mouvements=true : seuls les articles avec au moins une entrée ou une sortie
+        dont la date tombe dans [date_debut, date_fin] (tenant-scopé). Sinon : catalogue complet.
+        """
+        user = request.user
+        date_debut, date_fin, d0, d1 = self._parse_inventaire_date_bounds(request)
+        type_article = request.query_params.get('type_article')
+        statut_filtre = request.query_params.get('statut')
+        seulement_en_stock = request.query_params.get('seulement_en_stock', 'false').lower() in (
+            'true', '1', 'yes', 'oui',
+        )
+        filtrer_mouvements = request.query_params.get('filtrer_mouvements', 'false').lower() in (
+            'true',
+            '1',
+            'yes',
+            'oui',
+        )
+        if force_complet:
+            complet = True
+        else:
+            complet = request.query_params.get('complet', 'true').lower() not in (
+                'false',
+                '0',
+                'no',
+                'non',
+            )
+
+        qs = self._inventaire_article_queryset(request)
+        if seulement_en_stock:
+            qs = qs.filter(inv_qte__gt=0)
+        if filtrer_mouvements:
+            qs = self._filter_articles_mouvements_periode(qs, request, d0, d1)
+        if type_article:
+            qs = qs.filter(
+                sous_type_article__type_article__libelle__icontains=type_article
+            )
+        if statut_filtre:
+            statut_upper = statut_filtre.upper()
+            if statut_upper == 'RUPTURE':
+                qs = qs.filter(inv_qte=0)
+            elif statut_upper == 'ALERTE':
+                qs = qs.filter(inv_qte__gt=0, inv_seuil__gt=0, inv_qte__lte=F('inv_seuil'))
+            elif statut_upper == 'NORMAL':
+                qs = qs.filter(inv_qte__gt=0).filter(
+                    Q(inv_qte__gt=F('inv_seuil')) | Q(inv_seuil=0)
+                )
+
+        lines = [
+            InventaireStockLine(a, a.inv_qte, a.inv_seuil) for a in qs
+        ]
+        stats = self._inventaire_stats_catalogue(lines)
+
+        resp = {
+            'titre': _("RAPPORT D'INVENTAIRE"),
+            'mode': 'catalogue',
+            'session': None,
+            'periode': {
+                'date_debut': date_debut,
+                'date_fin': date_fin,
+            },
+            'filtres': {
+                'filtrer_mouvements': filtrer_mouvements,
+                'seulement_en_stock': seulement_en_stock,
+                'type_article': type_article,
+                'statut': statut_filtre,
+                'statut_ligne': None,
+                'session_id': None,
+                'complet': complet,
+            },
+            'statuts': INVENTAIRE_STATUTS_REFERENCE,
+            'statistiques': stats,
+            'complet': complet,
+        }
+
+        if complet:
+            resp['articles'] = InventaireArticleSerializer(lines, many=True).data
+            resp['details'] = resp['articles']
+            return resp
+
+        paginator = InventaireResultsSetPagination()
+        page_lines = paginator.paginate_queryset(lines, request)
+        resp['articles'] = InventaireArticleSerializer(page_lines, many=True).data
+        resp['details'] = resp['articles']
+        if page_lines is not None:
+            resp['count'] = paginator.page.paginator.count
+            resp['next'] = paginator.get_next_link()
+            resp['previous'] = paginator.get_previous_link()
+            resp['page_size'] = paginator.get_page_size(request)
+        return resp
+
+    @action(detail=False, methods=['get'], url_path='inventaire')
+    def inventaire(self, request):
+        """
+        **Rapport d'inventaire** JSON (affichage / export frontend).
+
+        Deux modes :
+        - **catalogue** (défaut) : stock théorique actuel, colonnes inventaire avec
+          `stock_physique` et `ecart` vides (`statut_ligne_code`: NON_APPLICABLE).
+        - **session** (`session_id`) : session opérationnelle avec comptage, écarts,
+          statuts ligne (NON_COMPTÉ, CONFORME, ECART_POSITIF, ECART_NEGATIF).
+
+        Paramètres :
+        - session_id : ID session `/api/inventaires/` (rapport après comptage)
+        - statut : NORMAL | ALERTE | RUPTURE (stock théorique)
+        - statut_ligne : NON_COMPTÉ | CONFORME | ECART_POSITIF | ECART_NEGATIF (mode session)
+        - seulement_en_stock, type_article, filtrer_mouvements, complet, date_debut, date_fin
+
+        GET /api/rapports/inventaire/
+        GET /api/rapports/inventaire/?session_id=1
+        GET /api/rapports/inventaire/?statut=ALERTE&seulement_en_stock=true
+        """
+        session_id = request.query_params.get('session_id')
+        if session_id:
+            eid, branch_id = self._get_tenant_ids_strict(request)
+            try:
+                session = InventaireSession.objects.get(pk=int(session_id), entreprise_id=eid)
+            except (InventaireSession.DoesNotExist, ValueError, TypeError):
+                raise ValidationError({'session_id': 'Session d\'inventaire introuvable.'})
+            if branch_id is not None and session.succursale_id not in (None, branch_id):
+                raise PermissionDenied('Session hors de votre succursale.')
+            if session.statut == InventaireSession.STATUT_BROUILLON:
+                raise ValidationError({
+                    'session_id': 'Démarrez la session avant d\'éditer le rapport (POST .../demarrer/).',
+                })
+            data = self._serialize_inventaire_session(request, session)
+        else:
+            data = self._serialize_inventaire(request)
+        return self._report_response(request, 'inventaire', data)
+
+    def _get_bon_entree_queryset_and_stats(self, request):
+        """Retourne (queryset stocks, dict statistiques) pour le rapport de réquisition."""
+        user = request.user
+        eid, branch_id = self._get_tenant_ids_strict(request)
+        base_filter = {'article__entreprise_id': eid} if eid else {}
+        if user.is_agent(request) and branch_id is not None:
+            base_filter['article__succursale_id'] = branch_id
+        inclure_normaux = request.query_params.get('inclure_normaux', 'false').lower() == 'true'
+        if inclure_normaux:
+            stocks = Stock.objects.filter(**base_filter)
+        else:
+            stocks = Stock.objects.filter(
+                Q(Qte=0) | Q(Qte__lte=F('seuilAlert')),
+                **base_filter
+            )
+        stocks = stocks.select_related(
+            'article',
+            'article__sous_type_article',
+            'article__sous_type_article__type_article',
+            'article__unite'
+        ).order_by('-id')
+        total = stocks.count()
+        en_rupture = stocks.filter(Qte=0).count()
+        en_alerte = stocks.filter(Qte__gt=0, Qte__lte=F('seuilAlert')).count()
+        return stocks, {
+            'total_articles': total,
+            'en_rupture': en_rupture,
+            'en_alerte': en_alerte
+        }
+
+    def _bon_entree_stocks_with_extras(self, request):
+        """Liste complète des stocks réquisition (+ extra_articles optionnels)."""
+        user = request.user
+        stocks, _ = self._get_bon_entree_queryset_and_stats(request)
+        stocks_list = list(stocks)
+        extra_param = (request.query_params.get('extra_articles') or '').strip()
+        extra_ids = [x.strip() for x in extra_param.split(',') if x.strip()]
+        if extra_ids:
+            existing_ids = {s.article.article_id for s in stocks_list}
+            extra_ids_to_add = [aid for aid in extra_ids if aid not in existing_ids]
+            if extra_ids_to_add:
+                eid, branch_id = self._get_tenant_ids_strict(request)
+                extra_filter = {'article__entreprise_id': eid} if eid else {}
+                if user.is_agent(request) and branch_id is not None:
+                    extra_filter['article__succursale_id'] = branch_id
+                extra_stocks = Stock.objects.filter(
+                    article__article_id__in=extra_ids_to_add,
+                    **extra_filter
+                ).select_related(
+                    'article',
+                    'article__sous_type_article',
+                    'article__sous_type_article__type_article',
+                    'article__unite'
+                ).order_by('article__article_id')
+                stocks_list.extend(list(extra_stocks))
+        return stocks_list
+
+    @staticmethod
+    def _enrich_bon_entree_statistiques(statistiques, articles_data):
+        montant = Decimal('0')
+        qte_commande = Decimal('0')
+        for row in articles_data or []:
+            try:
+                montant += Decimal(str(row.get('montant_estime') or row.get('prix_total') or '0'))
+                qte_commande += Decimal(str(row.get('quantite_a_commander') or '0'))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+        enriched = dict(statistiques)
+        enriched['montant_estime_total'] = str(
+            montant.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        )
+        enriched['quantite_a_commander_total'] = str(
+            qte_commande.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        )
+        return enriched
+
+    def _build_bon_entree_data(self, request, *, paginate: bool = True):
+        stocks, statistiques = self._get_bon_entree_queryset_and_stats(request)
+        inclure_normaux = request.query_params.get('inclure_normaux', 'false').lower() == 'true'
+        extra_param = (request.query_params.get('extra_articles') or '').strip()
+
+        if paginate and not extra_param:
+            paginator = StandardResultsSetPagination()
+            page_stocks = paginator.paginate_queryset(stocks, request)
+            articles_data = BonEntreeArticleSerializer(page_stocks, many=True).data
+            stats = self._enrich_bon_entree_statistiques(statistiques, articles_data)
+            resp = {
+                'titre': _("RAPPORT DE RÉQUISITION"),
+                'instructions': _(
+                    'Quantités et montants estimés calculés automatiquement : stock actuel, '
+                    'dernier prix d\'achat, quantité suggérée (jusqu\'au seuil) et montant estimé. '
+                    'Ajustez côté client si besoin avant de passer commande.'
+                ),
+                'filtres': {
+                    'inclure_normaux': inclure_normaux,
+                    'extra_articles': extra_param or None,
+                },
+                'statistiques': stats,
+                'totaux': {
+                    'montant_estime_total': stats.get('montant_estime_total'),
+                    'quantite_a_commander_total': stats.get('quantite_a_commander_total'),
+                },
+                'articles': articles_data,
+                'details': articles_data,
+            }
+            if page_stocks is not None:
+                resp['count'] = paginator.page.paginator.count
+                resp['next'] = paginator.get_next_link()
+                resp['previous'] = paginator.get_previous_link()
+                resp['page_size'] = paginator.get_page_size(request)
+            return resp
+
+        stocks_list = self._bon_entree_stocks_with_extras(request)
+        articles_data = BonEntreeArticleSerializer(stocks_list, many=True).data
+        stats = self._enrich_bon_entree_statistiques(statistiques, articles_data)
+        return {
+            'titre': _("RAPPORT DE RÉQUISITION"),
+            'instructions': _(
+                'Quantités et montants estimés calculés automatiquement : stock actuel, '
+                'dernier prix d\'achat, quantité suggérée (jusqu\'au seuil) et montant estimé. '
+                'Ajustez côté client si besoin avant de passer commande.'
+            ),
+            'filtres': {
+                'inclure_normaux': inclure_normaux,
+                'extra_articles': extra_param or None,
+            },
+            'statistiques': stats,
+            'totaux': {
+                'montant_estime_total': stats.get('montant_estime_total'),
+                'quantite_a_commander_total': stats.get('quantite_a_commander_total'),
+            },
+            'articles': articles_data,
+            'details': articles_data,
+        }
+
+    @action(detail=False, methods=['get'], url_path='bon-entree')
+    def bon_entree(self, request):
+        """
+        Rapport de réquisition (JSON) — préparation des achats.
+
+        Chaque ligne inclut : stock actuel, dernier PU d'achat, quantité suggérée
+        (`quantite_a_commander`) et montant estimé (`montant_estime` / `prix_total`).
+
+        Paramètres:
+        - inclure_normaux: true/false (défaut false)
+        - extra_articles: IDs séparés par virgule (ex. PRLI0007,ID2)
+        - complet: true = sans pagination (défaut si extra_articles présent)
+        - page, page_size: pagination standard
+
+        GET /api/rapports/bon-entree/
+        GET /api/rapports/bon-entree/?inclure_normaux=true&extra_articles=PRLI0007
+        """
+        complet = request.query_params.get('complet', '').lower() in ('true', '1', 'yes', 'oui')
+        has_extras = bool((request.query_params.get('extra_articles') or '').strip())
+        paginate = not (complet or has_extras)
+        data = self._build_bon_entree_data(request, paginate=paginate)
+        return self._report_response(request, 'bon-entree', data)
+
     def _build_bon_achat_data(self, request, *, complet: bool = False):
         """
         Construit les données du bon d'achat (JSON).

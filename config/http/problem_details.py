@@ -48,8 +48,12 @@ def _status_title(code: int) -> str:
 
 def _validation_errors_to_detail(data) -> str:
     if isinstance(data, dict):
-        if 'detail' in data and len(data) == 1:
-            return str(data['detail'])
+        # {'detail': ..., 'code': ...} : le code est exposé à part, le message reste lisible.
+        if 'detail' in data and set(data) <= {'detail', 'code', 'entreprise_id'}:
+            detail = data['detail']
+            if isinstance(detail, (list, tuple)) and len(detail) == 1:
+                detail = detail[0]
+            return str(detail)
         parts = []
         for key, val in data.items():
             if isinstance(val, (list, tuple)):
@@ -154,11 +158,15 @@ def exception_handler(exc, context):
         extra = None
     elif isinstance(data, dict):
         detail = _validation_errors_to_detail(data)
-        extra = {'errors': data} if status_code == status.HTTP_400_BAD_REQUEST else None
-        if extra is not None:
-            for key in ('code', 'entreprise_id'):
-                if key in data:
-                    extra[key] = data[key]
+        extra = {'errors': data} if status_code == status.HTTP_400_BAD_REQUEST else {}
+        # Codes métier exposés à plat quel que soit le statut (le front teste `data.code`).
+        for key in ('code', 'entreprise_id'):
+            if key in data:
+                val = data[key]
+                if isinstance(val, (list, tuple)) and len(val) == 1:
+                    val = val[0]
+                extra[key] = str(val) if key == 'code' and val is not None else val
+        extra = extra or None
     else:
         detail = str(data)
         extra = None
@@ -177,3 +185,25 @@ def exception_handler(exc, context):
         type_uri=type_uri,
         extra=extra,
     )
+
+
+def api_page_not_found(request, exception=None):
+    """
+    handler404 : route API inconnue → Problem Details JSON au lieu de la page HTML Django
+    (le front affichait le HTML brut dans ses toasts).
+    """
+    import json
+
+    from django.http import HttpResponseNotFound
+    from django.views.defaults import page_not_found
+
+    if not request.path.startswith('/api/'):
+        return page_not_found(request, exception)
+    body = {
+        'type': 'urn:uhakika:problem:route-not-found',
+        'title': 'Not Found',
+        'status': 404,
+        'detail': 'Ressource introuvable : %s' % request.path,
+        'instance': request.build_absolute_uri(),
+    }
+    return HttpResponseNotFound(json.dumps(body), content_type=PROBLEM_CONTENT_TYPE)

@@ -1301,6 +1301,51 @@ class RequisitionHistorique(models.Model):
         return f'{self.requisition_id} · {self.action}'
 
 
+class LogSuppression(models.Model):
+    """
+    Journal des articles retirés d'une vente : suppression d'une sortie entière
+    ou d'une ligne de sortie. Snapshots texte (article, utilisateur) : le journal
+    reste lisible même si l'article ou l'utilisateur est supprimé ensuite.
+    """
+
+    MOTIF_SORTIE = 'SORTIE_SUPPRIMEE'
+    MOTIF_LIGNE = 'LIGNE_SUPPRIMEE'
+    MOTIF_CHOICES = [
+        (MOTIF_SORTIE, 'Vente supprimée'),
+        (MOTIF_LIGNE, 'Ligne de vente supprimée'),
+    ]
+
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='logs_suppressions')
+    succursale = models.ForeignKey(
+        Succursale, on_delete=models.SET_NULL, related_name='logs_suppressions', null=True, blank=True,
+    )
+    article = models.ForeignKey(
+        Article, on_delete=models.SET_NULL, related_name='logs_suppressions', null=True, blank=True,
+    )
+    article_nom = models.CharField(max_length=255, blank=True, default='')
+    sortie_numero = models.PositiveIntegerField(help_text="Numéro (id) de la sortie au moment de la suppression.")
+    quantite = models.DecimalField(max_digits=12, decimal_places=5, default=0)
+    prix_unitaire = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
+    devise_sigle = models.CharField(max_length=10, blank=True, default='')
+    motif = models.CharField(max_length=20, choices=MOTIF_CHOICES, default=MOTIF_SORTIE)
+    utilisateur = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name='logs_suppressions',
+        null=True, blank=True,
+    )
+    utilisateur_nom = models.CharField(max_length=255, blank=True, default='')
+    date_suppression = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-date_suppression', '-id']
+        indexes = [
+            models.Index(fields=['entreprise', '-date_suppression'], name='logsupp_ent_date_idx'),
+            models.Index(fields=['entreprise', 'succursale', '-date_suppression'], name='logsupp_ent_succ_date_idx'),
+        ]
+
+    def __str__(self):
+        return f'Suppression {self.article_nom} (sortie #{self.sortie_numero})'
+
+
 # Compatibilité imports historiques (modèles définis dans l'app ``caisse``).
 from caisse.models import (  # noqa: E402, F401
     DetailMouvementCaisse,

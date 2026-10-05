@@ -30,12 +30,14 @@ from .models import (
     ClientEntreprise,
     DettesClients,
     PaiementDettesClients,
+    LogSuppression,
 )
 from caisse.models import MouvementCaisse
 from caisse.services.caisse import creer_mouvement_caisse, mouvement_moyen_affiche
 from caisse.services.caisse_defaut import MSG_CAISSE_REQUISE
 from caisse.services.operation_helpers import extract_type_caisse_id
 from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
+from stock.services.log_suppression import journaliser_lignes_supprimees
 from stock.services.stock_adjustment import (
     apply_stock_delta,
     lots_fifo_verrouilles,
@@ -92,7 +94,7 @@ from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import qrcode
-from datetime import datetime
+from datetime import date, datetime
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from drf_yasg import openapi
@@ -1325,6 +1327,13 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         montant_reference=snapshot_mouvement['montant_reference'],
                     )
             
+            journaliser_lignes_supprimees(
+                sortie,
+                sortie.lignes.select_related('article', 'devise'),
+                user,
+                motif=LogSuppression.MOTIF_SORTIE,
+                entreprise_id=_get_tenant_ids(request)[0],
+            )
             sortie.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -1696,6 +1705,7 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
         """Mise à jour partielle d'une ligne de sortie."""
         return self.update(request, *args, **kwargs, partial=True)
 
+    @transaction.atomic
     def perform_destroy(self, instance):
         user = self.request.user
         stock, created = Stock.objects.get_or_create(
@@ -1704,6 +1714,13 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Mo
         )
         stock.Qte += instance.quantite
         stock.save()
+        journaliser_lignes_supprimees(
+            instance.sortie,
+            [instance],
+            user,
+            motif=LogSuppression.MOTIF_LIGNE,
+            entreprise_id=_get_tenant_ids(self.request)[0],
+        )
         instance.delete()
 
     def perform_update(self, serializer):
@@ -3782,3 +3799,44 @@ class PaiementDettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, v
         info['paiement_id'] = paiement.pk
         info['dettes_clients_id'] = paiement.dettes_clients_id
         return Response(info)
+
+
+class LogSuppressionViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ReadOnlyModelViewSet):
+    """
+    Journal des articles retirés des ventes (suppression de sortie ou de ligne).
+    Lecture seule, filtré par entreprise / succursale du contexte.
+
+    Filtres : `search` (article, utilisateur, n° de sortie), `article_id`, `sortie_numero`,
+    `date_debut` / `date_fin` (YYYY-MM-DD), `ordering` (date_suppression, article_nom,
+    utilisateur_nom, sortie_numero ; préfixe « - » pour décroissant).
+    """
+
+    queryset = LogSuppression.objects.select_related('entreprise', 'succursale')
+    serializer_class = LogSuppressionSerializer
+
+    ORDERING_FIELDS = {'date_suppression', 'article_nom', 'utilisateur_nom', 'sortie_numero'}
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        params = self.request.query_params
+        search = (params.get('search') or '').strip()
+        if search:
+            cond = Q(article_nom__icontains=search) | Q(utilisateur_nom__icontains=search)
+            if search.lstrip('#').isdigit():
+                cond |= Q(sortie_numero=int(search.lstrip('#')))
+            qs = qs.filter(cond)
+        if params.get('article_id'):
+            qs = qs.filter(article_id=params['article_id'])
+        if (params.get('sortie_numero') or '').isdigit():
+            qs = qs.filter(sortie_numero=int(params['sortie_numero']))
+        for key, lookup in (('date_debut', 'date_suppression__date__gte'), ('date_fin', 'date_suppression__date__lte')):
+            raw = (params.get(key) or '').strip()
+            if raw:
+                try:
+                    qs = qs.filter(**{lookup: date.fromisoformat(raw)})
+                except ValueError:
+                    raise serializers.ValidationError({key: _('Date invalide (format attendu : AAAA-MM-JJ).')})
+        ordering = (params.get('ordering') or '').strip()
+        if ordering.lstrip('-') in self.ORDERING_FIELDS:
+            qs = qs.order_by(ordering, '-id')
+        return qs

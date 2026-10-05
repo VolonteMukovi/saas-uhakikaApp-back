@@ -5,6 +5,7 @@ from .client_auth_views import (
     client_portal_dashboard,
     client_portal_login,
     client_portal_refresh,
+    client_portal_register,
     client_portal_select_context,
 )
 from .client_portal_articles import client_portal_articles_search
@@ -24,6 +25,7 @@ router.register(r"client-portal/achats", ClientPortalAchatsViewSet, basename="cl
 
 urlpatterns = [
     path("client-auth/login/", client_portal_login, name="client-portal-login"),
+    path("client-auth/register/", client_portal_register, name="client-portal-register"),
     path("client-auth/refresh/", client_portal_refresh, name="client-portal-refresh"),
     path("client-auth/select-context/", client_portal_select_context, name="client-portal-select-context"),
     path("client-portal/dashboard/", client_portal_dashboard, name="client-portal-dashboard"),
