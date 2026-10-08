@@ -1069,15 +1069,19 @@ class RapportsViewSet(viewsets.ViewSet):
             .order_by('sortie__date_creation', 'sortie_id', 'id')
         )
 
-        if montant_min is not None or montant_max is not None:
-            line_total = ExpressionWrapper(
+        line_total_expr = Coalesce(
+            F('montant_total'),
+            ExpressionWrapper(
                 F('quantite') * F('prix_unitaire'),
                 output_field=DecimalField(max_digits=20, decimal_places=5),
-            )
+            ),
+            output_field=DecimalField(max_digits=20, decimal_places=5),
+        )
+        if montant_min is not None or montant_max is not None:
             if montant_min is not None:
-                lignes_qs = lignes_qs.annotate(_line_total=line_total).filter(_line_total__gte=montant_min)
+                lignes_qs = lignes_qs.annotate(_line_total=line_total_expr).filter(_line_total__gte=montant_min)
             if montant_max is not None:
-                lignes_qs = lignes_qs.annotate(_line_total=line_total).filter(_line_total__lte=montant_max)
+                lignes_qs = lignes_qs.annotate(_line_total=line_total_expr).filter(_line_total__lte=montant_max)
 
         if statut_paiement:
             if statut_paiement == 'CREDIT':
@@ -1089,10 +1093,6 @@ class RapportsViewSet(viewsets.ViewSet):
             pk__in=Subquery(lignes_qs.values('sortie_id').distinct())
         )
 
-        line_total_expr = ExpressionWrapper(
-            F('quantite') * F('prix_unitaire'),
-            output_field=DecimalField(max_digits=20, decimal_places=5),
-        )
         agg = lignes_qs.aggregate(
             total_qte=Sum('quantite'),
             total_montant=Sum(line_total_expr),
@@ -1107,18 +1107,16 @@ class RapportsViewSet(viewsets.ViewSet):
         total_benefice = Decimal('0.00')
         for ls in lignes_qs:
             if ls.lots_utilises.exists():
-                benef_ligne = sum(
-                    (Decimal(str(lu.quantite)) * (Decimal(str(lu.prix_vente)) - Decimal(str(lu.prix_achat))))
+                cout_ligne = sum(
+                    (Decimal(str(lu.quantite)) * Decimal(str(lu.prix_achat)))
                     for lu in ls.lots_utilises.all()
                 )
             else:
                 pu_achat_ls = ls.get_cout_achat_unitaire()
                 if not isinstance(pu_achat_ls, Decimal):
                     pu_achat_ls = Decimal(str(pu_achat_ls))
-                pu_vente_ls = ls.prix_unitaire
-                if not isinstance(pu_vente_ls, Decimal):
-                    pu_vente_ls = Decimal(str(pu_vente_ls))
-                benef_ligne = Decimal(str(ls.quantite)) * (pu_vente_ls - pu_achat_ls)
+                cout_ligne = Decimal(str(ls.quantite)) * pu_achat_ls
+            benef_ligne = ls.get_montant_total() - cout_ligne
             total_benefice += benef_ligne
         total_benefice = total_benefice.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
@@ -1176,14 +1174,15 @@ class RapportsViewSet(viewsets.ViewSet):
                 pu_vente = Decimal(str(pu_vente))
             q = ligne.quantite
             qd = Decimal(str(q or 0))
-            total_ligne = (qd * pu_vente).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            total_ligne = ligne.get_montant_total().quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             if ligne.lots_utilises.exists():
-                benefice_ligne = sum(
-                    (Decimal(str(lu.quantite)) * (Decimal(str(lu.prix_vente)) - Decimal(str(lu.prix_achat))))
+                cout_ligne = sum(
+                    (Decimal(str(lu.quantite)) * Decimal(str(lu.prix_achat)))
                     for lu in ligne.lots_utilises.all()
-                ).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                )
             else:
-                benefice_ligne = (qd * (pu_vente - pu_achat)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                cout_ligne = qd * pu_achat
+            benefice_ligne = (total_ligne - cout_ligne).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             ref = f"FACT-{int(s.id):06d}"
 
             ligne_data = {
@@ -1493,5 +1492,4 @@ class RapportsViewSet(viewsets.ViewSet):
             return self._report_response(request, 'fiche-stock', data)
         except (PermissionDenied, NotFound) as exc:
             return Response({'detail': str(exc)}, status=getattr(exc, 'status_code', status.HTTP_400_BAD_REQUEST))
-
 

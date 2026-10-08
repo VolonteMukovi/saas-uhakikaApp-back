@@ -5,7 +5,8 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_DOWN
 
 from django.db import transaction
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, Q, Sum
+from django.db.models import Case, Count, DecimalField, ExpressionWrapper, F, Q, Sum, When
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -14,7 +15,16 @@ from stock.models import DettesClients, LigneSortie, PaiementDettesClients, Sort
 ZERO = Decimal("0.00000")
 _Q = Decimal("0.00001")
 _MONEY = DecimalField(max_digits=14, decimal_places=5)
-_LINE_TOTAL = ExpressionWrapper(F("quantite") * F("prix_unitaire"), output_field=_MONEY)
+_LINE_TOTAL = Coalesce(
+    F("montant_total"),
+    ExpressionWrapper(F("quantite") * F("prix_unitaire"), output_field=_MONEY),
+    output_field=_MONEY,
+)
+_LINE_REFERENCE_TOTAL = Case(
+    When(devise_reference__isnull=False, then=F("montant_reference")),
+    default=_LINE_TOTAL,
+    output_field=_MONEY,
+)
 
 
 def _q(value) -> Decimal:
@@ -22,7 +32,7 @@ def _q(value) -> Decimal:
 
 
 def calculer_montant_sortie(sortie: Sortie) -> Decimal:
-    agg = LigneSortie.objects.filter(sortie=sortie).aggregate(total=Sum(_LINE_TOTAL))
+    agg = LigneSortie.objects.filter(sortie=sortie).aggregate(total=Sum(_LINE_REFERENCE_TOTAL))
     return _q(agg["total"])
 
 

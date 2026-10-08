@@ -10,6 +10,7 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_DOWN
 
 from django.db.models import Count, DecimalField, ExpressionWrapper, F, Sum
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from stock.models import Client, ClientEntreprise, DettesClients, LigneSortie, Sortie
@@ -17,7 +18,10 @@ from stock.models import Client, ClientEntreprise, DettesClients, LigneSortie, S
 ZERO = Decimal("0.00000")
 _MONEY_FIELD = DecimalField(max_digits=14, decimal_places=5)
 _LINE_TOTAL = ExpressionWrapper(
-    F("quantite") * F("prix_unitaire"),
+    Coalesce(
+        F("montant_total"),
+        ExpressionWrapper(F("quantite") * F("prix_unitaire"), output_field=_MONEY_FIELD),
+    ),
     output_field=_MONEY_FIELD,
 )
 
@@ -243,7 +247,13 @@ def build_client_sales(*, client: Client, entreprise_id: int, succursale_id: int
         .annotate(
             montant_total=Sum(
                 ExpressionWrapper(
-                    F("lignes__quantite") * F("lignes__prix_unitaire"),
+                    Coalesce(
+                        F("lignes__montant_total"),
+                        ExpressionWrapper(
+                            F("lignes__quantite") * F("lignes__prix_unitaire"),
+                            output_field=_MONEY_FIELD,
+                        ),
+                    ),
                     output_field=_MONEY_FIELD,
                 )
             ),

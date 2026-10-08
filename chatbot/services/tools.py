@@ -76,7 +76,9 @@ def _client_sales_summary(ctx: ChatbotContext, client_id: int, period: str = 'al
 
     nb = sorties.count()
     lignes = LigneSortie.objects.filter(sortie__in=sorties)
-    total = lignes.aggregate(t=Coalesce(Sum(F('quantite') * F('prix_unitaire')), Decimal('0')))['t']
+    total = lignes.aggregate(
+        t=Coalesce(Sum(Coalesce(F('montant_total'), F('quantite') * F('prix_unitaire'))), Decimal('0'))
+    )['t']
     dernier = sorties.order_by('-date_creation').first()
     details = []
     for s in sorties.order_by('-date_creation')[:10]:
@@ -276,13 +278,15 @@ def fetch_ventes_data(ctx: ChatbotContext, intent_result: IntentResult) -> dict:
     nb_comptant = sorties.exclude(statut='EN_CREDIT').count()
 
     lignes = LigneSortie.objects.filter(sortie__in=sorties)
-    total_jour = lignes.aggregate(t=Coalesce(Sum(F('quantite') * F('prix_unitaire')), Decimal('0')))['t']
+    total_jour = lignes.aggregate(
+        t=Coalesce(Sum(Coalesce(F('montant_total'), F('quantite') * F('prix_unitaire'))), Decimal('0'))
+    )['t']
 
     credit_details = []
     if intent_result.intent == 'credit_sales_today':
         for s in sorties.filter(statut='EN_CREDIT').select_related('client', 'devise')[:20]:
             montant = LigneSortie.objects.filter(sortie=s).aggregate(
-                t=Coalesce(Sum(F('quantite') * F('prix_unitaire')), Decimal('0'))
+                t=Coalesce(Sum(Coalesce(F('montant_total'), F('quantite') * F('prix_unitaire'))), Decimal('0'))
             )['t']
             credit_details.append({
                 'client': s.client.nom if s.client else 'Sans client',

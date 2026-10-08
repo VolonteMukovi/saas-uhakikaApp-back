@@ -4,11 +4,15 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_DOWN
 
 from django.db.models import DecimalField, ExpressionWrapper, F, Sum
+from django.db.models.functions import Coalesce
 
 from stock.models import Devise, LigneSortie, Sortie
 
 _LINE_TOTAL = ExpressionWrapper(
-    F('quantite') * F('prix_unitaire'),
+    Coalesce(
+        F('montant_total'),
+        ExpressionWrapper(F('quantite') * F('prix_unitaire'), output_field=DecimalField(max_digits=14, decimal_places=5)),
+    ),
     output_field=DecimalField(max_digits=14, decimal_places=5),
 )
 

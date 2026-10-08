@@ -24,6 +24,7 @@ from stock.models import (
     Sortie,
     Stock,
     SousTypeArticle,
+    TauxChange,
     TypeArticle,
     Unite,
 )
@@ -923,6 +924,499 @@ class ConditionnementPricingTests(APITestCase):
             nom='Carton 24',
             multiplicateur_base=Decimal('24'),
             est_defaut=False,
+        )
+        self.type_caisse = TypeCaisse.objects.create(
+            nom='Banque USD',
+            libelle='Banque USD',
+            code_type='BANQUE',
+            entreprise=self.entreprise,
+            devise=self.devise,
+            is_active=True,
+            est_defaut=False,
+        )
+
+    def _create_sale_lot(self, *, cost_per_base='1', retail_per_base='2', pack_price='48'):
+        entree = Entree.objects.create(libele='Lot de vente', entreprise=self.entreprise)
+        lot = LigneEntree.objects.create(
+            article=self.article,
+            entree=entree,
+            conditionnement=self.cond_carton,
+            quantite_saisie=Decimal('10'),
+            quantite_base=Decimal('240'),
+            quantite=Decimal('240'),
+            quantite_restante=Decimal('240'),
+            prix_unitaire=Decimal(cost_per_base),
+            prix_vente=Decimal(retail_per_base),
+            prix_achat_unitaire_base=Decimal(cost_per_base),
+            prix_vente_unitaire_base=Decimal(retail_per_base),
+            devise=self.devise,
+            seuil_alerte=Decimal('0'),
+        )
+        PrixConditionnementEntree.objects.create(
+            ligne_entree=lot,
+            conditionnement=self.cond_carton,
+            prix_vente=Decimal(pack_price),
+            devise=self.devise,
+            est_prix_principal=True,
+        )
+        Stock.objects.create(article=self.article, Qte=Decimal('240'), seuilAlert=Decimal('0'))
+        return lot
+
+    def test_fifo_price_quote_converts_package_price_to_selected_currency(self):
+        lot = self._create_sale_lot(pack_price='48')
+        cdf = Devise.objects.create(
+            sigle='CDF',
+            nom='Franc congolais',
+            symbole='FC',
+            est_principal=False,
+            entreprise=self.entreprise,
+        )
+        TauxChange.objects.create(
+            entreprise=self.entreprise,
+            devise_source=self.devise,
+            devise_cible=cdf,
+            taux=Decimal('2500'),
+            cree_par=self.user,
+        )
+
+        response = self.client.get(
+            '/api/sorties/prix-fifo/',
+            {
+                'article_id': self.article.article_id,
+                'conditionnement_id': self.cond_carton.pk,
+                'devise_id': cdf.pk,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()['prix'], '120000.00000')
+        self.assertEqual(response.json()['lot_id'], lot.pk)
+
+        converted = self.client.post(
+            '/api/sorties/convertir-prix/',
+            {
+                'montant': '2',
+                'devise_source_id': self.devise.pk,
+                'devise_cible_id': cdf.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(converted.status_code, 200, converted.content)
+        self.assertEqual(converted.json()['montant'], '5000.00000')
+
+    def test_fifo_package_quote_preserves_exact_package_price(self):
+        lot = self._create_sale_lot(cost_per_base='0.1', retail_per_base='0.33333', pack_price='1')
+        pack3 = ConditionnementArticle.objects.create(
+            article=self.article,
+            nom='Pack 3',
+            multiplicateur_base=Decimal('3'),
+            est_defaut=False,
+        )
+        PrixConditionnementEntree.objects.create(
+            ligne_entree=lot,
+            conditionnement=pack3,
+            prix_vente=Decimal('1'),
+            devise=self.devise,
+            est_prix_principal=True,
+        )
+
+        response = self.client.get(
+            '/api/sorties/prix-fifo/',
+            {
+                'article_id': self.article.article_id,
+                'conditionnement_id': pack3.pk,
+                'devise_id': self.devise.pk,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()['prix'], '1.00000')
+
+        sale = self.client.post(
+            '/api/sorties/',
+            {
+                'type_caisse_id': self.type_caisse.pk,
+                'lignes': [{
+                    'article_id': self.article.pk,
+                    'conditionnement_id': pack3.pk,
+                    'quantite': '1',
+                    'prix_conditionnement': '1',
+                    'devise_id': self.devise.pk,
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(sale.status_code, 201, sale.content)
+        line = LigneSortie.objects.get(sortie_id=sale.json()['id'])
+        from stock.models import BeneficeLot
+
+        self.assertEqual(
+            sum(BeneficeLot.objects.filter(ligne_sortie=line).values_list('benefice_total', flat=True)),
+            Decimal('0.70000'),
+        )
+
+    def test_credit_debt_uses_reference_currency_for_converted_sale_lines(self):
+        self._create_sale_lot()
+        cdf = Devise.objects.create(
+            sigle='CDF',
+            nom='Franc congolais',
+            symbole='FC',
+            est_principal=False,
+            entreprise=self.entreprise,
+        )
+        TauxChange.objects.create(
+            entreprise=self.entreprise,
+            devise_source=cdf,
+            devise_cible=self.devise,
+            taux=Decimal('0.0004'),
+            cree_par=self.user,
+        )
+        client_fiche = Client.objects.create(id='CLI-CDF', nom='Client CDF')
+        ClientEntreprise.objects.create(client=client_fiche, entreprise=self.entreprise)
+
+        response = self.client.post(
+            '/api/sorties/',
+            {
+                'statut': 'EN_CREDIT',
+                'client_id': client_fiche.pk,
+                'lignes': [{
+                    'article_id': self.article.pk,
+                    'conditionnement_id': self.cond_carton.pk,
+                    'quantite': '1',
+                    'prix_conditionnement': '120000',
+                    'devise_id': cdf.pk,
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        from stock.models import DettesClients
+
+        debt = DettesClients.objects.get(sortie_id=response.json()['id'])
+        line = LigneSortie.objects.get(sortie_id=response.json()['id'])
+        self.assertEqual(line.montant_total, Decimal('120000.00000'))
+        self.assertEqual(line.montant_reference, Decimal('48.00000'))
+        self.assertEqual(debt.montant, Decimal('48.00000'))
+
+    def test_tariff_can_be_changed_without_supply_and_does_not_rewrite_previous_sales(self):
+        self._create_sale_lot()
+        sale = self.client.post(
+            '/api/sorties/',
+            {
+                'type_caisse_id': self.type_caisse.pk,
+                'lignes': [{
+                    'article_id': self.article.pk,
+                    'conditionnement_id': self.cond_carton.pk,
+                    'quantite': '1',
+                    'prix_conditionnement': '48',
+                    'devise_id': self.devise.pk,
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(sale.status_code, 201, sale.content)
+        old_line = LigneSortie.objects.get(sortie_id=sale.json()['id'])
+        self.assertEqual(old_line.montant_total, Decimal('48.00000'))
+
+        tariff_response = self.client.post(
+            '/api/tarifs-vente/',
+            {
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_carton.pk,
+                'prix': '55',
+                'devise_id': self.devise.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(tariff_response.status_code, 201, tariff_response.content)
+        quote = self.client.get(
+            '/api/sorties/prix-fifo/',
+            {
+                'article_id': self.article.article_id,
+                'conditionnement_id': self.cond_carton.pk,
+                'devise_id': self.devise.pk,
+            },
+        )
+        self.assertEqual(quote.status_code, 200, quote.content)
+        self.assertEqual(quote.json()['prix'], '55.00000')
+        self.assertIsNone(quote.json()['lot_id'])
+
+        updated_tariff = self.client.post(
+            '/api/tarifs-vente/',
+            {
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_carton.pk,
+                'prix': '60',
+                'devise_id': self.devise.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(updated_tariff.status_code, 200, updated_tariff.content)
+        old_line.refresh_from_db()
+        self.assertEqual(old_line.montant_total, Decimal('48.00000'))
+        self.assertEqual(old_line.prix_conditionnement, Decimal('48.00000'))
+
+        from stock.models import TarifVente
+
+        self.assertEqual(
+            TarifVente.objects.filter(article=self.article, conditionnement=self.cond_carton).count(),
+            1,
+        )
+
+    def test_tariff_can_be_saved_without_any_supply(self):
+        negative_price = self.client.post(
+            '/api/tarifs-vente/',
+            {
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_carton.pk,
+                'prix': '-1',
+                'devise_id': self.devise.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(negative_price.status_code, 400, negative_price.content)
+
+        response = self.client.post(
+            '/api/tarifs-vente/',
+            {
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_carton.pk,
+                'prix': '42',
+                'devise_id': self.devise.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        quote = self.client.get(
+            '/api/sorties/prix-fifo/',
+            {
+                'article_id': self.article.article_id,
+                'conditionnement_id': self.cond_carton.pk,
+                'devise_id': self.devise.pk,
+            },
+        )
+        self.assertEqual(quote.status_code, 200, quote.content)
+        self.assertEqual(quote.json()['prix'], '42.00000')
+        self.assertIsNone(quote.json()['lot_id'])
+
+    def test_new_sale_uses_current_tariff_when_client_omits_price(self):
+        from stock.models import TarifVente
+
+        self._create_sale_lot()
+        TarifVente.objects.create(
+            article=self.article,
+            conditionnement=self.cond_carton,
+            prix=Decimal('60'),
+            devise=self.devise,
+            modifie_par=self.user,
+        )
+        response = self.client.post(
+            '/api/sorties/',
+            {
+                'type_caisse_id': self.type_caisse.pk,
+                'lignes': [{
+                    'article_id': self.article.pk,
+                    'conditionnement_id': self.cond_carton.pk,
+                    'quantite': '1',
+                    'devise_id': self.devise.pk,
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        line = LigneSortie.objects.get(sortie_id=response.json()['id'])
+        self.assertEqual(line.prix_conditionnement, Decimal('60.00000'))
+        self.assertEqual(line.prix_unitaire, Decimal('2.50000'))
+        self.assertEqual(line.montant_total, Decimal('60.00000'))
+        self.assertEqual(
+            MouvementCaisse.objects.get(sortie_id=line.sortie_id).montant,
+            Decimal('60.00000'),
+        )
+
+    def test_pos_package_contract_preserves_cash_and_credit_totals(self):
+        self._create_sale_lot(pack_price='48')
+        payload = {
+            'type_caisse_id': self.type_caisse.pk,
+            'lignes': [{
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_carton.pk,
+                'quantite': '2',
+                'prix_conditionnement': '48',
+                'devise_id': self.devise.pk,
+            }],
+        }
+        response = self.client.post('/api/sorties/', payload, format='json')
+        self.assertEqual(response.status_code, 201, response.content)
+        ligne = LigneSortie.objects.get(sortie_id=response.json()['id'])
+        self.assertEqual(ligne.quantite, Decimal('48.00000'))
+        self.assertEqual(ligne.quantite_conditionnement, Decimal('2.00000'))
+        self.assertEqual(ligne.prix_conditionnement, Decimal('48.00000'))
+        self.assertEqual(ligne.prix_unitaire, Decimal('2.00000'))
+        self.assertEqual(ligne.montant_total, Decimal('96.00000'))
+        self.assertEqual(
+            MouvementCaisse.objects.get(sortie_id=ligne.sortie_id).montant,
+            Decimal('96.00000'),
+        )
+        from stock.models import BeneficeLot
+
+        self.assertEqual(
+            sum(BeneficeLot.objects.filter(ligne_sortie=ligne).values_list('benefice_total', flat=True)),
+            Decimal('48.00000'),
+        )
+
+        client_fiche = Client.objects.create(id='CLI-PRIX', nom='Client prix')
+        ClientEntreprise.objects.create(client=client_fiche, entreprise=self.entreprise)
+        credit_payload = {
+            'statut': 'EN_CREDIT',
+            'client_id': client_fiche.pk,
+            'lignes': [{
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_carton.pk,
+                'quantite': '1',
+                'prix_conditionnement': '48',
+                'devise_id': self.devise.pk,
+            }],
+        }
+        credit = self.client.post('/api/sorties/', credit_payload, format='json')
+        self.assertEqual(credit.status_code, 201, credit.content)
+        from stock.models import DettesClients
+
+        dette = DettesClients.objects.get(sortie_id=credit.json()['id'])
+        self.assertEqual(dette.montant, Decimal('48.00000'))
+        debt_detail = self.client.get(f'/api/dettes-clients/{dette.pk}/')
+        self.assertEqual(debt_detail.status_code, 200, debt_detail.content)
+        self.assertEqual(
+            Decimal(str(debt_detail.json()['articles'][0]['montant_ligne'])),
+            Decimal('48.00000'),
+        )
+
+    def test_under_cost_requires_admin_and_reason_on_create_and_update(self):
+        lot = self._create_sale_lot(cost_per_base='1', retail_per_base='2', pack_price='48')
+        payload = {
+            'type_caisse_id': self.type_caisse.pk,
+            'lignes': [{
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_carton.pk,
+                'quantite': '1',
+                'prix_conditionnement': '12',
+                'devise_id': self.devise.pk,
+                'motif_prix_exception': 'Promotion autorisée',
+            }],
+        }
+        agent = get_user_model().objects.create_user(
+            username='agent_prix',
+            email='agent-prix@example.com',
+            password='secretpass123',
+        )
+        Membership.objects.create(
+            user=agent,
+            entreprise=self.entreprise,
+            role='user',
+            is_active=True,
+        )
+        self.client.force_authenticate(user=agent)
+        forbidden = self.client.post('/api/sorties/', payload, format='json')
+        self.assertEqual(forbidden.status_code, 400, forbidden.content)
+        lot.refresh_from_db()
+        self.assertEqual(lot.quantite_restante, Decimal('240.00000'))
+
+        self.client.force_authenticate(user=self.user)
+        no_reason = {**payload, 'lignes': [{**payload['lignes'][0], 'motif_prix_exception': ''}]}
+        rejected = self.client.post('/api/sorties/', no_reason, format='json')
+        self.assertEqual(rejected.status_code, 400, rejected.content)
+
+        above_cost = {**payload, 'lignes': [{**payload['lignes'][0], 'prix_conditionnement': '48'}]}
+        created = self.client.post('/api/sorties/', above_cost, format='json')
+        self.assertEqual(created.status_code, 201, created.content)
+        exit_id = created.json()['id']
+        updated = self.client.put(
+            f'/api/sorties/{exit_id}/',
+            {
+                'type_caisse_id': self.type_caisse.pk,
+                'lignes': [{
+                    'article_id': self.article.pk,
+                    'conditionnement_id': self.cond_carton.pk,
+                    'quantite': '1',
+                    'prix_conditionnement': '12',
+                    'devise_id': self.devise.pk,
+                    'motif_prix_exception': 'Promotion autorisée',
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(updated.status_code, 200, updated.content)
+        ligne = LigneSortie.objects.get(sortie_id=exit_id)
+        self.assertEqual(ligne.montant_total, Decimal('12.00000'))
+        self.assertEqual(ligne.motif_prix_exception, 'Promotion autorisée')
+        self.assertEqual(
+            MouvementCaisse.objects.filter(sortie_id=exit_id, type='ENTREE').first().montant,
+            Decimal('12.00000'),
+        )
+
+    def test_free_sale_requires_admin_and_reason(self):
+        self._create_sale_lot()
+        payload = {
+            'lignes': [{
+                'article_id': self.article.pk,
+                'conditionnement_id': self.cond_carton.pk,
+                'quantite': '1',
+                'prix_conditionnement': '0',
+                'devise_id': self.devise.pk,
+                'motif_prix_exception': 'Échantillon offert',
+            }],
+        }
+        agent = get_user_model().objects.create_user(
+            username='agent_gratuit',
+            email='agent-gratuit@example.com',
+            password='secretpass123',
+        )
+        Membership.objects.create(user=agent, entreprise=self.entreprise, role='user', is_active=True)
+        self.client.force_authenticate(user=agent)
+        forbidden = self.client.post('/api/sorties/', payload, format='json')
+        self.assertEqual(forbidden.status_code, 400, forbidden.content)
+
+        self.client.force_authenticate(user=self.user)
+        no_reason = {**payload, 'lignes': [{**payload['lignes'][0], 'motif_prix_exception': ''}]}
+        rejected = self.client.post('/api/sorties/', no_reason, format='json')
+        self.assertEqual(rejected.status_code, 400, rejected.content)
+        allowed = self.client.post('/api/sorties/', payload, format='json')
+        self.assertEqual(allowed.status_code, 201, allowed.content)
+        line = LigneSortie.objects.get(sortie_id=allowed.json()['id'])
+        self.assertEqual(line.montant_total, Decimal('0.00000'))
+        self.assertEqual(line.motif_prix_exception, 'Échantillon offert')
+
+    def test_ligne_sortie_api_is_read_only_for_pricing_consistency(self):
+        self._create_sale_lot()
+        created = self.client.post(
+            '/api/sorties/',
+            {
+                'type_caisse_id': self.type_caisse.pk,
+                'lignes': [{
+                    'article_id': self.article.pk,
+                    'conditionnement_id': self.cond_carton.pk,
+                    'quantite': '1',
+                    'prix_conditionnement': '48',
+                    'devise_id': self.devise.pk,
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(created.status_code, 201, created.content)
+        ligne_id = LigneSortie.objects.get(sortie_id=created.json()['id']).pk
+
+        self.assertEqual(
+            self.client.post('/api/lignesorties/', {}, format='json').status_code,
+            405,
+        )
+        self.assertEqual(
+            self.client.patch(
+                f'/api/lignesorties/{ligne_id}/',
+                {'prix_unitaire': '0'},
+                format='json',
+            ).status_code,
+            405,
+        )
+        self.assertEqual(
+            self.client.delete(f'/api/lignesorties/{ligne_id}/').status_code,
+            405,
         )
 
     def test_create_entree_with_conditionnement_converts_to_base(self):

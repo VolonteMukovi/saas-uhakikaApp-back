@@ -13,7 +13,6 @@ from stock.models import (
     ConditionnementArticle,
     Devise,
     LigneSortie,
-    PrixConditionnementEntree,
     Sortie,
 )
 from stock.services.currency import build_conversion_snapshot
@@ -24,6 +23,10 @@ from stock.services.stock_adjustment import (
     create_sortie_lot_traces,
     quantize_qty,
     rollback_sortie_ligne,
+)
+from stock.services.sortie_pricing import (
+    normalize_fifo_lot_prices,
+    validate_sale_price_policy,
 )
 
 
@@ -45,47 +48,27 @@ def _resolve_conditionnement(article: Article, ligne_payload: dict) -> Condition
         ) from exc
 
 
-def _compute_prix_moyen_depuis_lots(
-    lots_utilises_data: list[dict],
-    conditionnement: ConditionnementArticle | None,
-) -> Decimal:
-    total = Decimal('0')
-    total_qte = Decimal('0')
-    for lot_data in lots_utilises_data:
-        lot = lot_data['lot']
-        qte = Decimal(str(lot_data['quantite']))
-        unit_base_price = lot.prix_vente_unitaire_base or lot.prix_vente
-        if conditionnement is not None:
-            prix_specifique = PrixConditionnementEntree.objects.filter(
-                ligne_entree=lot,
-                conditionnement=conditionnement,
-            ).order_by('-est_prix_principal', 'id').first()
-            if prix_specifique is not None:
-                mult = Decimal(str(conditionnement.multiplicateur_base or '1'))
-                if mult > 0:
-                    unit_base_price = (prix_specifique.prix_vente / mult).quantize(
-                        Decimal('0.00001'), rounding=ROUND_DOWN
-                    )
-        total += unit_base_price * qte
-        total_qte += qte
-    if total_qte <= 0:
-        return Decimal('0')
-    return (total / total_qte).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-
-
-def _parse_prix_unitaire(raw) -> Decimal | None:
+def _parse_prix_unitaire(raw, field_name: str = 'prix_unitaire') -> Decimal | None:
     if raw is None:
         return None
     try:
-        val = Decimal(str(raw))
+        val = Decimal(str(raw).replace(',', '.'))
     except (ValueError, TypeError, InvalidOperation):
-        raise serializers.ValidationError({'prix_unitaire': 'Le prix unitaire doit être un nombre valide.'})
+        raise serializers.ValidationError({field_name: 'Le prix de vente doit être un nombre valide.'})
     if val < 0:
-        raise serializers.ValidationError({'prix_unitaire': 'Le prix unitaire ne peut pas être négatif.'})
+        raise serializers.ValidationError({field_name: 'Le prix de vente ne peut pas être négatif.'})
     return val.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
 
-def _process_sortie_ligne(sortie: Sortie, ligne_payload: dict, *, default_dev: Devise | None, tenant_id: int) -> dict:
+def _process_sortie_ligne(
+    sortie: Sortie,
+    ligne_payload: dict,
+    *,
+    default_dev: Devise | None,
+    tenant_id: int,
+    utilisateur,
+    request=None,
+) -> dict:
     """Crée une ligne de sortie avec FIFO. Retourne les données devise/total."""
     article_id = ligne_payload.get('article_id') or ligne_payload.get('article')
     try:
@@ -105,25 +88,56 @@ def _process_sortie_ligne(sortie: Sortie, ligne_payload: dict, *, default_dev: D
     else:
         qte = qte_saisie
 
-    prix_unitaire_encaisse = _parse_prix_unitaire(ligne_payload.get('prix_unitaire'))
+    prix_conditionnement = _parse_prix_unitaire(
+        ligne_payload.get('prix_conditionnement'),
+        'prix_conditionnement',
+    )
+    prix_unitaire_encaisse = (
+        _parse_prix_unitaire(ligne_payload.get('prix_unitaire'))
+        if prix_conditionnement is None
+        else None
+    )
 
     devise_id = ligne_payload.get('devise_id') or ligne_payload.get('devise')
     if devise_id:
         try:
             devise_obj = Devise.objects.get(pk=devise_id, entreprise_id=tenant_id)
         except Devise.DoesNotExist:
-            devise_obj = default_dev
+            raise serializers.ValidationError({'devise_id': f'Devise {devise_id} non trouvée dans votre entreprise.'})
     else:
         devise_obj = default_dev
+    if devise_obj is None:
+        raise serializers.ValidationError({'devise_id': 'Aucune devise principale n’est configurée.'})
 
-    lots_utilises_data, total_prix_vente = consume_fifo_lots(article_obj, qte)
-
-    prix_vente_moyen_lots = _compute_prix_moyen_depuis_lots(lots_utilises_data, conditionnement)
-
-    prix_unitaire_final = prix_unitaire_encaisse if prix_unitaire_encaisse is not None else prix_vente_moyen_lots
+    lots_utilises_data, _ = consume_fifo_lots(article_obj, qte)
+    lots_utilises_data = normalize_fifo_lot_prices(
+        lots_utilises_data,
+        conditionnement,
+        devise_obj,
+        entreprise_id=tenant_id,
+    )
+    if prix_conditionnement is not None:
+        multiplicateur = Decimal(str(conditionnement.multiplicateur_base)) if conditionnement else Decimal('1')
+        prix_unitaire_final = prix_conditionnement / multiplicateur
+    elif prix_unitaire_encaisse is not None:
+        prix_unitaire_final = prix_unitaire_encaisse
+    else:
+        prix_unitaire_final = lots_utilises_data[0]['prix_vente']
     prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-
-    montant_ligne = (prix_unitaire_final * qte).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+    montant_ligne = (
+        (prix_conditionnement * qte_saisie).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+        if prix_conditionnement is not None
+        else (prix_unitaire_final * qte).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+    )
+    motif_exception = validate_sale_price_policy(
+        prix_unitaire_final,
+        qte,
+        lots_utilises_data,
+        utilisateur,
+        ligne_payload.get('motif_prix_exception', ''),
+        montant_total=montant_ligne,
+        request=request,
+    )
     snapshot_ligne = build_conversion_snapshot(
         entreprise_id=sortie.entreprise_id,
         amount=montant_ligne,
@@ -132,8 +146,13 @@ def _process_sortie_ligne(sortie: Sortie, ligne_payload: dict, *, default_dev: D
     ligne_sortie = LigneSortie.objects.create(
         sortie=sortie,
         article=article_obj,
+        conditionnement=conditionnement,
+        quantite_conditionnement=qte_saisie if conditionnement is not None else None,
+        prix_conditionnement=prix_conditionnement,
         quantite=qte,
         prix_unitaire=prix_unitaire_final,
+        montant_total=montant_ligne,
+        motif_prix_exception=motif_exception,
         devise=devise_obj,
         devise_reference=snapshot_ligne['devise_reference'],
         taux_change=snapshot_ligne['taux_change'],
@@ -156,6 +175,7 @@ def update_sortie_from_payload(
     data: dict,
     *,
     utilisateur=None,
+    request=None,
     type_caisse_id: int | None = None,
 ) -> Sortie:
     """
@@ -210,7 +230,14 @@ def update_sortie_from_payload(
     totaux_par_devise = {}
     if lignes_data is not None:
         for ligne_payload in lignes_data:
-            result = _process_sortie_ligne(sortie, ligne_payload, default_dev=default_dev, tenant_id=tenant_id)
+            result = _process_sortie_ligne(
+                sortie,
+                ligne_payload,
+                default_dev=default_dev,
+                tenant_id=tenant_id,
+                utilisateur=utilisateur,
+                request=request,
+            )
             key = result['devise_key']
             if key not in totaux_par_devise:
                 totaux_par_devise[key] = {'devise_obj': result['devise_obj'], 'total': Decimal('0')}
@@ -218,7 +245,7 @@ def update_sortie_from_payload(
     else:
         for ligne in sortie.lignes.select_related('devise').all():
             key = ligne.devise.sigle if ligne.devise else 'DEFAULT'
-            montant = (ligne.prix_unitaire or Decimal('0')) * quantize_qty(ligne.quantite)
+            montant = ligne.get_montant_total()
             if key not in totaux_par_devise:
                 totaux_par_devise[key] = {'devise_obj': ligne.devise, 'total': Decimal('0')}
             totaux_par_devise[key]['total'] += montant

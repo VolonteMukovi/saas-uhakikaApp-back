@@ -41,6 +41,7 @@ from stock.services.log_suppression import journaliser_lignes_supprimees
 from stock.services.stock_adjustment import (
     apply_stock_delta,
     lots_fifo_verrouilles,
+    reconcile_sortie_benefice,
     verrouiller_lots_articles,
 )
 from stock.services.client_lifecycle import (
@@ -55,11 +56,19 @@ from stock.services.currency import (
     CurrencyError,
     _as_aware_datetime,
     build_conversion_snapshot,
+    convert_amount,
     get_exchange_rate,
     get_principal_devise as get_principal_devise_for_entreprise,
 )
+from stock.services.sortie_pricing import (
+    convert_sale_price,
+    get_tarif_vente_price,
+    normalize_fifo_lot_prices,
+    validate_sale_price_policy,
+)
 from django.db import transaction, models
 from django.db.models import Prefetch, Q, Sum
+from django.db.models.functions import Coalesce
 from rest_framework.exceptions import PermissionDenied, NotFound
 from django.utils.translation import gettext as _, pgettext
 from django.contrib.admin.models import LogEntry, ADDITION, DELETION, CHANGE
@@ -763,6 +772,109 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             )
         ).order_by('-date_creation')
 
+    @action(detail=False, methods=['get'], url_path='prix-fifo')
+    def prix_fifo(self, request):
+        """Tarif commercial courant ou, à défaut, prix FIFO dans la devise demandée."""
+        tenant_id, branch_id = _get_tenant_ids(request)
+        article_id = request.query_params.get('article_id')
+        devise_id = request.query_params.get('devise_id')
+        conditionnement_id = request.query_params.get('conditionnement_id')
+        if not tenant_id or not article_id:
+            raise serializers.ValidationError({'article_id': 'Un article est requis.'})
+
+        article_qs = Article.objects.filter(article_id=article_id, entreprise_id=tenant_id)
+        if branch_id is not None:
+            article_qs = article_qs.filter(succursale_id=branch_id)
+        article = article_qs.first()
+        if article is None:
+            raise NotFound(f'Article {article_id} non trouvé.')
+
+        target_devise = Devise.objects.filter(
+            pk=devise_id,
+            entreprise_id=tenant_id,
+        ).first() if devise_id else get_principal_devise_for_entreprise(tenant_id)
+        if target_devise is None:
+            raise serializers.ValidationError({'devise_id': 'Une devise de vente valide est requise.'})
+
+        conditionnement = None
+        if conditionnement_id:
+            conditionnement = ConditionnementArticle.objects.filter(
+                pk=conditionnement_id,
+                article=article,
+            ).first()
+            if conditionnement is None:
+                raise serializers.ValidationError({
+                    'conditionnement_id': 'Le conditionnement ne correspond pas à cet article.',
+                })
+
+        lot_qs = LigneEntree.objects.filter(
+            article=article,
+            entree__entreprise_id=tenant_id,
+            quantite_restante__gt=0,
+        )
+        if branch_id is not None:
+            lot_qs = lot_qs.filter(entree__succursale_id=branch_id)
+        lot = lot_qs.select_related('devise').order_by('date_entree', 'id').first()
+        from stock.services.sortie_pricing import (
+            get_fifo_lot_conditionnement_price,
+            get_tarif_vente_price,
+        )
+
+        tariff_price = get_tarif_vente_price(article, conditionnement)
+        if tariff_price is not None:
+            raw_price, source_devise = tariff_price
+        elif lot is not None:
+            raw_price, source_devise = get_fifo_lot_conditionnement_price(lot, conditionnement)
+        else:
+            return Response({
+                'prix': None,
+                'devise_id': target_devise.pk,
+                'devise': target_devise.sigle,
+                'lot_id': None,
+            })
+        converted_price = convert_sale_price(
+            raw_price,
+            source_devise,
+            target_devise,
+            entreprise_id=tenant_id,
+        )
+        return Response({
+            'prix': str(converted_price),
+            'devise_id': target_devise.pk,
+            'devise': target_devise.sigle,
+            'lot_id': lot.pk if tariff_price is None and lot is not None else None,
+        })
+
+    @action(detail=False, methods=['post'], url_path='convertir-prix')
+    def convertir_prix(self, request):
+        """Convertit un prix saisi vers la devise de vente avec le taux actif."""
+        tenant_id, _ = _get_tenant_ids(request)
+        if not tenant_id:
+            raise serializers.ValidationError({'non_field_errors': 'Contexte entreprise manquant.'})
+        try:
+            amount = Decimal(str(request.data.get('montant')).replace(',', '.'))
+        except (InvalidOperation, TypeError, ValueError):
+            raise serializers.ValidationError({'montant': 'Le montant doit être un nombre valide.'})
+        if amount < 0:
+            raise serializers.ValidationError({'montant': 'Le montant ne peut pas être négatif.'})
+
+        source_id = request.data.get('devise_source_id')
+        target_id = request.data.get('devise_cible_id')
+        source_devise = Devise.objects.filter(pk=source_id, entreprise_id=tenant_id).first()
+        target_devise = Devise.objects.filter(pk=target_id, entreprise_id=tenant_id).first()
+        if source_devise is None or target_devise is None:
+            raise serializers.ValidationError({'devise_id': 'Les devises source et cible doivent appartenir à l’entreprise.'})
+        converted = convert_sale_price(
+            amount,
+            source_devise,
+            target_devise,
+            entreprise_id=tenant_id,
+        )
+        return Response({
+            'montant': str(converted),
+            'devise_id': target_devise.pk,
+            'devise': target_devise.sigle,
+        })
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -850,22 +962,28 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 else:
                     qte = qte_saisie
                 
-                # Prix réellement encaissé (peut être fourni manuellement pour promotions, réductions, etc.)
-                pu_raw = ligne.get('prix_unitaire')
-                prix_unitaire_encaisse = None
-                if pu_raw is not None:
+                # `prix_conditionnement` est le contrat POS. `prix_unitaire` reste le contrat API historique.
+                prix_conditionnement_raw = ligne.get('prix_conditionnement')
+                prix_unitaire_raw = ligne.get('prix_unitaire')
+                prix_saisi = None
+                prix_is_conditionnement = prix_conditionnement_raw is not None
+                if prix_conditionnement_raw is not None or prix_unitaire_raw is not None:
                     try:
-                        if isinstance(pu_raw, Decimal):
-                            prix_unitaire_encaisse = pu_raw
+                        raw_price = prix_conditionnement_raw if prix_is_conditionnement else prix_unitaire_raw
+                        if isinstance(raw_price, Decimal):
+                            prix_saisi = raw_price
                         else:
-                            prix_unitaire_encaisse = Decimal(str(pu_raw))
-                        if prix_unitaire_encaisse < 0:
+                            prix_saisi = Decimal(str(raw_price).replace(',', '.'))
+                        prix_saisi = prix_saisi.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                        if prix_saisi < 0:
                             raise serializers.ValidationError({
-                                'prix_unitaire': 'Le prix unitaire ne peut pas être négatif.'
+                                'prix_conditionnement' if prix_is_conditionnement else 'prix_unitaire':
+                                    'Le prix de vente ne peut pas être négatif.'
                             })
-                    except (ValueError, TypeError):
+                    except (ValueError, TypeError, InvalidOperation):
                         raise serializers.ValidationError({
-                            'prix_unitaire': 'Le prix unitaire doit être un nombre valide.'
+                            'prix_conditionnement' if prix_is_conditionnement else 'prix_unitaire':
+                                'Le prix de vente doit être un nombre valide.'
                         })
                 
                 # Lots FIFO verrouillés : disponibilité calculée sur des quantités à jour
@@ -887,12 +1005,12 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         raise serializers.ValidationError(f"Devise avec ID {devise_id} non trouvée dans votre entreprise.")
                 else:
                     devise_obj = default_dev
+                if devise_obj is None:
+                    raise serializers.ValidationError({'devise_id': 'Aucune devise principale n’est configurée.'})
                 
                 # ========== LOGIQUE FIFO ==========
                 quantite_restante_a_sortir = qte
                 lots_utilises_data = []
-                prix_vente_moyen_lots = Decimal('0.00')
-                total_prix_vente = Decimal('0.00')
                 
                 # Consommer les lots en FIFO
                 for lot in lots_disponibles:
@@ -914,30 +1032,50 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     lot.save(update_fields=['quantite_restante'])
                     
                     quantite_restante_a_sortir -= quantite_a_prelever
-                    unit_sale_price = lot.prix_vente_unitaire_base or lot.prix_vente
-                    if conditionnement_obj is not None:
-                        prix_specifique = PrixConditionnementEntree.objects.filter(
-                            ligne_entree=lot,
-                            conditionnement=conditionnement_obj,
-                        ).order_by('-est_prix_principal', 'id').first()
-                        if prix_specifique is not None:
-                            unit_sale_price = (
-                                prix_specifique.prix_vente / Decimal(str(conditionnement_obj.multiplicateur_base))
-                            ).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-                    total_prix_vente += unit_sale_price * Decimal(str(quantite_a_prelever))
                 
-                # Calculer le prix de vente moyen des lots (pour référence, si prix_unitaire non fourni)
-                if qte > 0:
-                    prix_vente_moyen_lots = total_prix_vente / Decimal(str(qte))
+                lots_utilises_data = normalize_fifo_lot_prices(
+                    lots_utilises_data,
+                    conditionnement_obj,
+                    devise_obj,
+                    entreprise_id=tenant_id,
+                )
+
+                if prix_saisi is None:
+                    tarif_vente = get_tarif_vente_price(article_obj, conditionnement_obj)
+                    if tarif_vente is not None:
+                        prix_saisi = convert_sale_price(
+                            tarif_vente[0],
+                            tarif_vente[1],
+                            devise_obj,
+                            entreprise_id=tenant_id,
+                        )
+                        prix_is_conditionnement = conditionnement_obj is not None
+                
+                # Le premier lot FIFO définit la référence; les saisies POS sont par conditionnement.
+                if prix_saisi is None:
+                    prix_unitaire_final = lots_utilises_data[0]['prix_vente']
+                elif prix_is_conditionnement:
+                    multiplicateur = Decimal(str(conditionnement_obj.multiplicateur_base)) if conditionnement_obj else Decimal('1')
+                    prix_unitaire_final = prix_saisi / multiplicateur
                 else:
-                    prix_vente_moyen_lots = Decimal('0.00')
-                
-                # Utiliser le prix réellement encaissé si fourni, sinon utiliser le prix moyen des lots
-                prix_unitaire_final = prix_unitaire_encaisse if prix_unitaire_encaisse is not None else prix_vente_moyen_lots
+                    prix_unitaire_final = prix_saisi
                 prix_unitaire_final = prix_unitaire_final.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                montant_ligne = (
+                    (prix_saisi * qte_saisie).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                    if prix_is_conditionnement
+                    else (prix_unitaire_final * qte).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                )
+                motif_exception = validate_sale_price_policy(
+                    prix_unitaire_final,
+                    qte,
+                    lots_utilises_data,
+                    user,
+                    ligne.get('motif_prix_exception', ''),
+                    montant_total=montant_ligne,
+                    request=request,
+                )
                 
                 # Créer la ligne de sortie avec le prix réellement encaissé
-                montant_ligne = (prix_unitaire_final * Decimal(str(qte))).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 snapshot_ligne = build_conversion_snapshot(
                     entreprise_id=sortie.entreprise_id,
                     amount=montant_ligne,
@@ -946,8 +1084,13 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 ligne_sortie = LigneSortie.objects.create(
                     sortie=sortie,
                     article=article_obj,
+                    conditionnement=conditionnement_obj,
+                    quantite_conditionnement=qte_saisie if conditionnement_obj is not None else None,
+                    prix_conditionnement=prix_saisi if prix_is_conditionnement else None,
                     quantite=qte,
                     prix_unitaire=prix_unitaire_final,
+                    montant_total=montant_ligne,
+                    motif_prix_exception=motif_exception,
                     devise=devise_obj,
                     devise_reference=snapshot_ligne['devise_reference'],
                     taux_change=snapshot_ligne['taux_change'],
@@ -960,7 +1103,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                     lot = lot_data['lot']
                     qte_lot = lot_data['quantite']
                     prix_achat = lot_data['prix_achat']
-                    prix_vente_lot = lot_data['prix_vente']  # Prix du lot (pour traçabilité)
+                    prix_vente_lot = lot_data['prix_vente']
                     
                     # Traçabilité : quel lot a été utilisé (on garde le prix_vente du lot pour référence)
                     LigneSortieLot.objects.create(
@@ -984,6 +1127,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                         benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
                         benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                     )
+                reconcile_sortie_benefice(ligne_sortie)
                 
                 # Calcul du montant pour cette ligne (prix réellement encaissé)
                 
@@ -1189,7 +1333,12 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         ).annotate(
             quantite_totale=Sum('quantite'),
             nombre_ventes=Count('id', distinct=True),
-            chiffre_affaires=Sum(models.F('quantite') * models.F('prix_unitaire'))
+            chiffre_affaires=Sum(
+                Coalesce(
+                    models.F('montant_total'),
+                    models.F('quantite') * models.F('prix_unitaire'),
+                )
+            )
         ).order_by('-nombre_ventes')[:limit]
         
         # Formater les résultats
@@ -1260,7 +1409,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             
             for ligne in sortie.lignes.all():
                 # Calculer le montant de cette ligne
-                montant_ligne = (ligne.prix_unitaire or Decimal('0')) * Decimal(str(ligne.quantite))
+                montant_ligne = ligne.get_montant_total()
                 
                 # Déterminer la devise de cette ligne
                 devise_ligne = ligne.devise or default_dev
@@ -1340,8 +1489,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
     def _total_sortie(self, sortie: Sortie) -> Decimal:
         total = Decimal('0.00')
         for l in sortie.lignes.all():
-            pu = l.prix_unitaire or Decimal('0')
-            total += pu * Decimal(str(l.quantite))
+            total += l.get_montant_total()
         return total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
     def _solde_caisse_par_devise(self, entreprise, devise, succursale_id=None):
@@ -1380,6 +1528,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 instance,
                 request.data,
                 utilisateur=request.user,
+                request=request,
                 type_caisse_id=type_caisse_id,
             )
 
@@ -1556,208 +1705,13 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         return self.bon_sortie_pos(request, pk=pk)
 
 
-class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ReadOnlyModelViewSet):
     tenant_lookup = 'sortie__entreprise_id'
     serializer_class = LigneSortieSerializer
     queryset = LigneSortie.objects.all()
 
     def get_queryset(self):
         return super().get_queryset().select_related('article', 'sortie').order_by('-date_sortie', '-id')
-
-    def perform_create(self, serializer):
-        user = self.request.user
-        devise_ligne = serializer.validated_data.get('devise')
-        montant_ligne = (serializer.validated_data.get('prix_unitaire') or Decimal('0.00')) * serializer.validated_data.get('quantite', Decimal('0.00'))
-        snapshot_ligne = build_conversion_snapshot(
-            entreprise_id=getattr(serializer.validated_data.get('sortie'), 'entreprise_id', None),
-            amount=montant_ligne,
-            devise_source=devise_ligne,
-        )
-        ligne_sortie = serializer.save(
-            devise_reference=snapshot_ligne['devise_reference'],
-            taux_change=snapshot_ligne['taux_change'],
-            montant_reference=snapshot_ligne['montant_reference'],
-        )
-        stock, created = Stock.objects.select_for_update().get_or_create(
-            article=ligne_sortie.article,
-            defaults={'Qte': 0, 'seuilAlert': 0}
-        )
-        if stock.Qte < ligne_sortie.quantite:
-            raise serializers.ValidationError(f"Stock insuffisant pour l'article {_article_display_name(ligne_sortie.article)}")
-        stock.Qte -= ligne_sortie.quantite
-        stock.save()
-    
-    def update(self, request, *args, **kwargs):
-        """Mise à jour d'une ligne de sortie avec gestion FIFO."""
-        partial = kwargs.pop('partial', False)
-        instance = self.get_object()
-        
-        # Pour les lignes de sortie, la modification est complexe car elle affecte les lots FIFO
-        # On recommande de modifier la sortie entière plutôt qu'une ligne individuelle
-        # Mais on permet quand même la modification pour compatibilité
-        
-        nouvelle_quantite = request.data.get('quantite')
-        if nouvelle_quantite is None:
-            raise serializers.ValidationError({
-                'quantite': 'La quantité est requise pour la mise à jour.'
-            })
-        
-        try:
-            nouvelle_quantite = _parse_decimal_quantity(nouvelle_quantite)
-        except (InvalidOperation, ValueError, TypeError):
-            raise serializers.ValidationError({
-                'quantite': 'La quantité doit être un nombre décimal valide.'
-            })
-        
-        old_quantite = instance.quantite
-        
-        with transaction.atomic():
-            # Restaurer les lots de l'ancienne quantité
-            for lot_utilise in instance.lots_utilises.all():
-                lot = lot_utilise.lot_entree
-                lot.quantite_restante += lot_utilise.quantite
-                lot.save()
-            
-            # Supprimer les bénéfices et traçabilités
-            BeneficeLot.objects.filter(ligne_sortie=instance).delete()
-            instance.lots_utilises.all().delete()
-            
-            # Restaurer le stock
-            apply_stock_delta(instance.article, old_quantite)
-            
-            # Vérifier le stock disponible pour la nouvelle quantité
-            lots_disponibles = lots_fifo_verrouilles(instance.article)
-            stock_disponible = sum((lot.quantite_restante for lot in lots_disponibles), Decimal('0'))
-            
-            if stock_disponible < nouvelle_quantite:
-                raise serializers.ValidationError(
-                    f"Stock insuffisant pour l'article {instance.article.nom_scientifique} "
-                    f"(Disponible: {stock_disponible}, Demandé: {nouvelle_quantite})"
-                )
-            
-            # Appliquer FIFO pour la nouvelle quantité
-            
-            quantite_restante_a_sortir = nouvelle_quantite
-            total_prix_vente = Decimal('0.00')
-            
-            for lot in lots_disponibles:
-                if quantite_restante_a_sortir <= 0:
-                    break
-                
-                quantite_a_prelever = min(lot.quantite_restante, quantite_restante_a_sortir)
-                
-                LigneSortieLot.objects.create(
-                    ligne_sortie=instance,
-                    lot_entree=lot,
-                    quantite=quantite_a_prelever,
-                    prix_achat=lot.prix_unitaire,
-                    prix_vente=lot.prix_vente
-                )
-                
-                benefice_unitaire = lot.prix_vente - lot.prix_unitaire
-                benefice_total = benefice_unitaire * Decimal(str(quantite_a_prelever))
-                
-                BeneficeLot.objects.create(
-                    lot_entree=lot,
-                    ligne_sortie=instance,
-                    quantite_vendue=quantite_a_prelever,
-                    prix_achat=lot.prix_unitaire,
-                    prix_vente=lot.prix_vente,
-                    benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
-                    benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-                )
-                
-                lot.quantite_restante -= quantite_a_prelever
-                lot.save(update_fields=['quantite_restante'])
-                
-                quantite_restante_a_sortir -= quantite_a_prelever
-                total_prix_vente += lot.prix_vente * Decimal(str(quantite_a_prelever))
-            
-            # Calculer le prix moyen
-            if nouvelle_quantite > 0:
-                prix_vente_moyen = total_prix_vente / Decimal(str(nouvelle_quantite))
-            else:
-                prix_vente_moyen = Decimal('0.00')
-            
-            # Mettre à jour la ligne
-            instance.quantite = nouvelle_quantite
-            instance.prix_unitaire = prix_vente_moyen.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
-            if 'devise_id' in request.data:
-                devise_id = request.data.get('devise_id')
-                if devise_id:
-                    instance.devise = get_object_or_404(Devise, pk=devise_id, entreprise_id=instance.sortie.entreprise_id)
-            snapshot_ligne = build_conversion_snapshot(
-                entreprise_id=instance.sortie.entreprise_id,
-                amount=(instance.prix_unitaire * instance.quantite).quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
-                devise_source=instance.devise,
-            )
-            instance.devise_reference = snapshot_ligne['devise_reference']
-            instance.taux_change = snapshot_ligne['taux_change']
-            instance.montant_reference = snapshot_ligne['montant_reference']
-            instance.save()
-            
-            # Mettre à jour le stock
-            apply_stock_delta(instance.article, -nouvelle_quantite)
-        
-        return Response(self.get_serializer(instance).data)
-    
-    def partial_update(self, request, *args, **kwargs):
-        """Mise à jour partielle d'une ligne de sortie."""
-        return self.update(request, *args, **kwargs, partial=True)
-
-    @transaction.atomic
-    def perform_destroy(self, instance):
-        user = self.request.user
-        stock, created = Stock.objects.get_or_create(
-            article=instance.article, 
-            defaults={'Qte': 0, 'seuilAlert': 0}
-        )
-        stock.Qte += instance.quantite
-        stock.save()
-        journaliser_lignes_supprimees(
-            instance.sortie,
-            [instance],
-            user,
-            motif=LogSuppression.MOTIF_LIGNE,
-            entreprise_id=_get_tenant_ids(self.request)[0],
-        )
-        instance.delete()
-
-    def perform_update(self, serializer):
-        user = self.request.user
-        old_instance = self.get_object()
-        old_article = old_instance.article
-        old_quantite = old_instance.quantite
-        devise_ligne = serializer.validated_data.get('devise') or old_instance.devise
-        montant_ligne = (serializer.validated_data.get('prix_unitaire') or old_instance.prix_unitaire or Decimal('0.00')) * (serializer.validated_data.get('quantite') or old_instance.quantite or Decimal('0.00'))
-        snapshot_ligne = build_conversion_snapshot(
-            entreprise_id=old_instance.sortie.entreprise_id,
-            amount=montant_ligne,
-            devise_source=devise_ligne,
-        )
-        new_instance = serializer.save(
-            devise_reference=snapshot_ligne['devise_reference'],
-            taux_change=snapshot_ligne['taux_change'],
-            montant_reference=snapshot_ligne['montant_reference'],
-        )
-        new_article = new_instance.article
-        new_quantite = new_instance.quantite
-        # Remettre l'ancienne quantité dans le stock de l'ancien article
-        stock_old, created = Stock.objects.get_or_create(
-            article=old_article, 
-            defaults={'Qte': 0, 'seuilAlert': 0}
-        )
-        stock_old.Qte += old_quantite
-        stock_old.save()
-        # Retirer la nouvelle quantité du stock du nouvel article
-        stock_new, created = Stock.objects.get_or_create(
-            article=new_article, 
-            defaults={'Qte': 0, 'seuilAlert': 0}
-        )
-        if stock_new.Qte < new_quantite:
-            raise serializers.ValidationError(f"Stock insuffisant pour l'article {_article_display_name(new_article)}")
-        stock_new.Qte -= new_quantite
-        stock_new.save()
 
 class UniteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = Unite.objects.all()
@@ -2985,7 +2939,7 @@ class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
         
         total = Decimal('0.00')
         for ligne in entree.lignes.all():
-            sous_total = (ligne.prix_unitaire or Decimal('0')) * Decimal(str(ligne.quantite))
+            sous_total = ligne.get_montant_total()
             total += sous_total
             
             response_data['lignes'].append({

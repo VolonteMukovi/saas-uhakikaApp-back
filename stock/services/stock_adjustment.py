@@ -174,3 +174,47 @@ def create_sortie_lot_traces(ligne_sortie: LigneSortie, lots_utilises_data: list
             benefice_unitaire=benefice_unitaire.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
             benefice_total=benefice_total.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
         )
+    reconcile_sortie_benefice(ligne_sortie)
+
+
+def reconcile_sortie_benefice(ligne_sortie: LigneSortie) -> None:
+    """Keep summed per-lot profits aligned with the exact saved sale amount."""
+    benefices = list(
+        BeneficeLot.objects.filter(ligne_sortie=ligne_sortie)
+        .order_by('id')
+    )
+    if not benefices:
+        return
+    total_quantite = sum((Decimal(str(row.quantite_vendue)) for row in benefices), Decimal('0'))
+    if total_quantite <= 0:
+        return
+
+    montant_vente = ligne_sortie.get_montant_total()
+    cout_total = sum(
+        (
+            Decimal(str(row.quantite_vendue)) * Decimal(str(row.prix_achat))
+            for row in benefices
+        ),
+        Decimal('0'),
+    )
+    benefice_total = (montant_vente - cout_total).quantize(
+        Decimal('0.00001'),
+        rounding=ROUND_DOWN,
+    )
+    benefice_attribue = Decimal('0')
+    for index, row in enumerate(benefices):
+        quantite = Decimal(str(row.quantite_vendue))
+        if index == len(benefices) - 1:
+            benefice_lot = benefice_total - benefice_attribue
+        else:
+            montant_lot = (montant_vente * quantite / total_quantite).quantize(
+                Decimal('0.00001'),
+                rounding=ROUND_DOWN,
+            )
+            cout_lot = quantite * Decimal(str(row.prix_achat))
+            benefice_lot = (montant_lot - cout_lot).quantize(
+                Decimal('0.00001'),
+                rounding=ROUND_DOWN,
+            )
+            benefice_attribue += benefice_lot
+        BeneficeLot.objects.filter(pk=row.pk).update(benefice_total=benefice_lot)

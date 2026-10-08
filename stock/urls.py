@@ -2,7 +2,7 @@ from rest_framework import routers
 from .views import *
 from .inventaire_views import InventaireSessionViewSet
 from .requisition_views import RequisitionViewSet
-from .tarification_views import TarificationViewSet
+from .tarification_views import TarificationViewSet, TarifVenteViewSet
 from .benefices_views import BeneficePerformanceViewSet
 from django.urls import path, include
 
@@ -33,6 +33,7 @@ router.register(r'inventaires', InventaireSessionViewSet, basename='inventaire')
 router.register(r'logs-suppressions', LogSuppressionViewSet, basename='log-suppression')
 router.register(r'requisitions', RequisitionViewSet, basename='requisition')
 router.register(r'tarification', TarificationViewSet, basename='tarification')
+router.register(r'tarifs-vente', TarifVenteViewSet, basename='tarif-vente')
 router.register(r'benefices', BeneficePerformanceViewSet, basename='benefices')
 
 

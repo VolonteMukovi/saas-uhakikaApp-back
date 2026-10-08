@@ -16,6 +16,7 @@ from .models import (
     Entree,
     LigneEntree,
     PrixConditionnementEntree,
+    TarifVente,
     Stock,
     Sortie,
     LigneSortie,
@@ -330,6 +331,57 @@ class PrixConditionnementEntreeSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'updated_at']
 
 
+class TarifVenteSerializer(serializers.ModelSerializer):
+    article_id = TenantPrimaryKeyRelatedField(
+        queryset=Article.objects.all(),
+        tenant_lookup='entreprise_id',
+        source='article',
+        write_only=True,
+    )
+    conditionnement_id = TenantPrimaryKeyRelatedField(
+        queryset=ConditionnementArticle.objects.all(),
+        tenant_lookup='article__entreprise_id',
+        source='conditionnement',
+        write_only=True,
+        required=False,
+        allow_null=True,
+    )
+    devise_id = TenantPrimaryKeyRelatedField(
+        queryset=Devise.objects.all(),
+        tenant_lookup='entreprise_id',
+        source='devise',
+        write_only=True,
+    )
+    devise = DeviseSerializer(read_only=True)
+    prix = LocalizedDecimalField(
+        max_digits=14,
+        decimal_places=5,
+        min_value=Decimal('0'),
+    )
+
+    class Meta:
+        model = TarifVente
+        fields = [
+            'id',
+            'article_id',
+            'conditionnement_id',
+            'devise_id',
+            'prix',
+            'devise',
+            'updated_at',
+        ]
+        read_only_fields = ['updated_at']
+
+    def validate(self, attrs):
+        article = attrs.get('article')
+        conditionnement = attrs.get('conditionnement')
+        if conditionnement is not None and article is not None and conditionnement.article_id != article.pk:
+            raise serializers.ValidationError({
+                'conditionnement_id': 'Le conditionnement doit appartenir à cet article.',
+            })
+        return attrs
+
+
 class EntrepriseSerializer(serializers.ModelSerializer):
     """
     CRUD entreprise. Tous les champs sont éditables par l'Admin (logo, email, slogan, etc.).
@@ -415,6 +467,15 @@ class LigneSortieSerializer(serializers.ModelSerializer):
         write_only=True, 
         required=True
     )
+    conditionnement = ConditionnementArticleSerializer(read_only=True)
+    conditionnement_id = TenantPrimaryKeyRelatedField(
+        queryset=ConditionnementArticle.objects.all(),
+        tenant_lookup='article__entreprise_id',
+        source='conditionnement',
+        write_only=True,
+        required=False,
+        allow_null=True,
+    )
     devise = DeviseSerializer(read_only=True)
     devise_reference = DeviseSerializer(read_only=True)
     devise_id = TenantPrimaryKeyRelatedField(
@@ -428,11 +489,34 @@ class LigneSortieSerializer(serializers.ModelSerializer):
     lots_utilises = serializers.SerializerMethodField(read_only=True)
     benefices_lots = serializers.SerializerMethodField(read_only=True)
     quantite = LocalizedDecimalField(max_digits=12, decimal_places=5, required=False, allow_null=True)
+    prix_conditionnement = LocalizedDecimalField(
+        max_digits=14,
+        decimal_places=5,
+        required=False,
+        allow_null=True,
+    )
+    quantite_conditionnement = LocalizedDecimalField(
+        max_digits=12,
+        decimal_places=5,
+        required=False,
+        allow_null=True,
+        read_only=True,
+    )
+    montant_total = LocalizedDecimalField(
+        max_digits=14,
+        decimal_places=5,
+        required=False,
+        allow_null=True,
+        read_only=True,
+    )
+    motif_prix_exception = serializers.CharField(required=False, allow_blank=True, max_length=500)
     
     class Meta:
         model = LigneSortie
         fields = [
-            'id', 'article', 'article_id', 'quantite', 'prix_unitaire',
+            'id', 'article', 'article_id', 'conditionnement', 'conditionnement_id',
+            'quantite', 'quantite_conditionnement', 'prix_unitaire', 'prix_conditionnement',
+            'montant_total', 'motif_prix_exception',
             'date_sortie', 'sortie', 'devise', 'devise_id', 'devise_reference', 'taux_change', 'montant_reference',
             'lots_utilises', 'benefices_lots'
         ]
@@ -469,6 +553,12 @@ class LigneSortieSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if not attrs.get('devise'):
             raise serializers.ValidationError(_('Le champ devise est obligatoire pour chaque ligne de sortie.'))
+        article = attrs.get('article')
+        conditionnement = attrs.get('conditionnement')
+        if conditionnement is not None and article is not None and conditionnement.article_id != article.article_id:
+            raise serializers.ValidationError({
+                'conditionnement_id': _('Le conditionnement ne correspond pas à l’article.'),
+            })
         return attrs
 
 
@@ -1381,7 +1471,7 @@ class DettesClientsSerializer(DettesClientsListSerializer):
                 'article_nom': nom,
                 'quantite': qte,
                 'prix_unitaire': pu,
-                'montant_ligne': (qte * pu).quantize(Decimal('0.00001')),
+                'montant_ligne': ligne.get_montant_total(),
                 'devise': ligne.devise.sigle if ligne.devise_id else None,
             })
         return rows

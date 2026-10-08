@@ -338,11 +338,21 @@ class MP2258Printer:
             article = getattr(ligne, "article", None)
             nom = _article_display_name(article).strip() or "Article"
 
-            qte_raw = getattr(ligne, "quantite", 0) or 0
-            pu_raw = getattr(ligne, "prix_unitaire", 0) or 0
+            qte_base_raw = getattr(ligne, "quantite", 0) or 0
+            pu_base_raw = getattr(ligne, "prix_unitaire", 0) or 0
+            qte_raw = getattr(ligne, "quantite_conditionnement", None) or qte_base_raw
+            pu_raw = getattr(ligne, "prix_conditionnement", None)
+            pu_raw = pu_raw if pu_raw is not None else pu_base_raw
+            qte_base = Decimal(str(qte_base_raw or 0))
+            pu_base = Decimal(str(pu_base_raw or 0))
             qte = Decimal(str(qte_raw or 0))
             pu = Decimal(str(pu_raw or 0))
-            tot = (qte * pu).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            get_total = getattr(ligne, "get_montant_total", None)
+            tot = Decimal(str(get_total() if callable(get_total) else qte_base * pu_base))
+            tot = tot.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+            conditionnement = getattr(ligne, "conditionnement", None)
+            if conditionnement and getattr(conditionnement, "nom", None):
+                nom = f"{nom} ({conditionnement.nom})"
             total_general = (total_general + tot).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
             line_devise = getattr(ligne, "devise", None) or devise_sortie
             line_currency = _currency_label(line_devise)
@@ -406,11 +416,21 @@ class MP2258Printer:
             article = getattr(ligne, "article", None)
             nom = _article_display_name(article).strip() or "Article"
 
-            qte_raw = getattr(ligne, "quantite", 0) or 0
-            pu_raw = getattr(ligne, "prix_unitaire", 0) or 0
+            qte_base_raw = getattr(ligne, "quantite", 0) or 0
+            pu_base_raw = getattr(ligne, "prix_unitaire", 0) or 0
+            qte_raw = getattr(ligne, "quantite_conditionnement", None) or qte_base_raw
+            pu_raw = getattr(ligne, "prix_conditionnement", None)
+            pu_raw = pu_raw if pu_raw is not None else pu_base_raw
+            qte_base = Decimal(str(qte_base_raw or 0))
+            pu_base = Decimal(str(pu_base_raw or 0))
             qte = Decimal(str(qte_raw or 0))
             pu = Decimal(str(pu_raw or 0))
-            tot = (qte * pu).quantize(Decimal("0.00001"), rounding=ROUND_DOWN)
+            get_total = getattr(ligne, "get_montant_total", None)
+            tot = Decimal(str(get_total() if callable(get_total) else qte_base * pu_base))
+            tot = tot.quantize(Decimal("0.00001"), rounding=ROUND_DOWN)
+            conditionnement = getattr(ligne, "conditionnement", None)
+            if conditionnement and getattr(conditionnement, "nom", None):
+                nom = f"{nom} ({conditionnement.nom})"
             total_general = (total_general + tot).quantize(Decimal("0.00001"), rounding=ROUND_DOWN)
 
             qte_s = _fmt_qty(qte_raw, max_decimals=3)
@@ -712,4 +732,3 @@ class MP2258Printer:
         (source commune avec la facture, libellés reçus uniquement).
         """
         return self._print_ticket_lines(self.build_recu_vente_ticket_lines(sortie, entreprise, user))
-

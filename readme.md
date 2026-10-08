@@ -289,7 +289,9 @@ Le catalogue est le fondement de toute l'activité commerciale : ventes, stocks,
 
 #### Prix et stock
 
-Les **prix d'achat** et **prix de vente** sont définis au niveau des **lignes d'entrée** (lots), pas directement sur l'article. Cela permet une gestion fine des marges par lot d'approvisionnement.
+Le **coût d'achat** et la traçabilité FIFO restent enregistrés sur chaque **ligne d'entrée** (lot). Le **tarif commercial courant**, lui, est géré séparément par article et par conditionnement ; le modifier ne crée pas d'approvisionnement et ne modifie aucune vente passée.
+
+Depuis l'écran Tarification, un administrateur peut définir le prix de l'unité de base ou le prix de chaque conditionnement, avec sa devise. Le POS propose ce tarif aux prochaines ventes et le convertit dans la devise de vente au taux actif. Si aucun tarif indépendant n'est défini pour ce conditionnement, le système conserve son ancien comportement de repli sur le prix FIFO.
 
 #### Recherche avancée
 
@@ -491,11 +493,22 @@ Enregistrer toute sortie de produits et **diminuer automatiquement** le stock.
 ```
 1. Sélection du client (optionnel)
 2. Ajout des articles et quantités
-3. Définition du prix unitaire (ou prix moyen des lots FIFO)
+3. Proposition du prix du premier lot disponible en FIFO, ajusté au conditionnement choisi
 4. Choix de la devise
 5. Choix du mode : PAYEE ou EN_CREDIT
 6. Validation → stock + caisse + documents mis à jour
 ```
+
+#### Contrat de prix, devise et exceptions
+
+- Le POS envoie `prix_conditionnement` avec le nombre de conditionnements dans `quantite`. Le serveur conserve le prix et la quantité saisis, calcule le prix unitaire de base et enregistre le montant exact de la ligne.
+- Les intégrations historiques peuvent continuer à envoyer `prix_unitaire`, interprété comme un prix par unité de base.
+- Les tarifs courants sont enregistrés indépendamment des approvisionnements via `POST /api/tarifs-vente/` (`article_id`, `conditionnement_id` nul pour l'unité de base, `prix`, `devise_id`). La même requête met à jour le tarif de cette unité ; elle n'écrit ni stock ni mouvement de caisse.
+- Le prix de référence proposé est celui du premier lot disponible en FIFO. Il est converti dans la devise de vente au taux de change actif ; les coûts FIFO sont convertis dans cette même devise pour calculer la marge.
+- Un prix nul ou un montant de ligne inférieur au coût FIFO nécessite un utilisateur administrateur (ou superutilisateur) et un `motif_prix_exception` obligatoire. Les ventes au prix du coût ou au-dessus ne requièrent pas cette exception.
+- La caisse enregistre les montants exacts dans la devise de vente de chaque ligne. Une dette est totalisée dans la devise de référence de l'entreprise à partir du taux figé au moment de la vente. Les rapports utilisent les montants exacts enregistrés.
+- Les modifications de vente doivent passer par `PUT/PATCH /api/sorties/{id}/`, qui recalcule stock FIFO, caisse, dette et bénéfice. `/api/lignesorties/` est en lecture seule afin d'éviter des écritures qui contourneraient ces règles.
+- Le POS peut obtenir une proposition avec `GET /api/sorties/prix-fifo/?article_id=...&conditionnement_id=...&devise_id=...` et convertir un prix saisi avec `POST /api/sorties/convertir-prix/`.
 
 #### Modes de paiement
 
@@ -523,7 +536,7 @@ Permettre la vente à crédit avec une logique **simple et vérifiable** (montan
 
 1. Création d'une sortie avec statut **`EN_CREDIT`** (client obligatoire).
 2. Création automatique d'une **`DettesClients`** liée à la sortie :
-   - `montant` = Σ (`prix_unitaire` × `quantite`) des `LignesSorties`
+   - `montant` = somme des montants exacts des lignes de vente
    - `paye = 0`, `reste = montant`, `status = ENCOURS`
 3. Statuts uniquement : **`ENCOURS`** | **`TERMINE`** (`reste = 0` → `TERMINE`).
 4. Paiements partiels via **`PaiementDettesClients`** (`dettes_clients`, `montant`, `date`).

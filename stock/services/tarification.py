@@ -1,5 +1,5 @@
 """
-Catalogue de tarification : tous les articles du tenant avec leur dernier prix de vente.
+Catalogue de tarification : tarifs courants, puis derniers prix d'approvisionnement.
 
 Les articles jamais approvisionnés apparaissent aussi, avec prix = null (placeholder UI).
 """
@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 from django.db.models import Prefetch, Q
 
-from stock.models import Article, ConditionnementArticle, LigneEntree
+from stock.models import Article, ConditionnementArticle, LigneEntree, TarifVente
 from stock.services.requisition import PRIX_PLACEHOLDER, designation_article
 
 # Réexport pour l'API / docs frontend
@@ -73,7 +73,7 @@ def _devise_sigle(devise: dict[str, Any] | None) -> str | None:
     return devise.get('sigle') or devise.get('symbole') or None
 
 
-def _build_latest_price_maps(article_ids: Iterable[str]) -> tuple[dict, dict]:
+def _build_latest_price_maps(article_ids: Iterable[str]) -> tuple[dict, dict, dict]:
     """
     Retourne :
     - by_article[article_id] = {prix_vente_base, prix_vente_conditionnement, date, conditionnement_id, devise}
@@ -82,8 +82,9 @@ def _build_latest_price_maps(article_ids: Iterable[str]) -> tuple[dict, dict]:
     ids = list(article_ids)
     by_article: dict[str, dict] = {}
     by_cond: dict[tuple[str, int | None], dict] = {}
+    by_tarif: dict[tuple[str, int | None], dict] = {}
     if not ids:
-        return by_article, by_cond
+        return by_article, by_cond, by_tarif
 
     rows = (
         LigneEntree.objects.filter(article_id__in=ids)
@@ -138,7 +139,20 @@ def _build_latest_price_maps(article_ids: Iterable[str]) -> tuple[dict, dict]:
                 'devise': devise,
             }
 
-    return by_article, by_cond
+    tariffs = (
+        TarifVente.objects.filter(article_id__in=ids)
+        .select_related('devise', 'conditionnement')
+        .order_by('article_id', 'conditionnement_id')
+    )
+    for tariff in tariffs:
+        by_tarif[(tariff.article_id, tariff.conditionnement_id)] = {
+            'id': tariff.pk,
+            'prix': tariff.prix,
+            'date': tariff.updated_at,
+            'devise': _serialize_devise(tariff.devise),
+        }
+
+    return by_article, by_cond, by_tarif
 
 
 def _prix_conditionnement(
@@ -147,23 +161,26 @@ def _prix_conditionnement(
     cond: ConditionnementArticle,
     by_article: dict,
     by_cond: dict,
+    by_tarif: dict,
 ) -> dict[str, Any]:
-    """Dernier prix packing ; fallback base × multiplicateur si packing jamais entré."""
+    """Tarif du conditionnement, sinon dernier prix d'entrée ou prix de base dérivé."""
+    tariff = by_tarif.get((article_id, cond.pk))
     hit = by_cond.get((article_id, cond.pk))
-    prix = hit['prix_vente_conditionnement'] if hit else None
-    date = hit['date_dernier_prix'] if hit else None
-    source = 'ligne_entree' if hit else None
-    devise = hit.get('devise') if hit else None
+    prix = tariff['prix'] if tariff else hit['prix_vente_conditionnement'] if hit else None
+    date = tariff['date'] if tariff else hit['date_dernier_prix'] if hit else None
+    source = 'tarif_vente' if tariff else 'ligne_entree' if hit else None
+    devise = tariff['devise'] if tariff else hit.get('devise') if hit else None
 
     if prix is None:
+        base_tariff = by_tarif.get((article_id, None))
         base_info = by_article.get(article_id) or {}
-        base = base_info.get('prix_vente_unitaire_base')
+        base = base_tariff['prix'] if base_tariff else base_info.get('prix_vente_unitaire_base')
         mult = _dec(cond.multiplicateur_base) or Decimal('1')
         if base is not None and mult > 0:
             prix = (base * mult).quantize(MONEY_QUANT)
-            date = base_info.get('date_dernier_prix')
-            source = 'derive_unitaire_base'
-            devise = base_info.get('devise')
+            date = base_tariff['date'] if base_tariff else base_info.get('date_dernier_prix')
+            source = 'tarif_vente' if base_tariff else 'derive_unitaire_base'
+            devise = base_tariff['devise'] if base_tariff else base_info.get('devise')
 
     manquant = prix is None
     return {
@@ -186,11 +203,13 @@ def serialize_article_tarification(
     *,
     by_article: dict,
     by_cond: dict,
+    by_tarif: dict,
 ) -> dict[str, Any]:
     info = by_article.get(article.article_id) or {}
-    prix_base = info.get('prix_vente_unitaire_base')
+    base_tariff = by_tarif.get((article.article_id, None))
+    prix_base = base_tariff['prix'] if base_tariff else info.get('prix_vente_unitaire_base')
     manquant = prix_base is None
-    devise = info.get('devise')
+    devise = base_tariff['devise'] if base_tariff else info.get('devise')
     stock = getattr(article, 'stock', None)
     unite = article.unite if article.unite_id else None
 
@@ -200,6 +219,7 @@ def serialize_article_tarification(
             cond=cond,
             by_article=by_article,
             by_cond=by_cond,
+            by_tarif=by_tarif,
         )
         for cond in article.conditionnements.all()
     ]
@@ -222,10 +242,13 @@ def serialize_article_tarification(
         'prix_vente_affiche': PRIX_PLACEHOLDER if manquant else _fmt_price(prix_base),
         'prix_manquant': manquant,
         'date_dernier_prix': (
-            info['date_dernier_prix'].isoformat()
-            if info.get('date_dernier_prix') else None
+            base_tariff['date'].isoformat()
+            if base_tariff else (
+                info['date_dernier_prix'].isoformat()
+                if info.get('date_dernier_prix') else None
+            )
         ),
-        'source_prix': 'ligne_entree' if info else None,
+        'source_prix': 'tarif_vente' if base_tariff else 'ligne_entree' if info else None,
         'devise': devise,
         'devise_sigle': _devise_sigle(devise),
         'conditionnements': conditionnements,
@@ -293,9 +316,9 @@ def build_tarification_page(
     articles: list[Article],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Sérialise une page d'articles + résumé global de la page."""
-    by_article, by_cond = _build_latest_price_maps(a.article_id for a in articles)
+    by_article, by_cond, by_tarif = _build_latest_price_maps(a.article_id for a in articles)
     results = [
-        serialize_article_tarification(a, by_article=by_article, by_cond=by_cond)
+        serialize_article_tarification(a, by_article=by_article, by_cond=by_cond, by_tarif=by_tarif)
         for a in articles
     ]
     sans = sum(1 for r in results if r['prix_manquant'])

@@ -46,8 +46,12 @@ def parse_achats_filters(request) -> dict[str, Any]:
 
 
 def _montant_ligne_expr():
-    return ExpressionWrapper(
-        F('quantite') * F('prix_unitaire'),
+    return Coalesce(
+        F('montant_total'),
+        ExpressionWrapper(
+            F('quantite') * F('prix_unitaire'),
+            output_field=DecimalField(max_digits=14, decimal_places=5),
+        ),
         output_field=DecimalField(max_digits=14, decimal_places=5),
     )
 
@@ -145,7 +149,7 @@ def serialize_achat_ligne(ligne: LigneSortie) -> dict:
     sortie = ligne.sortie
     montant = getattr(ligne, 'montant_ligne', None)
     if montant is None:
-        montant = _q5(ligne.quantite * ligne.prix_unitaire)
+        montant = _q5(ligne.get_montant_total())
     return {
         'id': ligne.pk,
         'sortie_id': ligne.sortie_id,

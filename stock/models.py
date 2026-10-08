@@ -457,6 +457,64 @@ class PrixConditionnementEntree(models.Model):
         return f"Ligne {self.ligne_entree_id} - {self.conditionnement.nom}: {self.prix_vente}"
 
 
+class TarifVente(models.Model):
+    """Tarif commercial courant, indépendant des lots d'approvisionnement."""
+
+    article = models.ForeignKey(
+        Article,
+        on_delete=models.CASCADE,
+        related_name='tarifs_vente',
+    )
+    conditionnement = models.ForeignKey(
+        ConditionnementArticle,
+        on_delete=models.CASCADE,
+        related_name='tarifs_vente',
+        null=True,
+        blank=True,
+    )
+    prix = models.DecimalField(max_digits=14, decimal_places=5)
+    devise = models.ForeignKey(
+        'Devise',
+        on_delete=models.PROTECT,
+        related_name='tarifs_vente',
+    )
+    modifie_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='tarifs_vente_modifies',
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['article_id', 'conditionnement_id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['article', 'conditionnement'],
+                condition=models.Q(conditionnement__isnull=False),
+                name='uniq_tarif_vente_article_conditionnement',
+            ),
+            models.UniqueConstraint(
+                fields=['article'],
+                condition=models.Q(conditionnement__isnull=True),
+                name='uniq_tarif_vente_article_base',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=['article', 'conditionnement'],
+                name='stock_tarif_article_cond_idx',
+            ),
+            models.Index(fields=['updated_at'], name='stock_tarif_updated_idx'),
+        ]
+
+    def __str__(self):
+        unite = self.conditionnement.nom if self.conditionnement_id else 'unité de base'
+        return f"{self.article_id} - {unite}: {self.prix} {self.devise.sigle}"
+
+
 class Stock(models.Model):
     article = models.OneToOneField(Article, on_delete=models.CASCADE)
     Qte = models.DecimalField(max_digits=12, decimal_places=5, default=0)
@@ -672,8 +730,19 @@ class LigneSortie(models.Model):
     
     sortie = models.ForeignKey(Sortie, related_name='lignes', on_delete=models.CASCADE)
     article = models.ForeignKey(Article, related_name='sorties', on_delete=models.CASCADE)
+    conditionnement = models.ForeignKey(
+        ConditionnementArticle,
+        on_delete=models.PROTECT,
+        related_name='lignes_sortie',
+        null=True,
+        blank=True,
+    )
+    quantite_conditionnement = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
+    prix_conditionnement = models.DecimalField(max_digits=14, decimal_places=5, null=True, blank=True)
     quantite = models.DecimalField(max_digits=12, decimal_places=5)
     prix_unitaire = models.DecimalField(max_digits=10, decimal_places=5, default=0, help_text="Prix réellement encaissé (peut différer du prix de vente du lot en cas de promotion/réduction)")
+    montant_total = models.DecimalField(max_digits=14, decimal_places=5, null=True, blank=True)
+    motif_prix_exception = models.CharField(max_length=500, blank=True, default='')
     date_sortie = models.DateTimeField(auto_now_add=True)
     # Devise de la ligne de sortie (nullable)
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='lignesorties', null=True, blank=True)
@@ -703,6 +772,11 @@ class LigneSortie(models.Model):
             if total_quantite > 0:
                 return total_cout / total_quantite
         return Decimal('0.00')
+
+    def get_montant_total(self):
+        if self.montant_total is not None:
+            return self.montant_total
+        return (self.prix_unitaire or Decimal('0')) * Decimal(str(self.quantite or 0))
 
 
 class LigneSortieLot(models.Model):
@@ -1354,4 +1428,3 @@ from caisse.models import (  # noqa: E402, F401
     SessionCaisse,
     TypeCaisse,
 )
-

@@ -130,7 +130,7 @@ def build_journal_report_data(
             dev = lig.devise or principal_devise
             sigle = dev.sigle if dev else 'N/A'
             total_par_devise[sigle] = (
-                total_par_devise.get(sigle, Decimal('0')) + lig.quantite * lig.prix_unitaire
+                total_par_devise.get(sigle, Decimal('0')) + lig.get_montant_total()
             )
         montant_str = (
             ', '.join(
