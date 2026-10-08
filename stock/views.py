@@ -3620,7 +3620,20 @@ class DettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
 
     @swagger_auto_schema(
         operation_summary='Reste dû regroupé par client',
-        manual_parameters=_DETTE_DATE_PARAMS,
+        manual_parameters=_DETTE_DATE_PARAMS + [
+            openapi.Parameter(
+                'search', openapi.IN_QUERY, type=openapi.TYPE_STRING,
+                description='Recherche par nom ou code client.',
+            ),
+            openapi.Parameter(
+                'page', openapi.IN_QUERY, type=openapi.TYPE_INTEGER,
+                description='Numéro de page.',
+            ),
+            openapi.Parameter(
+                'page_size', openapi.IN_QUERY, type=openapi.TYPE_INTEGER,
+                description='Nombre de clients par page (maximum 200).',
+            ),
+        ],
         tags=['Dettes clients'],
         responses={200: openapi.Response('Par client', schema=openapi.Schema(type=openapi.TYPE_OBJECT))},
     )
@@ -3631,6 +3644,13 @@ class DettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         qs = self.get_queryset()
         rows = totaux_par_client_qs(qs, only_positif=True)
         total_all = totaux_reste(qs)
+        # Recherche serveur (nom ou code client) : indispensable avec la pagination,
+        # sinon un client hors de la page courante est introuvable.
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            rows = rows.filter(
+                Q(sortie__client__nom__icontains=search) | Q(sortie__client_id__icontains=search)
+            )
         page = self.paginate_queryset(rows)
         if page is not None:
             clients = enrichir_clients_devise(qs, page)

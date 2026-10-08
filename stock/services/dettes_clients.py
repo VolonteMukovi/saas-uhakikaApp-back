@@ -245,7 +245,7 @@ def totaux_par_client_qs(qs, *, only_positif: bool = True):
         qs.filter(sortie__client__isnull=False)
         .values("sortie__client_id", "sortie__client__nom")
         .annotate(total_reste=Sum("reste"))
-        .order_by("sortie__client__nom")
+        .order_by("sortie__client__nom", "sortie__client_id")
     )
     if only_positif:
         rows = rows.filter(total_reste__gt=0)

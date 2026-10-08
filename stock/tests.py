@@ -1391,3 +1391,24 @@ class DettesClientsApiTests(APITestCase):
         self.assertEqual(fiche.status_code, 200)
         self.assertIn('articles', fiche.json())
         self.assertIn('paiements', fiche.json())
+
+    def test_par_clients_pagination_et_recherche_serveur(self):
+        """Clients au-delà de la 1re page accessibles (pagination + recherche côté serveur)."""
+        principal = self.client_fiche
+        for i in range(3):
+            self.client_fiche = Client.objects.create(id=f'CLI-P{i}', nom=f'Client Page {i}')
+            ClientEntreprise.objects.create(client=self.client_fiche, entreprise=self.entreprise)
+            self._creer_sortie_credit(prix='10')
+        self.client_fiche = principal
+
+        page2 = self.client.get('/api/dettes-clients/par-clients/', {'page': 2, 'page_size': 2})
+        self.assertEqual(page2.status_code, 200, page2.content)
+        body = page2.json()
+        self.assertEqual(body['count'], 3)
+        self.assertEqual([c['client_id'] for c in body['clients']], ['CLI-P2'])
+        self.assertEqual(body['total_reste'], '30.00000')
+
+        found = self.client.get('/api/dettes-clients/par-clients/', {'search': 'page 2', 'page_size': 2})
+        self.assertEqual([c['client_id'] for c in found.json()['clients']], ['CLI-P2'])
+        by_code = self.client.get('/api/dettes-clients/par-clients/', {'search': 'cli-p1'})
+        self.assertEqual([c['client_id'] for c in by_code.json()['clients']], ['CLI-P1'])
