@@ -1353,11 +1353,20 @@ class PaiementDettesClientsNestedSerializer(serializers.ModelSerializer):
 
 class PaiementDettesClientsSerializer(serializers.ModelSerializer):
     date = serializers.DateField(required=False)
+    type_caisse_id = serializers.IntegerField(write_only=True, min_value=1)
     dette = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = PaiementDettesClients
-        fields = ['id', 'dettes_clients', 'montant', 'date', 'created_at', 'dette']
+        fields = [
+            'id',
+            'dettes_clients',
+            'montant',
+            'date',
+            'created_at',
+            'dette',
+            'type_caisse_id',
+        ]
         read_only_fields = ['id', 'created_at', 'dette']
 
     def validate_montant(self, value):
@@ -1381,10 +1390,14 @@ class PaiementDettesClientsSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         from stock.services.dettes_clients import enregistrer_paiement
 
+        type_caisse_id = validated_data.pop('type_caisse_id')
+        request = self.context.get('request')
         return enregistrer_paiement(
             validated_data['dettes_clients'],
             montant=validated_data['montant'],
             date_paiement=validated_data.get('date'),
+            type_caisse_id=type_caisse_id,
+            utilisateur=request.user if request is not None else None,
         )
 
 

@@ -8,7 +8,7 @@ from rest_framework.test import APITestCase
 
 from django.utils import timezone
 
-from caisse.models import MouvementCaisse, TypeCaisse
+from caisse.models import MouvementCaisse, SessionCaisse, TypeCaisse
 from caisse.services.caisse import creer_mouvement_caisse
 from stock.models import (
     Article,
@@ -466,7 +466,11 @@ class ClientLifecycleApiTests(APITestCase):
         dette = DettesClients.objects.get(sortie__client=self.client_fiche)
         pay = self.client.post(
             '/api/paiements-dettes-clients/',
-            {'dettes_clients': dette.pk, 'montant': '200'},
+            {
+                'dettes_clients': dette.pk,
+                'montant': '200',
+                'type_caisse_id': self.type_caisse.pk,
+            },
             format='json',
         )
         self.assertEqual(pay.status_code, 201, pay.content)
@@ -1778,6 +1782,24 @@ class DettesClientsApiTests(APITestCase):
             est_principal=True,
             entreprise=self.entreprise,
         )
+        self.caisse = TypeCaisse.objects.create(
+            nom='Caisse principale',
+            libelle='Caisse principale',
+            code_type='CASH',
+            devise=self.devise,
+            entreprise=self.entreprise,
+            is_active=True,
+            est_defaut=True,
+        )
+        self.session_caisse = SessionCaisse.objects.create(
+            numero='TEST-DETTE-SESSION',
+            type_caisse=self.caisse,
+            devise=self.devise,
+            entreprise=self.entreprise,
+            ouvert_le=timezone.now(),
+            solde_ouverture=Decimal('0'),
+            statut='OUVERTE',
+        )
         self.unite = Unite.objects.create(libelle='pc', entreprise=self.entreprise)
         self.type_article = TypeArticle.objects.create(libelle='Divers', entreprise=self.entreprise)
         self.sous_type = SousTypeArticle.objects.create(
@@ -1833,9 +1855,22 @@ class DettesClientsApiTests(APITestCase):
         dette = DettesClients.objects.get(sortie__client=self.client_fiche)
         self.assertEqual(dette.reste, Decimal('500.00000'))
 
+        missing_caisse = self.client.post(
+            '/api/paiements-dettes-clients/',
+            {'dettes_clients': dette.pk, 'montant': '100'},
+            format='json',
+        )
+        self.assertEqual(missing_caisse.status_code, 400, missing_caisse.content)
+        self.assertEqual(PaiementDettesClients.objects.filter(dettes_clients=dette).count(), 0)
+
         r1 = self.client.post(
             '/api/paiements-dettes-clients/',
-            {'dettes_clients': dette.pk, 'montant': '100', 'date': '2026-09-01'},
+            {
+                'dettes_clients': dette.pk,
+                'montant': '100',
+                'date': '2026-09-01',
+                'type_caisse_id': self.caisse.pk,
+            },
             format='json',
         )
         self.assertEqual(r1.status_code, 201, r1.content)
@@ -1843,10 +1878,19 @@ class DettesClientsApiTests(APITestCase):
         self.assertEqual(dette.paye, Decimal('100.00000'))
         self.assertEqual(dette.reste, Decimal('400.00000'))
         self.assertEqual(dette.status, DettesClients.STATUS_ENCOURS)
+        first_movement = MouvementCaisse.objects.get(reference_piece=f"PAI-DET-{r1.json()['id']}")
+        self.assertEqual(first_movement.type, 'ENTREE')
+        self.assertEqual(first_movement.montant, Decimal('100.00000'))
+        self.assertEqual(first_movement.session_caisse, self.session_caisse)
 
         r2 = self.client.post(
             '/api/paiements-dettes-clients/',
-            {'dettes_clients': dette.pk, 'montant': '400', 'date': '2026-09-10'},
+            {
+                'dettes_clients': dette.pk,
+                'montant': '400',
+                'date': '2026-09-10',
+                'type_caisse_id': self.caisse.pk,
+            },
             format='json',
         )
         self.assertEqual(r2.status_code, 201, r2.content)
@@ -1854,10 +1898,19 @@ class DettesClientsApiTests(APITestCase):
         self.assertEqual(dette.reste, Decimal('0.00000'))
         self.assertEqual(dette.status, DettesClients.STATUS_TERMINE)
         self.assertEqual(PaiementDettesClients.objects.filter(dettes_clients=dette).count(), 2)
+        from caisse.services.session_caisse import calculer_totaux_session
+        self.assertEqual(
+            calculer_totaux_session(self.session_caisse)['total_entrees'],
+            Decimal('500.00000'),
+        )
 
         r3 = self.client.post(
             '/api/paiements-dettes-clients/',
-            {'dettes_clients': dette.pk, 'montant': '1'},
+            {
+                'dettes_clients': dette.pk,
+                'montant': '1',
+                'type_caisse_id': self.caisse.pk,
+            },
             format='json',
         )
         self.assertEqual(r3.status_code, 400, r3.content)

@@ -3672,6 +3672,7 @@ class PaiementDettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, v
         operation_summary='Enregistrer un paiement (partiel ou total)',
         operation_description=(
             'Écriture critique : envoyer l’en-tête `Idempotency-Key` (UUID). '
+            'Envoyer également `type_caisse_id` pour créditer la caisse choisie. '
             'La réponse inclut `dette` (paye / reste / status) à jour.'
         ),
         request_body=PaiementDettesClientsSerializer,

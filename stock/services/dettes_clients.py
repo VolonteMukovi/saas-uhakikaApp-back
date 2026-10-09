@@ -134,8 +134,10 @@ def enregistrer_paiement(
     *,
     montant,
     date_paiement=None,
+    type_caisse_id: int,
+    utilisateur=None,
 ) -> PaiementDettesClients:
-    """Enregistre un paiement partiel ou total et recalcule paye / reste / status."""
+    """Enregistre le paiement et son encaissement, puis recalcule le solde de la dette."""
     dette = DettesClients.objects.select_for_update().get(pk=dette.pk)
 
     if dette.status == DettesClients.STATUS_TERMINE or dette.reste <= 0:
@@ -160,6 +162,31 @@ def enregistrer_paiement(
         montant=montant_paye,
         date=_as_date(date_paiement),
     )
+    from caisse.services.caisse import creer_mouvement_caisse
+
+    sortie = dette.sortie
+    devise = sortie.devise
+    if devise is None:
+        ligne_devisee = sortie.lignes.filter(devise__isnull=False).select_related('devise').first()
+        devise = ligne_devisee.devise if ligne_devisee else None
+    if devise is None:
+        raise serializers.ValidationError(
+            {'devise': "La devise de la vente est requise pour encaisser ce paiement."}
+        )
+    creer_mouvement_caisse(
+        montant=montant_paye,
+        devise=devise,
+        type_mouvement='ENTREE',
+        entreprise_id=sortie.entreprise_id,
+        succursale_id=sortie.succursale_id,
+        content_object=paiement,
+        utilisateur=utilisateur,
+        reference_piece=f'PAI-DET-{paiement.pk}',
+        motif=f'Paiement dette client #{dette.pk}',
+        type_caisse_id=type_caisse_id,
+        categorie='AUTRE',
+    )
+
     # Mise à jour incrémentale sous verrou (évite un 2e SUM SQL inutile)
     dette.paye = _q(dette.paye) + montant_paye
     dette.reste = _q(dette.montant) - dette.paye

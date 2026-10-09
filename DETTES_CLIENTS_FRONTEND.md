@@ -158,9 +158,12 @@ Accept: application/json; version=1.0
 {
   "dettes_clients": 1,
   "montant": "100.00000",
-  "date": "2026-09-10"
+  "date": "2026-09-10",
+  "type_caisse_id": 3
 }
 ```
+
+`type_caisse_id` est obligatoire : le paiement crée également une entrée dans cette caisse (et dans sa session ouverte, si elle en exige une). Un paiement invalide ou une caisse non disponible annule l'ensemble de l'opération.
 
 Réponse `201` (extrait) :
 
