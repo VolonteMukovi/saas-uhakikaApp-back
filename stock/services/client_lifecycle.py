@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_DOWN
 
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, Sum
+from django.db.models import Case, Count, DecimalField, ExpressionWrapper, F, Sum, When
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
@@ -21,6 +21,25 @@ _LINE_TOTAL = ExpressionWrapper(
     Coalesce(
         F("montant_total"),
         ExpressionWrapper(F("quantite") * F("prix_unitaire"), output_field=_MONEY_FIELD),
+    ),
+    output_field=_MONEY_FIELD,
+)
+_LINE_REFERENCE_TOTAL = Case(
+    When(devise_reference__isnull=False, then=F("montant_reference")),
+    default=_LINE_TOTAL,
+    output_field=_MONEY_FIELD,
+)
+_SORTIE_LINE_REFERENCE_TOTAL = Case(
+    When(lignes__devise_reference__isnull=False, then=F("lignes__montant_reference")),
+    default=ExpressionWrapper(
+        Coalesce(
+            F("lignes__montant_total"),
+            ExpressionWrapper(
+                F("lignes__quantite") * F("lignes__prix_unitaire"),
+                output_field=_MONEY_FIELD,
+            ),
+        ),
+        output_field=_MONEY_FIELD,
     ),
     output_field=_MONEY_FIELD,
 )
@@ -111,18 +130,28 @@ def _dettes_qs(*, client: Client, entreprise_id: int, succursale_id: int | None,
 def _lignes_achats_qs(sorties_qs):
     return (
         LigneSortie.objects.filter(sortie__in=sorties_qs)
-        .select_related("article", "devise", "sortie")
+        .select_related("article", "devise", "devise_reference", "sortie")
         .annotate(line_total=_LINE_TOTAL)
+        .annotate(line_total_reference=_LINE_REFERENCE_TOTAL)
         .order_by("-sortie__date_creation", "-id")
     )
 
 
-def build_produits_achetes(sorties_qs) -> list[dict]:
+def build_produits_achetes(sorties_qs, *, devise_principale=None) -> list[dict]:
     """Lignes produit issues des sorties (jamais des paiements de dettes)."""
     results = []
     for ligne in _lignes_achats_qs(sorties_qs).iterator(chunk_size=200):
         qte = _amount(ligne.quantite)
         pu = _amount(ligne.prix_unitaire)
+        total_origine = _amount(getattr(ligne, "line_total", qte * pu))
+        total_reference = _amount(
+            getattr(ligne, "line_total_reference", total_origine)
+        )
+        devise_reference = ligne.devise_reference
+        devise_affichee = devise_reference or devise_principale or ligne.devise
+        prix_unitaire_reference = (
+            total_reference / qte if qte else pu
+        )
         dt = ligne.sortie.date_creation
         if dt is not None:
             date_str = timezone.localtime(dt).date().isoformat() if timezone.is_aware(dt) else dt.date().isoformat()
@@ -134,9 +163,12 @@ def build_produits_achetes(sorties_qs) -> list[dict]:
                 "produit": _article_nom(ligne.article),
                 "article_id": ligne.article_id,
                 "quantite": f"{qte:.5f}",
-                "prix_unitaire": f"{pu:.5f}",
-                "total": _amount_str(getattr(ligne, "line_total", qte * pu)),
-                "devise": ligne.devise.sigle if ligne.devise_id else None,
+                "prix_unitaire": _amount_str(prix_unitaire_reference),
+                "total": _amount_str(total_reference),
+                "devise": devise_affichee.sigle if devise_affichee else None,
+                "prix_unitaire_origine": f"{pu:.5f}",
+                "total_origine": f"{total_origine:.5f}",
+                "devise_origine": ligne.devise.sigle if ligne.devise_id else None,
                 "sortie_id": ligne.sortie_id,
                 "statut_vente": ligne.sortie.statut,
             }
@@ -166,6 +198,9 @@ def build_client_dashboard(
         succursale_id=succursale_id,
         period=period,
     )
+    from stock.services.currency import get_principal_devise
+
+    devise_principale = get_principal_devise(entreprise_id)
     dettes = _dettes_qs(
         client=client,
         entreprise_id=entreprise_id,
@@ -173,9 +208,11 @@ def build_client_dashboard(
         period=period,
     )
 
-    lignes = LigneSortie.objects.filter(sortie__in=sorties).annotate(line_total=_LINE_TOTAL)
+    lignes = LigneSortie.objects.filter(sortie__in=sorties).annotate(
+        line_total_reference=_LINE_REFERENCE_TOTAL
+    )
     agg = lignes.aggregate(
-        total=Sum("line_total"),
+        total=Sum("line_total_reference"),
         nb_lignes=Count("id"),
     )
     dette_reste = _amount(dettes.aggregate(reste=Sum("reste"))["reste"])
@@ -197,10 +234,14 @@ def build_client_dashboard(
         "nombre_achats": sorties.count(),
         "total_achete": _amount_str(agg["total"]),
         "dette_restante": _amount_str(dette_reste),
+        "devise_principale_sigle": devise_principale.sigle if devise_principale else None,
         "nombre_lignes_produits": agg["nb_lignes"] or 0,
     }
     if include_produits:
-        payload["produits_achetes"] = build_produits_achetes(sorties)
+        payload["produits_achetes"] = build_produits_achetes(
+            sorties,
+            devise_principale=devise_principale,
+        )
     else:
         payload["produits_achetes"] = []
     return payload
@@ -232,6 +273,7 @@ def build_client_balance(*, client: Client, entreprise_id: int, succursale_id: i
         "dette_restante": dashboard["dette_restante"],
         "nombre_achats": dashboard["nombre_achats"],
         "total_achete": dashboard["total_achete"],
+        "devise_principale_sigle": dashboard["devise_principale_sigle"],
     }
 
 
@@ -245,22 +287,14 @@ def build_client_sales(*, client: Client, entreprise_id: int, succursale_id: int
             period=period,
         )
         .annotate(
-            montant_total=Sum(
-                ExpressionWrapper(
-                    Coalesce(
-                        F("lignes__montant_total"),
-                        ExpressionWrapper(
-                            F("lignes__quantite") * F("lignes__prix_unitaire"),
-                            output_field=_MONEY_FIELD,
-                        ),
-                    ),
-                    output_field=_MONEY_FIELD,
-                )
-            ),
+            montant_total=Sum(_SORTIE_LINE_REFERENCE_TOTAL),
             nombre_lignes=Count("lignes"),
         )
         .order_by("-date_creation", "-id")
     )
+    from stock.services.currency import get_principal_devise
+
+    devise_principale = get_principal_devise(entreprise_id)
     results = []
     for sortie in sorties:
         results.append(
@@ -271,6 +305,7 @@ def build_client_sales(*, client: Client, entreprise_id: int, succursale_id: int
                 "type": "VENTE_COMPTANT" if sortie.statut == "PAYEE" else "VENTE_CREDIT",
                 "statut": sortie.statut,
                 "montant_total": _amount_str(sortie.montant_total),
+                "devise_principale_sigle": devise_principale.sigle if devise_principale else None,
                 "nombre_lignes": sortie.nombre_lignes or 0,
                 "motif": sortie.motif or "",
             }
@@ -291,4 +326,9 @@ def build_client_movements(*, client: Client, entreprise_id: int, succursale_id:
         succursale_id=succursale_id,
         period=period,
     )
-    return build_produits_achetes(sorties)
+    from stock.services.currency import get_principal_devise
+
+    return build_produits_achetes(
+        sorties,
+        devise_principale=get_principal_devise(entreprise_id),
+    )

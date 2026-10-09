@@ -165,7 +165,16 @@ def enregistrer_paiement(
     from caisse.services.caisse import creer_mouvement_caisse
 
     sortie = dette.sortie
-    devise = sortie.devise
+    devise = sortie.devise_reference
+    if devise is None:
+        ligne_devisee = (
+            sortie.lignes.filter(devise_reference__isnull=False)
+            .select_related('devise_reference')
+            .first()
+        )
+        devise = ligne_devisee.devise_reference if ligne_devisee else None
+    if devise is None:
+        devise = sortie.devise
     if devise is None:
         ligne_devisee = sortie.lignes.filter(devise__isnull=False).select_related('devise').first()
         devise = ligne_devisee.devise if ligne_devisee else None
@@ -290,9 +299,13 @@ def totaux_par_client_qs(qs, *, only_positif: bool = True):
 
 
 def enrichir_clients_devise(dettes_qs, rows) -> list[dict]:
-    """Ajoute devise_sigle aux lignes client déjà paginées (1 requête devises)."""
+    """Étiquette les soldes convertis dans la devise principale de l'entreprise."""
+    from stock.services.currency import get_principal_devise
+
     client_ids = [r["sortie__client_id"] for r in rows]
-    devises = _devises_par_client(dettes_qs.filter(sortie__client_id__in=client_ids)) if client_ids else {}
+    entreprise_id = dettes_qs.values_list('sortie__entreprise_id', flat=True).first()
+    devise_principale = get_principal_devise(entreprise_id)
+    devise_sigle = devise_principale.sigle if devise_principale else None
     results = []
     for r in rows:
         cid = r["sortie__client_id"]
@@ -301,7 +314,7 @@ def enrichir_clients_devise(dettes_qs, rows) -> list[dict]:
                 "client_id": cid,
                 "client_nom": r["sortie__client__nom"],
                 "total_reste": f"{_q(r['total_reste']):.5f}",
-                "devise_sigle": devises.get(cid),
+                "devise_sigle": devise_sigle,
             }
         )
     return results

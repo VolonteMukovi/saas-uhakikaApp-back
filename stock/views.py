@@ -3522,6 +3522,7 @@ class DettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
                 'paiements',
                 'sortie__lignes__article',
                 'sortie__lignes__devise',
+                'sortie__lignes__devise_reference',
             )
         p = self.request.query_params
         return filter_dettes_qs(
@@ -3613,11 +3614,21 @@ class DettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
             if isinstance(data, dict):
                 data['total_reste'] = f'{total_all:.5f}'
                 data['clients'] = data.get('results', clients)
+                from stock.services.currency import get_principal_devise
+
+                entreprise_id, _ = _get_tenant_ids(request)
+                principal = get_principal_devise(entreprise_id)
+                data['devise_principale_sigle'] = principal.sigle if principal else None
             return resp
         clients = enrichir_clients_devise(qs, list(rows))
+        from stock.services.currency import get_principal_devise
+
+        entreprise_id, _ = _get_tenant_ids(request)
+        principal = get_principal_devise(entreprise_id)
         return Response({
             'clients': clients,
             'total_reste': f'{total_all:.5f}',
+            'devise_principale_sigle': principal.sigle if principal else None,
         })
 
 
@@ -3673,6 +3684,7 @@ class PaiementDettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, v
         operation_description=(
             'Écriture critique : envoyer l’en-tête `Idempotency-Key` (UUID). '
             'Envoyer également `type_caisse_id` pour créditer la caisse choisie. '
+            'À défaut, la caisse principale est utilisée automatiquement. '
             'La réponse inclut `dette` (paye / reste / status) à jour.'
         ),
         request_body=PaiementDettesClientsSerializer,

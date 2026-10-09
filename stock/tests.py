@@ -1855,21 +1855,12 @@ class DettesClientsApiTests(APITestCase):
         dette = DettesClients.objects.get(sortie__client=self.client_fiche)
         self.assertEqual(dette.reste, Decimal('500.00000'))
 
-        missing_caisse = self.client.post(
-            '/api/paiements-dettes-clients/',
-            {'dettes_clients': dette.pk, 'montant': '100'},
-            format='json',
-        )
-        self.assertEqual(missing_caisse.status_code, 400, missing_caisse.content)
-        self.assertEqual(PaiementDettesClients.objects.filter(dettes_clients=dette).count(), 0)
-
         r1 = self.client.post(
             '/api/paiements-dettes-clients/',
             {
                 'dettes_clients': dette.pk,
                 'montant': '100',
                 'date': '2026-09-01',
-                'type_caisse_id': self.caisse.pk,
             },
             format='json',
         )
@@ -1881,6 +1872,7 @@ class DettesClientsApiTests(APITestCase):
         first_movement = MouvementCaisse.objects.get(reference_piece=f"PAI-DET-{r1.json()['id']}")
         self.assertEqual(first_movement.type, 'ENTREE')
         self.assertEqual(first_movement.montant, Decimal('100.00000'))
+        self.assertEqual(first_movement.devise_id, self.devise.pk)
         self.assertEqual(first_movement.session_caisse, self.session_caisse)
 
         r2 = self.client.post(

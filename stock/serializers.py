@@ -1353,7 +1353,7 @@ class PaiementDettesClientsNestedSerializer(serializers.ModelSerializer):
 
 class PaiementDettesClientsSerializer(serializers.ModelSerializer):
     date = serializers.DateField(required=False)
-    type_caisse_id = serializers.IntegerField(write_only=True, min_value=1)
+    type_caisse_id = serializers.IntegerField(write_only=True, min_value=1, required=False)
     dette = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
@@ -1390,10 +1390,25 @@ class PaiementDettesClientsSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         from stock.services.dettes_clients import enregistrer_paiement
 
-        type_caisse_id = validated_data.pop('type_caisse_id')
+        type_caisse_id = validated_data.pop('type_caisse_id', None)
         request = self.context.get('request')
+        dette = validated_data['dettes_clients']
+        if type_caisse_id is None:
+            from caisse.services.caisse_defaut import get_caisse_defaut_session_scope
+
+            caisse_principale = get_caisse_defaut_session_scope(
+                dette.sortie.entreprise_id,
+                dette.sortie.succursale_id,
+            )
+            if caisse_principale is None:
+                raise serializers.ValidationError({
+                    'type_caisse_id': (
+                        "Aucune caisse principale n'est configurée pour cette entreprise."
+                    ),
+                })
+            type_caisse_id = caisse_principale.pk
         return enregistrer_paiement(
-            validated_data['dettes_clients'],
+            dette,
             montant=validated_data['montant'],
             date_paiement=validated_data.get('date'),
             type_caisse_id=type_caisse_id,
@@ -1402,27 +1417,32 @@ class PaiementDettesClientsSerializer(serializers.ModelSerializer):
 
 
 def _devise_sigle_from_sortie(sortie) -> str | None:
-    """Préfère la devise de la sortie (1 jointure) ; fallback lignes préchargées."""
+    """Devise de référence des montants de dette, puis fallback compatibilité."""
     if not sortie:
         return None
-    for attr in ('devise', 'devise_reference'):
-        dev = getattr(sortie, attr, None)
-        sigle = getattr(dev, 'sigle', None) if dev else None
-        if sigle:
-            return str(sigle)
-    # Fallback uniquement si prefetch déjà fait (évite N+1)
+    devise_reference = getattr(sortie, 'devise_reference', None)
+    if devise_reference and devise_reference.sigle:
+        return str(devise_reference.sigle)
     prefetched = getattr(sortie, '_prefetched_objects_cache', {})
+    if 'lignes' in prefetched:
+        sigles_reference = {
+            str(ligne.devise_reference.sigle)
+            for ligne in sortie.lignes.all()
+            if ligne.devise_reference_id and ligne.devise_reference.sigle
+        }
+        if sigles_reference:
+            return sorted(sigles_reference)[0]
+    devise_origine = getattr(sortie, 'devise', None)
+    if devise_origine and devise_origine.sigle:
+        return str(devise_origine.sigle)
     if 'lignes' not in prefetched:
         return None
-    sigles: set[str] = set()
-    for ligne in sortie.lignes.all():
-        dev = getattr(ligne, 'devise', None)
-        sigle = getattr(dev, 'sigle', None) if dev else None
-        if sigle:
-            sigles.add(str(sigle))
-    if not sigles:
-        return None
-    return sorted(sigles)[0]
+    sigles_origine = {
+        str(ligne.devise.sigle)
+        for ligne in sortie.lignes.all()
+        if ligne.devise_id and ligne.devise.sigle
+    }
+    return sorted(sigles_origine)[0] if sigles_origine else None
 
 
 class DettesClientsListSerializer(serializers.ModelSerializer):
@@ -1486,6 +1506,19 @@ class DettesClientsSerializer(DettesClientsListSerializer):
                 'prix_unitaire': pu,
                 'montant_ligne': ligne.get_montant_total(),
                 'devise': ligne.devise.sigle if ligne.devise_id else None,
+                'prix_unitaire_reference': (
+                    Decimal(str(ligne.montant_reference)) / qte
+                    if ligne.devise_reference_id and qte
+                    else pu
+                ),
+                'montant_reference': (
+                    ligne.montant_reference
+                    if ligne.devise_reference_id
+                    else ligne.get_montant_total()
+                ),
+                'devise_reference': (
+                    ligne.devise_reference.sigle if ligne.devise_reference_id else None
+                ),
             })
         return rows
 

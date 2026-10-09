@@ -163,7 +163,7 @@ Accept: application/json; version=1.0
 }
 ```
 
-`type_caisse_id` est obligatoire : le paiement crée également une entrée dans cette caisse (et dans sa session ouverte, si elle en exige une). Un paiement invalide ou une caisse non disponible annule l'ensemble de l'opération.
+`type_caisse_id` est facultatif : sans ce champ, la caisse principale configurée est choisie automatiquement. Le paiement crée également une entrée dans cette caisse (et dans sa session ouverte, si elle en exige une). Un paiement invalide ou une caisse non disponible annule l'ensemble de l'opération.
 
 Réponse `201` (extrait) :
 
