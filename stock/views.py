@@ -31,6 +31,7 @@ from .models import (
     DettesClients,
     PaiementDettesClients,
     LogSuppression,
+    AnnulationMouvement,
 )
 from caisse.models import MouvementCaisse
 from caisse.services.caisse import creer_mouvement_caisse, mouvement_moyen_affiche
@@ -38,6 +39,14 @@ from caisse.services.caisse_defaut import MSG_CAISSE_REQUISE
 from caisse.services.operation_helpers import extract_type_caisse_id
 from stock.services.tenant_context import get_tenant_ids as _get_tenant_ids
 from stock.services.log_suppression import journaliser_lignes_supprimees
+from stock.services.sortie_motif import MSG_SORTIE_NON_COMMERCIALE_CREDIT, est_sortie_commerciale
+from stock.services.annulation_mouvement import (
+    annuler_entree,
+    annuler_sortie,
+    diagnostiquer_annulation_entree,
+    diagnostiquer_annulation_sortie,
+    verifier_non_annule,
+)
 from stock.services.stock_adjustment import (
     apply_stock_delta,
     lots_fifo_verrouilles,
@@ -754,10 +763,53 @@ class SuccursaleViewSet(BusinessPermissionMixin, viewsets.ModelViewSet):
         instance.save()
 
 
-class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+class AnnulationMouvementMixin:
+    """
+    Annulation d'un mouvement de stock (approvisionnement ou sortie) depuis le menu ⋮.
+
+    - GET  {id}/annulation/ : diagnostic (possible, raisons, impact stock et caisse) ;
+    - POST {id}/annuler/    : annulation effective (body optionnel : ``motif``).
+
+    Réservé aux administrateurs de l'entreprise ; la pièce est recherchée dans le
+    périmètre entreprise / succursale du contexte (TenantFilterMixin).
+    """
+
+    annulation_type_mouvement = None
+    annulation_diagnostic = None
+    annulation_executer = None
+
+    def _verifier_admin_annulation(self, request):
+        if not request.user.is_admin(request):
+            raise PermissionDenied(
+                _("Seul un administrateur de l'entreprise peut annuler un mouvement de stock.")
+            )
+
+    def _objet_a_annuler(self):
+        tenant_id, _branch_id = self.get_tenant_ids()
+        if tenant_id:
+            verifier_non_annule(tenant_id, self.annulation_type_mouvement, self.kwargs.get('pk'))
+        return self.get_object()
+
+    @action(detail=True, methods=['get'], url_path='annulation')
+    def annulation(self, request, pk=None):
+        self._verifier_admin_annulation(request)
+        return Response(type(self).annulation_diagnostic(self._objet_a_annuler()))
+
+    @action(detail=True, methods=['post'], url_path='annuler')
+    def annuler(self, request, pk=None):
+        self._verifier_admin_annulation(request)
+        motif = str(request.data.get('motif') or '').strip()[:1000]
+        annulation = type(self).annulation_executer(self._objet_a_annuler(), request.user, motif=motif)
+        return Response(AnnulationMouvementSerializer(annulation).data, status=status.HTTP_200_OK)
+
+
+class SortieViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     """ViewSet pour gérer les sorties de stock (filtré par entreprise/succursale)."""
     queryset = Sortie.objects.all()
     serializer_class = SortieSerializer
+    annulation_type_mouvement = AnnulationMouvement.TYPE_SORTIE
+    annulation_diagnostic = staticmethod(diagnostiquer_annulation_sortie)
+    annulation_executer = staticmethod(annuler_sortie)
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -889,6 +941,9 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             raise serializers.ValidationError({
                 'client': 'Un client est obligatoire pour une vente à crédit.',
             })
+        sortie_commerciale = est_sortie_commerciale(serializer.validated_data.get('motif', ''))
+        if str(statut_demande).upper() == 'EN_CREDIT' and not sortie_commerciale:
+            raise serializers.ValidationError({'statut': MSG_SORTIE_NON_COMMERCIALE_CREDIT})
         from abonnements.services.limites import verifier_vente_sortie
         verifier_vente_sortie(tenant_id, statut_demande, request)
         default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
@@ -1145,8 +1200,9 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             
             # Créer les mouvements de caisse par devise (ENTREE pour vente)
             # Si statut EN_CREDIT, montant = 0 (pas d'impact sur la caisse)
+            # Sortie non commerciale (défectueux, périmé, perte/vol…) : aucun mouvement de caisse.
             type_caisse_id = extract_type_caisse_id(request.data)
-            encaissement_requis = any(
+            encaissement_requis = sortie_commerciale and any(
                 sortie.statut != 'EN_CREDIT' and devise_data['total'] > 0
                 for devise_data in totaux_par_devise.values()
             )
@@ -1161,7 +1217,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 # Si vente en crédit, enregistrer avec montant 0
                 montant_caisse = Decimal('0.00') if sortie.statut == 'EN_CREDIT' else total_devise
                 
-                if total_devise > 0:
+                if total_devise > 0 and sortie_commerciale:
                     devise_mouvement = devise_obj or default_dev
                     snapshot_mouvement = build_conversion_snapshot(
                         entreprise_id=sortie.entreprise_id,
@@ -1426,8 +1482,14 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
             # 3. Vérifier les soldes et créer les mouvements de caisse inverses par devise
             # Mais seulement si la vente était PAYEE (pas EN_CREDIT)
             type_caisse_id = extract_type_caisse_id(request.data)
+            # Sortie non commerciale : rien n'a été encaissé, donc rien à reprendre en caisse
+            # (sauf encaissement historique réellement enregistré).
+            caisse_impactee = est_sortie_commerciale(sortie.motif) or MouvementCaisse.objects.filter(
+                sortie=sortie, type='ENTREE', montant__gt=0,
+            ).exists()
             annulation_caisse_requise = (
                 sortie.statut != 'EN_CREDIT'
+                and caisse_impactee
                 and any(d['total'] > 0 for d in totaux_par_devise.values())
             )
             if annulation_caisse_requise and not type_caisse_id:
@@ -1438,7 +1500,7 @@ class SortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelVi
                 
                 if total_devise > 0:
                     # Si la vente était en crédit, pas besoin d'annuler de mouvement caisse
-                    if sortie.statut == 'EN_CREDIT':
+                    if sortie.statut == 'EN_CREDIT' or not caisse_impactee:
                         continue
                     
                     # Vérifier le solde disponible pour cette devise
@@ -2492,10 +2554,13 @@ def taux_change_collection(request):
     return Response(_serialize_exchange_rate_entry(new_entry, entreprise), status=status.HTTP_201_CREATED)
 
 
-class EntreeViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
+class EntreeViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     """ViewSet pour gérer les entrées de stock avec support multi-devises (filtré par entreprise/succursale)."""
     queryset = Entree.objects.all()
     serializer_class = EntreeSerializer
+    annulation_type_mouvement = AnnulationMouvement.TYPE_ENTREE
+    annulation_diagnostic = staticmethod(diagnostiquer_annulation_entree)
+    annulation_executer = staticmethod(annuler_entree)
 
     def get_queryset(self):
         return super().get_queryset().prefetch_related(
@@ -3826,4 +3891,24 @@ class LogSuppressionViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets
         ordering = (params.get('ordering') or '').strip()
         if ordering.lstrip('-') in self.ORDERING_FIELDS:
             qs = qs.order_by(ordering, '-id')
+        return qs
+
+
+class AnnulationMouvementViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ReadOnlyModelViewSet):
+    """
+    Historique des annulations d'entrées et de sorties de stock (lecture seule).
+    Filtres : `type_mouvement` (ENTREE / SORTIE), `reference_id`.
+    """
+
+    queryset = AnnulationMouvement.objects.select_related('annule_par')
+    serializer_class = AnnulationMouvementSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        params = self.request.query_params
+        type_mouvement = (params.get('type_mouvement') or '').strip().upper()
+        if type_mouvement in (AnnulationMouvement.TYPE_ENTREE, AnnulationMouvement.TYPE_SORTIE):
+            qs = qs.filter(type_mouvement=type_mouvement)
+        if (params.get('reference_id') or '').isdigit():
+            qs = qs.filter(reference_id=int(params['reference_id']))
         return qs

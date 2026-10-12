@@ -10,6 +10,7 @@ from caisse.models import MouvementCaisse, TypeCaisse
 from caisse.services.caisse import creer_mouvement_caisse
 from caisse.services.currency_conversion import prepare_caisse_movement
 from stock.models import Devise, Sortie
+from stock.services.sortie_motif import est_sortie_commerciale
 
 
 def _quantize(amount) -> Decimal:
@@ -101,6 +102,12 @@ def sync_sortie_cash_movements(
     sortie = Sortie.objects.select_for_update().get(pk=sortie.pk)
     new_statut = new_statut or sortie.statut
     old_statut = old_statut or sortie.statut
+
+    if not est_sortie_commerciale(sortie.motif):
+        # Sortie non commerciale : aucun encaissement (on neutralise un éventuel encaissement
+        # enregistré quand la sortie était une vente).
+        reverse_sortie_cash_movements(sortie, utilisateur=utilisateur, motif='Sortie non commerciale')
+        return
 
     if new_statut == 'EN_CREDIT':
         if old_statut == 'PAYEE':

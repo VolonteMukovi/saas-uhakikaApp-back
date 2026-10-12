@@ -17,6 +17,7 @@ from stock.models import (
 )
 from stock.services.currency import build_conversion_snapshot
 from stock.services.sale_cash_adjustment_service import sync_sortie_cash_movements
+from stock.services.sortie_motif import MSG_SORTIE_NON_COMMERCIALE_CREDIT, est_sortie_commerciale
 from stock.services.stock_adjustment import (
     apply_stock_delta,
     consume_fifo_lots,
@@ -216,6 +217,8 @@ def update_sortie_from_payload(
         raise serializers.ValidationError({
             'client': _('Un client est obligatoire pour une vente à crédit.'),
         })
+    if new_statut == 'EN_CREDIT' and not est_sortie_commerciale(sortie.motif):
+        raise serializers.ValidationError({'statut': MSG_SORTIE_NON_COMMERCIALE_CREDIT})
     from stock.services.retrait_marchandise import nettoyer_retire_par
 
     if str(new_statut).upper() != 'EN_CREDIT':

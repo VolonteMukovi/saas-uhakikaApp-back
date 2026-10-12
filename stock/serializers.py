@@ -4,6 +4,7 @@ from stock.tenant_fields import TenantPrimaryKeyRelatedField, TenantSlugRelatedF
 from .models import (
     Entreprise,
     LogSuppression,
+    AnnulationMouvement,
     Succursale,
     Devise,
     TauxChange,
@@ -1570,3 +1571,32 @@ class LogSuppressionSerializer(serializers.ModelSerializer):
         from django.utils.timesince import timesince
 
         return _("il y a %(duree)s") % {'duree': timesince(obj.date_suppression, depth=1)}
+
+
+class AnnulationMouvementSerializer(serializers.ModelSerializer):
+    """Journal d'annulation d'une entrée ou d'une sortie de stock (lecture seule)."""
+
+    type_mouvement_libelle = serializers.CharField(source='get_type_mouvement_display', read_only=True)
+    nature_libelle = serializers.CharField(source='get_nature_display', read_only=True)
+
+    class Meta:
+        model = AnnulationMouvement
+        fields = [
+            'id',
+            'type_mouvement',
+            'type_mouvement_libelle',
+            'nature',
+            'nature_libelle',
+            'reference_id',
+            'reference_libelle',
+            'motif_origine',
+            'date_mouvement',
+            'motif_annulation',
+            'annule_par',
+            'annule_par_nom',
+            'date_annulation',
+            'impact_stock',
+            'impact_caisse',
+            'succursale',
+        ]
+        read_only_fields = fields

@@ -1420,6 +1420,67 @@ class LogSuppression(models.Model):
         return f'Suppression {self.article_nom} (sortie #{self.sortie_numero})'
 
 
+class AnnulationMouvement(models.Model):
+    """
+    Journal d'annulation d'une entrée (approvisionnement) ou d'une sortie (vente, sortie
+    non commerciale). L'annulation remet les lots, le stock et la caisse dans leur état
+    antérieur ; la pièce annulée est retirée, son détail exact est conservé ici.
+    L'unicité (entreprise, type, référence) empêche une double annulation.
+    """
+
+    TYPE_ENTREE = 'ENTREE'
+    TYPE_SORTIE = 'SORTIE'
+    TYPE_CHOICES = [
+        (TYPE_ENTREE, 'Entrée de stock'),
+        (TYPE_SORTIE, 'Sortie de stock'),
+    ]
+
+    NATURE_APPROVISIONNEMENT = 'APPROVISIONNEMENT'
+    NATURE_VENTE = 'VENTE'
+    NATURE_SORTIE_NON_COMMERCIALE = 'SORTIE_NON_COMMERCIALE'
+    NATURE_CHOICES = [
+        (NATURE_APPROVISIONNEMENT, 'Approvisionnement'),
+        (NATURE_VENTE, 'Vente au client'),
+        (NATURE_SORTIE_NON_COMMERCIALE, 'Sortie non commerciale'),
+    ]
+
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='annulations_mouvements')
+    succursale = models.ForeignKey(
+        Succursale, on_delete=models.SET_NULL, related_name='annulations_mouvements', null=True, blank=True,
+    )
+    type_mouvement = models.CharField(max_length=10, choices=TYPE_CHOICES)
+    nature = models.CharField(max_length=30, choices=NATURE_CHOICES)
+    reference_id = models.PositiveIntegerField(help_text="Identifiant de l'entrée ou de la sortie annulée.")
+    reference_libelle = models.CharField(max_length=255, blank=True, default='')
+    motif_origine = models.CharField(max_length=255, blank=True, default='')
+    date_mouvement = models.DateTimeField(null=True, blank=True)
+    motif_annulation = models.TextField(blank=True, default='')
+    annule_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name='annulations_mouvements',
+        null=True, blank=True,
+    )
+    annule_par_nom = models.CharField(max_length=255, blank=True, default='')
+    date_annulation = models.DateTimeField(auto_now_add=True, db_index=True)
+    impact_stock = models.JSONField(default=list, blank=True)
+    impact_caisse = models.JSONField(default=list, blank=True)
+    journal = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-date_annulation', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['entreprise', 'type_mouvement', 'reference_id'],
+                name='uniq_annulation_mouvement',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['entreprise', '-date_annulation'], name='annulmvt_ent_date_idx'),
+        ]
+
+    def __str__(self):
+        return f'Annulation {self.reference_libelle or self.reference_id}'
+
+
 # Compatibilité imports historiques (modèles définis dans l'app ``caisse``).
 from caisse.models import (  # noqa: E402, F401
     DetailMouvementCaisse,
