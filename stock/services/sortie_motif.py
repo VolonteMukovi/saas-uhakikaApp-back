@@ -7,7 +7,11 @@ défectueux, périmé, volé, endommagé, perte, échantillon, cadeau, prêt, mo
 non commercial…) diminuent uniquement le stock.
 
 Une sortie est commerciale si son motif est vide (défaut historique de l'API = vente)
-ou s'il désigne une vente (« Vente au Client », « Vente du jour », import Excel…).
+ou s'il désigne une vente (« Vente au Client », « Vente du jour », import Excel,
+livraison de commande…).
+
+La nature est figée dans ``Sortie.est_commerciale`` à la création (et recalculée seulement
+si le motif change) : les rapports, la caisse et les dettes s'appuient sur ce champ.
 """
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ MSG_SORTIE_NON_COMMERCIALE_CREDIT = (
 
 # Motifs historiques sans le mot « vente » mais créés par des flux de vente.
 _MOTIFS_VENTE_EXACTS = frozenset({'', 'import excel'})
+_PREFIXES_VENTE = ('livraison commande',)
 _MOTS_VENTE = frozenset({'vente', 'ventes', 'vendu', 'vendue', 'vendus', 'vendues', 'sale', 'sales'})
 
 
@@ -34,6 +39,6 @@ def _normaliser(motif: str | None) -> str:
 def est_sortie_commerciale(motif: str | None) -> bool:
     """True si la sortie est une vente au client (impact caisse / dette autorisé)."""
     norm = _normaliser(motif)
-    if norm in _MOTIFS_VENTE_EXACTS:
+    if norm in _MOTIFS_VENTE_EXACTS or norm.startswith(_PREFIXES_VENTE):
         return True
     return bool(_MOTS_VENTE.intersection(re.findall(r'[a-z]+', norm)))

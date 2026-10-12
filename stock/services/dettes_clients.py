@@ -100,17 +100,25 @@ def synchroniser_dette_sortie(sortie: Sortie) -> DettesClients | None:
             )
         if dette is None:
             return creer_dette_pour_sortie_credit(sortie)
-        if dette.paiements.exists():
-            return dette
         montant = calculer_montant_sortie(sortie)
         if montant <= 0:
             raise serializers.ValidationError(
                 {"montant": "Le montant de la dette doit être supérieur à 0."}
             )
+        # Les paiements déjà reçus restent acquis : la dette suit le nouveau total,
+        # qui ne peut pas descendre sous ce qui a déjà été payé.
+        total_paye = _q(dette.paiements.aggregate(t=Sum("montant"))["t"])
+        if montant < total_paye:
+            raise serializers.ValidationError(
+                {
+                    "montant": (
+                        f"Le nouveau total de la vente ({montant}) est inférieur aux paiements déjà "
+                        f"reçus sur sa dette ({total_paye}). Réduisez moins la vente."
+                    )
+                }
+            )
         dette.montant = montant
-        dette.paye = ZERO
-        dette.reste = montant
-        dette.status = DettesClients.STATUS_ENCOURS
+        dette.recalculer_soldes(save=False)
         dette.save(update_fields=["montant", "paye", "reste", "status", "updated_at"])
         return dette
 

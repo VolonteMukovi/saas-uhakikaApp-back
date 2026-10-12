@@ -277,6 +277,7 @@ def _creer_sortie_ajustement(
     motif = f"Ajustement inventaire #{session.pk} — {session.libelle}"
     sortie = Sortie.objects.create(
         motif=motif,
+        est_commerciale=False,
         statut='PAYEE',
         client=None,
         entreprise_id=session.entreprise_id,
@@ -427,6 +428,8 @@ def valider_session(session: InventaireSession, user) -> InventaireSession:
     with transaction.atomic():
         entree = _creer_entree_ajustement(session, lignes_pos, devise)
         sortie = _creer_sortie_ajustement(session, lignes_neg, devise)
+        if sortie is not None and getattr(user, 'is_authenticated', False):
+            Sortie.objects.filter(pk=sortie.pk).update(cree_par=user)
 
         session.entree_ajustement = entree
         session.sortie_ajustement = sortie

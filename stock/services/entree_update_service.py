@@ -108,6 +108,7 @@ def _create_ligne_entree(entree: Entree, payload: dict, *, default_dev: Devise |
 def _update_ligne_entree(entree: Entree, ligne: LigneEntree, payload: dict, *, default_dev: Devise | None, devise_principale: Devise | None) -> LigneEntree:
     ligne = LigneEntree.objects.select_for_update().get(pk=ligne.pk, entree=entree)
     old_article = ligne.article
+    old_cout, old_devise_id = ligne.prix_achat_unitaire_base or ligne.prix_unitaire, ligne.devise_id
     old_quantite = quantize_qty(ligne.quantite)
     vendue = quantite_vendue_ligne_entree(ligne)
 
@@ -195,6 +196,9 @@ def _update_ligne_entree(entree: Entree, ligne: LigneEntree, payload: dict, *, d
         devise_obj or devise_principale,
     )
 
+    if (old_cout, old_devise_id) != (ligne.prix_achat_unitaire_base or ligne.prix_unitaire, ligne.devise_id):
+        _repercuter_cout_sur_ventes(ligne, entree.entreprise_id)
+
     from stock.models import Stock
     stock_obj, _ = Stock.objects.get_or_create(
         article=ligne.article,
@@ -205,8 +209,60 @@ def _update_ligne_entree(entree: Entree, ligne: LigneEntree, payload: dict, *, d
     return ligne
 
 
+def _repercuter_cout_sur_ventes(lot: LigneEntree, entreprise_id: int) -> None:
+    """
+    Correction du prix d'achat (ou de la devise) d'un lot déjà vendu : le coût copié dans
+    les ventes servies par ce lot et leurs bénéfices sont recalculés (prix de vente inchangé).
+    """
+    from stock.models import BeneficeLot, LigneSortieLot
+    from stock.services.sortie_pricing import convert_sale_price
+    from stock.services.stock_adjustment import reconcile_sortie_benefice
+
+    cout = lot.prix_achat_unitaire_base or lot.prix_unitaire
+    lignes_touchees = {}
+    for trace in LigneSortieLot.objects.select_related('ligne_sortie__devise').filter(lot_entree=lot):
+        devise_vente = trace.ligne_sortie.devise or lot.devise
+        nouveau_cout = (
+            convert_sale_price(cout, lot.devise, devise_vente, entreprise_id=entreprise_id)
+            if lot.devise and devise_vente else cout
+        )
+        trace.prix_achat = nouveau_cout
+        trace.save(update_fields=['prix_achat'])
+        for benefice in BeneficeLot.objects.filter(lot_entree=lot, ligne_sortie=trace.ligne_sortie):
+            benefice.prix_achat = nouveau_cout
+            benefice.benefice_unitaire = (Decimal(str(benefice.prix_vente)) - Decimal(str(nouveau_cout))).quantize(
+                Decimal('0.00001'), rounding=ROUND_DOWN,
+            )
+            benefice.save(update_fields=['prix_achat', 'benefice_unitaire'])
+        lignes_touchees[trace.ligne_sortie_id] = trace.ligne_sortie
+    for ligne_sortie in lignes_touchees.values():
+        reconcile_sortie_benefice(ligne_sortie)
+
+
+def _verifier_entree_modifiable(entree: Entree) -> None:
+    from order.models import Lot
+    from stock.models import InventaireSession
+
+    if InventaireSession.objects.filter(entree_ajustement=entree).exists():
+        raise serializers.ValidationError({'detail': (
+            "Cette entrée est un ajustement d'inventaire : elle ne peut pas être modifiée "
+            "(annulez l'inventaire si nécessaire)."
+        )})
+    if Lot.objects.filter(entree_stock=entree).exists():
+        raise serializers.ValidationError({'detail': (
+            "Cette entrée a été générée par la clôture d'un lot fournisseur : modifiez-la depuis ce module."
+        )})
+
+
+def _quantites_par_article(entree: Entree) -> dict[str, Decimal]:
+    totaux: dict[str, Decimal] = {}
+    for article_id, quantite in entree.lignes.values_list('article_id', 'quantite'):
+        totaux[article_id] = totaux.get(article_id, Decimal('0')) + quantize_qty(quantite)
+    return totaux
+
+
 @transaction.atomic
-def update_entree_from_payload(entree: Entree, data: dict) -> Entree:
+def update_entree_from_payload(entree: Entree, data: dict, *, utilisateur=None) -> Entree:
     """
     Met à jour une entrée et ses lignes.
 
@@ -215,7 +271,13 @@ def update_entree_from_payload(entree: Entree, data: dict) -> Entree:
     - lignes : liste avec ``id`` pour modifier, sans ``id`` pour créer
     - lignes_supprimees : liste d'IDs à supprimer
     """
+    from stock.services.annulation_mouvement import inventaires_posterieurs, libelle_entree
+    from stock.services.journal_modification import changements_entree, journaliser, photo_entree
+
     entree = Entree.objects.select_for_update().get(pk=entree.pk)
+    _verifier_entree_modifiable(entree)
+    avant = photo_entree(entree)
+    quantites_avant = _quantites_par_article(entree)
 
     default_dev = Devise.objects.filter(entreprise_id=entree.entreprise_id, est_principal=True).first()
     if default_dev is None:
@@ -256,4 +318,26 @@ def update_entree_from_payload(entree: Entree, data: dict) -> Entree:
     if not entree.lignes.exists():
         raise serializers.ValidationError({'lignes': "Au moins une ligne d'entrée est requise."})
 
+    # Un inventaire validé depuis a fixé le stock réel : ses quantités ne bougent plus.
+    quantites_apres = _quantites_par_article(entree)
+    articles_modifies = {
+        a for a in set(quantites_avant) | set(quantites_apres)
+        if quantites_avant.get(a, Decimal('0')) != quantites_apres.get(a, Decimal('0'))
+    }
+    raisons = inventaires_posterieurs(entree.entreprise_id, entree.date_op, articles_modifies)
+    if raisons:
+        raise serializers.ValidationError({'detail': 'Modification des quantités impossible : ' + ' '.join(raisons)})
+
+    apres = photo_entree(entree)
+    changements, sensible = changements_entree(avant, apres)
+    journaliser(
+        type_mouvement='ENTREE',
+        piece=entree,
+        libelle=libelle_entree(entree),
+        utilisateur=utilisateur,
+        avant=avant,
+        apres=apres,
+        changements=changements,
+        sensible=sensible,
+    )
     return entree

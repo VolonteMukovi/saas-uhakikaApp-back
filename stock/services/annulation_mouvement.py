@@ -50,7 +50,6 @@ from stock.models import (
     LigneSortieLot,
     Sortie,
 )
-from stock.services.sortie_motif import est_sortie_commerciale
 from stock.services.stock_adjustment import (
     apply_stock_delta,
     quantize_qty,
@@ -93,7 +92,7 @@ def _nom_utilisateur(user) -> str:
 
 
 def libelle_sortie(sortie: Sortie) -> str:
-    prefixe = 'Vente' if est_sortie_commerciale(sortie.motif) else 'Sortie'
+    prefixe = 'Vente' if sortie.est_commerciale else 'Sortie'
     return f'{prefixe} #{sortie.pk}'
 
 
@@ -223,7 +222,7 @@ def _passer_contre_ecritures(mouvements: list[MouvementCaisse], *, annulation: A
 # Contrôles communs
 # ---------------------------------------------------------------------------
 
-def _inventaires_posterieurs(entreprise_id: int, date_mouvement, article_ids: set[str]) -> list[str]:
+def inventaires_posterieurs(entreprise_id: int, date_mouvement, article_ids: set[str]) -> list[str]:
     if not article_ids or date_mouvement is None:
         return []
     qs = (
@@ -271,7 +270,7 @@ def diagnostiquer_annulation_sortie(sortie: Sortie) -> dict:
     from stock.models import DettesClients
 
     raisons: list[str] = []
-    commerciale = est_sortie_commerciale(sortie.motif)
+    commerciale = sortie.est_commerciale
 
     commande = Commande.objects.filter(sortie_livraison=sortie).first()
     if commande is not None:
@@ -298,7 +297,9 @@ def diagnostiquer_annulation_sortie(sortie: Sortie) -> dict:
     lots: dict[int, LigneEntree] = {}
     for ligne in lignes:
         traces = list(ligne.lots_utilises.all())
-        if quantize_qty(sum((t.quantite for t in traces), Decimal('0'))) != quantize_qty(ligne.quantite):
+        # Ligne historique sans traçabilité FIFO : la vente n'avait diminué que le stock global,
+        # l'annulation le rétablit seul. Une traçabilité partielle, elle, est incohérente.
+        if traces and quantize_qty(sum((t.quantite for t in traces), Decimal('0'))) != quantize_qty(ligne.quantite):
             incoherents.append(_nom_article(ligne.article))
         for trace in traces:
             retour_par_lot[trace.lot_entree_id] += trace.quantite
@@ -323,7 +324,7 @@ def diagnostiquer_annulation_sortie(sortie: Sortie) -> dict:
             "Les lots d'origine ont été modifiés depuis la sortie (quantité réduite) : "
             + _citer(depassements) + '.'
         )
-    raisons += _inventaires_posterieurs(
+    raisons += inventaires_posterieurs(
         sortie.entreprise_id, sortie.date_creation, {ligne.article_id for ligne in lignes},
     )
 
@@ -474,7 +475,7 @@ def diagnostiquer_annulation_entree(entree: Entree) -> dict:
             'Le stock actuel est inférieur à la quantité approvisionnée pour : '
             + _citer(negatifs) + ' ; le retrait rendrait le stock négatif.'
         )
-    raisons += _inventaires_posterieurs(entree.entreprise_id, entree.date_op, set(retrait_par_article))
+    raisons += inventaires_posterieurs(entree.entreprise_id, entree.date_op, set(retrait_par_article))
 
     mouvements = _mouvements_caisse_origine(entree=entree)
     impact_caisse, raisons_caisse = _impact_caisse(mouvements)

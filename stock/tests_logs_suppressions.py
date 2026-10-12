@@ -69,13 +69,55 @@ class LogSuppressionTests(APITestCase):
         self.assertEqual(log.motif, LogSuppression.MOTIF_SORTIE)
         self.assertEqual(log.utilisateur_nom, 'Awa Kabeya')
 
-    def test_suppression_ligne_journalisee(self):
-        sortie, ligne = self._sortie('2')
-        resp = self.client.delete(f'/api/lignesorties/{ligne.pk}/')
-        self.assertEqual(resp.status_code, 204, resp.content)
+    def test_retrait_impossible_ne_journalise_rien(self):
+        # Les lignes de vente sont en lecture seule : un article se retire en modifiant la vente.
+        autre = Article.objects.create(
+            nom_scientifique='Brosse', nom_commercial='Brosse', sous_type_article=self.article.sous_type_article,
+            unite=self.article.unite, entreprise=self.entreprise,
+        )
+        Stock.objects.create(article=autre, Qte=D('5'), seuilAlert=D('0'))
+        sortie, _ligne = self._sortie('2')
+        LigneSortie.objects.create(sortie=sortie, article=autre, quantite=D('1'), prix_unitaire=D('0'))
+        resp = self.client.patch(
+            f'/api/sorties/{sortie.pk}/',
+            {'lignes': [{'article_id': autre.pk, 'quantite': '1', 'prix_unitaire': '0'}]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)  # stock FIFO absent dans ce jeu de test
+        self.assertFalse(LogSuppression.objects.exists())  # tout ou rien : rien n'est journalisé
+
+    def test_suppression_ligne_journalisee_avec_stock(self):
+        from stock.models import Devise, Entree, LigneEntree
+
+        devise = Devise.objects.create(sigle='USD', nom='Dollar', symbole='$', est_principal=True, entreprise=self.entreprise)
+        autre = Article.objects.create(
+            nom_scientifique='Brosse', nom_commercial='Brosse', sous_type_article=self.article.sous_type_article,
+            unite=self.article.unite, entreprise=self.entreprise,
+        )
+        entree = Entree.objects.create(libele='Appro', entreprise=self.entreprise)
+        for article in (self.article, autre):
+            LigneEntree.objects.create(
+                article=article, entree=entree, quantite=D('10'), prix_unitaire=D('0'), prix_vente=D('1'),
+                devise=devise,
+            )
+        Stock.objects.update_or_create(article=autre, defaults={'Qte': D('10'), 'seuilAlert': D('0')})
+        Stock.objects.filter(article=self.article).update(Qte=D('10'))
+        lignes = [
+            {'article_id': self.article.pk, 'quantite': '2', 'prix_unitaire': '0', 'devise_id': devise.pk,
+             'motif_prix_exception': 'Échantillon offert'},
+            {'article_id': autre.pk, 'quantite': '1', 'prix_unitaire': '0', 'devise_id': devise.pk,
+             'motif_prix_exception': 'Échantillon offert'},
+        ]
+        created = self.client.post('/api/sorties/', {'motif': 'Cadeau client', 'lignes': lignes}, format='json')
+        self.assertEqual(created.status_code, 201, created.content)
+        sortie_id = created.json()['id']
+        resp = self.client.patch(f'/api/sorties/{sortie_id}/', {'lignes': lignes[1:]}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.content)
         log = LogSuppression.objects.get()
         self.assertEqual(log.motif, LogSuppression.MOTIF_LIGNE)
-        self.assertEqual(log.sortie_numero, sortie.pk)
+        self.assertEqual(log.sortie_numero, sortie_id)
+        self.assertEqual(log.article_id, self.article.pk)
+        self.assertEqual(Stock.objects.get(article=self.article).Qte, D('10'))
 
     def test_liste_format_front_et_isolation_tenant(self):
         sortie, _ = self._sortie()

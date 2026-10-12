@@ -1037,8 +1037,10 @@ class RapportsViewSet(viewsets.ViewSet):
         if session_end < session_start:
             session_end = session_start
 
+        # Rapport de ventes : ventes commerciales uniquement (pertes, vols, ajustements exclus).
         sortie_scope = Sortie.objects.filter(
             entreprise_id=eid,
+            est_commerciale=True,
             date_creation__gte=session_start,
             date_creation__lte=session_end,
         )

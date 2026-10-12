@@ -64,6 +64,7 @@ def base_queryset(
         date_calcul__year=year,
         date_calcul__month=month,
         lot_entree__entree__entreprise_id=entreprise_id,
+        ligne_sortie__sortie__est_commerciale=True,
     ).select_related(
         'lot_entree__article',
         'lot_entree__article__unite',

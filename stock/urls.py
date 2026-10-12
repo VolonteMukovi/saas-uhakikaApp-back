@@ -32,6 +32,7 @@ router.register(r'paiements-dettes-clients', PaiementDettesClientsViewSet, basen
 router.register(r'inventaires', InventaireSessionViewSet, basename='inventaire')
 router.register(r'logs-suppressions', LogSuppressionViewSet, basename='log-suppression')
 router.register(r'annulations-mouvements', AnnulationMouvementViewSet, basename='annulation-mouvement')
+router.register(r'audit/mouvements', AuditMouvementsViewSet, basename='audit-mouvements')
 router.register(r'requisitions', RequisitionViewSet, basename='requisition')
 router.register(r'tarification', TarificationViewSet, basename='tarification')
 router.register(r'tarifs-vente', TarifVenteViewSet, basename='tarif-vente')

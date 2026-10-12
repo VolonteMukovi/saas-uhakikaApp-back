@@ -71,6 +71,7 @@ def achats_lignes_qs(
         LigneSortie.objects.filter(
             sortie__client=client,
             sortie__entreprise_id=entreprise_id,
+            sortie__est_commerciale=True,
         )
         .filter(branch_q)
         .select_related('article', 'devise', 'sortie')

@@ -403,6 +403,8 @@ class ClientLifecycleApiTests(APITestCase):
                     'quantite': '1',
                     'prix_unitaire': prix,
                     'devise_id': self.devise.pk,
+                    # Vente sous le coût : motif obligatoire (politique de prix).
+                    'motif_prix_exception': 'Promotion de déstockage',
                 }],
             }
             if statut == 'PAYEE':

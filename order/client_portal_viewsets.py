@@ -41,7 +41,7 @@ class ClientPortalSortieViewSet(viewsets.ReadOnlyModelViewSet):
         bq = branch_q_for_membership(m)
         lignes_qs = LigneSortie.objects.select_related("article", "devise").order_by("id")
         return (
-            Sortie.objects.filter(client=c, entreprise_id=m.entreprise_id)
+            Sortie.objects.filter(client=c, entreprise_id=m.entreprise_id, est_commerciale=True)
             .filter(bq)
             .prefetch_related(Prefetch("lignes", queryset=lignes_qs))
             .order_by("-date_creation")

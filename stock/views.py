@@ -784,6 +784,12 @@ class AnnulationMouvementMixin:
                 _("Seul un administrateur de l'entreprise peut annuler un mouvement de stock.")
             )
 
+    def _verifier_admin_modification(self, request):
+        if not request.user.is_admin(request):
+            raise PermissionDenied(
+                _("Seul un administrateur de l'entreprise peut modifier une entrée ou une sortie de stock.")
+            )
+
     def _objet_a_annuler(self):
         tenant_id, _branch_id = self.get_tenant_ids()
         if tenant_id:
@@ -821,7 +827,8 @@ class SortieViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermiss
                     'article__unite',
                     'devise'
                 )
-            )
+            ),
+            'mouvement_caisse',
         ).order_by('-date_creation')
 
     @action(detail=False, methods=['get'], url_path='prix-fifo')
@@ -957,6 +964,8 @@ class SortieViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermiss
             statut_sortie = serializer.validated_data.get('statut', 'PAYEE')
             sortie = Sortie.objects.create(
                 motif=lib,
+                est_commerciale=sortie_commerciale,
+                cree_par=user if getattr(user, 'is_authenticated', False) else None,
                 statut=statut_sortie,
                 client=client,
                 retire_par=nettoyer_retire_par(
@@ -1120,6 +1129,7 @@ class SortieViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermiss
                     if prix_is_conditionnement
                     else (prix_unitaire_final * qte).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 )
+                # Le contrôle « vente gratuite / sous le coût » ne concerne que les ventes.
                 motif_exception = validate_sale_price_policy(
                     prix_unitaire_final,
                     qte,
@@ -1128,7 +1138,7 @@ class SortieViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermiss
                     ligne.get('motif_prix_exception', ''),
                     montant_total=montant_ligne,
                     request=request,
-                )
+                ) if sortie_commerciale else str(ligne.get('motif_prix_exception') or '').strip()[:500]
                 
                 # Créer la ligne de sortie avec le prix réellement encaissé
                 snapshot_ligne = build_conversion_snapshot(
@@ -1296,7 +1306,7 @@ class SortieViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermiss
             'sortie'
         )
         if tenant_id:
-            lignes_sortie = lignes_sortie.filter(sortie__entreprise_id=tenant_id)
+            lignes_sortie = lignes_sortie.filter(sortie__entreprise_id=tenant_id, sortie__est_commerciale=True)
         else:
             lignes_sortie = lignes_sortie.none()
         if branch_id is not None:
@@ -1434,118 +1444,21 @@ class SortieViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermiss
         })
 
     def destroy(self, request, *args, **kwargs):
-        sortie = self.get_object()
-        user = request.user
+        """
+        Suppression d'une vente = annulation tracée : lots, stock, caisse et dette reviennent
+        à leur état antérieur (voir annuler_sortie), puis les articles retirés sont journalisés.
+        """
+        self._verifier_admin_annulation(request)
+        sortie = self._objet_a_annuler()
         with transaction.atomic():
-            # 1. Restaurer les lots et le stock pour chaque ligne (FIFO inverse)
-            for ligne in sortie.lignes.all():
-                # Restaurer les lots utilisés
-                for lot_utilise in ligne.lots_utilises.all():
-                    lot = lot_utilise.lot_entree
-                    lot.quantite_restante += lot_utilise.quantite
-                    lot.save()
-                
-                # Supprimer les bénéfices associés
-                BeneficeLot.objects.filter(ligne_sortie=ligne).delete()
-                
-                # Supprimer les traçabilités
-                ligne.lots_utilises.all().delete()
-                
-                # Restaurer le stock total (pour compatibilité)
-                stock, created = Stock.objects.get_or_create(
-                    article=ligne.article, 
-                    defaults={'Qte': 0, 'seuilAlert': 0}
-                )
-                stock.Qte += ligne.quantite
-                stock.save()
-            
-            # 2. Calculer les totaux par devise pour l'annulation caisse
-            default_dev = Devise.objects.filter(est_principal=True).first()
-            totaux_par_devise = {}
-            
-            for ligne in sortie.lignes.all():
-                # Calculer le montant de cette ligne
-                montant_ligne = ligne.get_montant_total()
-                
-                # Déterminer la devise de cette ligne
-                devise_ligne = ligne.devise or default_dev
-                devise_key = devise_ligne.sigle if devise_ligne else 'DEFAULT'
-                
-                # Accumuler par devise
-                if devise_key not in totaux_par_devise:
-                    totaux_par_devise[devise_key] = {
-                        'devise_obj': devise_ligne,
-                        'total': Decimal('0.00')
-                    }
-                totaux_par_devise[devise_key]['total'] += montant_ligne
-            
-            # 3. Vérifier les soldes et créer les mouvements de caisse inverses par devise
-            # Mais seulement si la vente était PAYEE (pas EN_CREDIT)
-            type_caisse_id = extract_type_caisse_id(request.data)
-            # Sortie non commerciale : rien n'a été encaissé, donc rien à reprendre en caisse
-            # (sauf encaissement historique réellement enregistré).
-            caisse_impactee = est_sortie_commerciale(sortie.motif) or MouvementCaisse.objects.filter(
-                sortie=sortie, type='ENTREE', montant__gt=0,
-            ).exists()
-            annulation_caisse_requise = (
-                sortie.statut != 'EN_CREDIT'
-                and caisse_impactee
-                and any(d['total'] > 0 for d in totaux_par_devise.values())
-            )
-            if annulation_caisse_requise and not type_caisse_id:
-                raise serializers.ValidationError({'type_caisse_id': str(MSG_CAISSE_REQUISE)})
-            for devise_key, devise_data in totaux_par_devise.items():
-                devise_obj = devise_data['devise_obj']
-                total_devise = devise_data['total']
-                
-                if total_devise > 0:
-                    # Si la vente était en crédit, pas besoin d'annuler de mouvement caisse
-                    if sortie.statut == 'EN_CREDIT' or not caisse_impactee:
-                        continue
-                    
-                    # Vérifier le solde disponible pour cette devise
-                    solde_devise = self._solde_caisse_par_devise(
-                        user.get_entreprise(self.request),
-                        devise_obj,
-                        succursale_id=sortie.succursale_id,
-                    )
-                    if solde_devise < total_devise:
-                        raise serializers.ValidationError(
-                            f"Solde caisse insuffisant en {devise_key} pour annuler cette vente. "
-                            f"Solde disponible: {solde_devise}, Montant requis: {total_devise}"
-                        )
-                    
-                    # Créer le mouvement de caisse inverse (SORTIE)
-                    devise_mouvement = devise_obj or default_dev
-                    snapshot_mouvement = build_conversion_snapshot(
-                        entreprise_id=sortie.entreprise_id,
-                        amount=total_devise.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
-                        devise_source=devise_mouvement,
-                    )
-                    creer_mouvement_caisse(
-                        montant=total_devise.quantize(Decimal('0.00001'), rounding=ROUND_DOWN),
-                        devise=devise_mouvement,
-                        type_mouvement='SORTIE',
-                        entreprise_id=sortie.entreprise_id,
-                        succursale_id=sortie.succursale_id,
-                        content_object=sortie,
-                        sortie=sortie,
-                        reference_piece=f'ANN-VENT-{sortie.pk}-{devise_key}',
-                        motif='Annulation vente',
-                        type_caisse_id=type_caisse_id,
-                        devise_reference=snapshot_mouvement['devise_reference'],
-                        taux_change=snapshot_mouvement['taux_change'],
-                        montant_reference=snapshot_mouvement['montant_reference'],
-                    )
-            
             journaliser_lignes_supprimees(
                 sortie,
                 sortie.lignes.select_related('article', 'devise'),
-                user,
+                request.user,
                 motif=LogSuppression.MOTIF_SORTIE,
-                entreprise_id=_get_tenant_ids(request)[0],
+                entreprise_id=sortie.entreprise_id,
             )
-            sortie.delete()
+            annuler_sortie(sortie, request.user, motif=str(request.data.get('motif') or 'Suppression de la vente'))
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def _total_sortie(self, sortie: Sortie) -> Decimal:
@@ -1574,6 +1487,7 @@ class SortieViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermiss
     def _update_common(self, request, *args, **kwargs):
         """Mise a jour d'une sortie avec gestion FIFO et caisse."""
         partial = kwargs.pop('partial', False)
+        self._verifier_admin_modification(request)
         instance = self.get_object()
         lignes_data = request.data.get('lignes')
 
@@ -1773,7 +1687,11 @@ class LigneSortieViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.Re
     queryset = LigneSortie.objects.all()
 
     def get_queryset(self):
-        return super().get_queryset().select_related('article', 'sortie').order_by('-date_sortie', '-id')
+        qs = super().get_queryset().select_related('article', 'sortie').order_by('-date_sortie', '-id')
+        _tenant_id, branch_id = self.get_tenant_ids()
+        if branch_id is not None:
+            qs = qs.filter(sortie__succursale_id=branch_id)
+        return qs
 
 class UniteViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.ModelViewSet):
     queryset = Unite.objects.all()
@@ -2835,6 +2753,7 @@ class EntreeViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermiss
             date_calcul__year=year,
             date_calcul__month=month,
             lot_entree__entree__entreprise_id=tenant_id,
+            ligne_sortie__sortie__est_commerciale=True,
         )
         if branch_id is not None:
             benefices = benefices.filter(lot_entree__entree__succursale_id=branch_id)
@@ -2945,6 +2864,7 @@ class EntreeViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermiss
     def update(self, request, *args, **kwargs):
         """Mise à jour d'une entrée avec gestion FIFO complète."""
         partial = kwargs.pop('partial', False)
+        self._verifier_admin_modification(request)
         entree = self.get_object()
         serializer = self.get_serializer(entree, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
@@ -2961,7 +2881,7 @@ class EntreeViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermiss
         from stock.services.entree_update_service import update_entree_from_payload
 
         with transaction.atomic():
-            entree = update_entree_from_payload(entree, data)
+            entree = update_entree_from_payload(entree, data, utilisateur=request.user)
 
         return Response(self.get_serializer(entree).data, status=status.HTTP_200_OK)
 
@@ -2971,19 +2891,10 @@ class EntreeViewSet(AnnulationMouvementMixin, TenantFilterMixin, BusinessPermiss
         return self.update(request, *args, **kwargs, partial=True)
 
     def destroy(self, request, *args, **kwargs):
-        entree = self.get_object()
-        
-        with transaction.atomic():
-            for ligne in entree.lignes.all():
-                stock_obj, created = Stock.objects.get_or_create(
-                    article=ligne.article,
-                    defaults={'Qte': 0, 'seuilAlert': 0},
-                )
-                stock_obj.Qte -= ligne.quantite
-                stock_obj.save()
-            
-            entree.delete()
-        
+        """Suppression d'un approvisionnement = annulation tracée (refusée si son stock a servi)."""
+        self._verifier_admin_annulation(request)
+        entree = self._objet_a_annuler()
+        annuler_entree(entree, request.user, motif=str(request.data.get('motif') or "Suppression de l'approvisionnement"))
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['get'], url_path='bon-pos')
@@ -3669,7 +3580,7 @@ class DettesClientsViewSet(TenantFilterMixin, BusinessPermissionMixin, viewsets.
         search = (request.query_params.get('search') or '').strip()
         if search:
             rows = rows.filter(
-                Q(sortie__client__nom__icontains=search) | Q(sortie__client_id__icontains=search)
+                Q(sortie__client__nom__icontains=search) | Q(sortie__client__id__icontains=search)
             )
         page = self.paginate_queryset(rows)
         if page is not None:
@@ -3912,3 +3823,46 @@ class AnnulationMouvementViewSet(TenantFilterMixin, BusinessPermissionMixin, vie
         if (params.get('reference_id') or '').isdigit():
             qs = qs.filter(reference_id=int(params['reference_id']))
         return qs
+
+
+class AuditMouvementsViewSet(viewsets.ViewSet):
+    """
+    Audit des mouvements (Paramètres → Audit), réservé aux administrateurs.
+
+    GET /api/audit/mouvements/?date_debut=AAAA-MM-JJ&date_fin=AAAA-MM-JJ&categorie=…&gravite=…
+    Retourne la synthèse par catégorie (avec explication) et la liste des événements à surveiller.
+    """
+
+    permission_classes = [StockIsAdminOrUser]
+
+    def list(self, request):
+        from stock.services.audit_mouvements import CATEGORIES_PAR_CODE, construire_audit
+
+        if not request.user.is_admin(request):
+            raise PermissionDenied(_("Seul un administrateur de l'entreprise peut consulter l'audit."))
+        tenant_id, branch_id = _get_tenant_ids(request)
+        if not tenant_id:
+            raise serializers.ValidationError({'detail': 'Contexte entreprise manquant.'})
+        bornes = {}
+        for key in ('date_debut', 'date_fin'):
+            raw = (request.query_params.get(key) or '').strip()
+            if raw:
+                try:
+                    bornes[key] = date.fromisoformat(raw)
+                except ValueError:
+                    raise serializers.ValidationError({key: _('Date invalide (format attendu : AAAA-MM-JJ).')})
+        if bornes.get('date_debut') and bornes.get('date_fin') and bornes['date_debut'] > bornes['date_fin']:
+            raise serializers.ValidationError({'date_debut': _('La date de début doit précéder la date de fin.')})
+        categorie = (request.query_params.get('categorie') or '').strip().upper() or None
+        if categorie and categorie not in CATEGORIES_PAR_CODE:
+            raise serializers.ValidationError({'categorie': _('Catégorie inconnue.')})
+        gravite = (request.query_params.get('gravite') or '').strip().upper() or None
+        if gravite and gravite not in ('HAUTE', 'MOYENNE', 'FAIBLE'):
+            raise serializers.ValidationError({'gravite': _('Gravité inconnue (HAUTE, MOYENNE ou FAIBLE).')})
+        return Response(construire_audit(
+            entreprise_id=tenant_id,
+            succursale_id=branch_id,
+            categorie=categorie,
+            gravite=gravite,
+            **bornes,
+        ))

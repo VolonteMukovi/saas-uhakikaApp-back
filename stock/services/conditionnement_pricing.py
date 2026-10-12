@@ -117,6 +117,8 @@ def build_ligne_entree_values(article: Article, payload: dict) -> dict:
 
     if prix_vente_unitaire_base <= 0:
         raise serializers.ValidationError({'prix_vente': 'Le prix de vente doit être supérieur à 0.'})
+    if prix_achat_unitaire_base < 0:
+        raise serializers.ValidationError({'prix_unitaire': "Le prix d'achat ne peut pas être négatif."})
 
     return {
         'conditionnement': cond,

@@ -144,8 +144,9 @@ def build_journal_report_data(
         events.append({
             'date': s.date_creation.isoformat() if s.date_creation else None,
             'date_display': s.date_creation.strftime('%Y-%m-%d %H:%M') if s.date_creation else '',
-            'type': 'VENTE',
-            'type_display': str(_('Vente')),
+            # Sortie non commerciale (perte, vol, ajustement…) : pas une vente.
+            'type': 'VENTE' if s.est_commerciale else 'SORTIE_NON_COMMERCIALE',
+            'type_display': str(_('Vente')) if s.est_commerciale else str(_('Sortie non commerciale')),
             'designation': f"{(s.motif or str(_('Vente')))[:50]} - {_('Client')}: {client_nom}",
             'montant_texte': montant_str,
             'montants_par_devise': {k: str(v) for k, v in total_par_devise.items()},

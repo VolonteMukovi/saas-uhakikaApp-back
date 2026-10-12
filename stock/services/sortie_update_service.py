@@ -130,6 +130,7 @@ def _process_sortie_ligne(
         if prix_conditionnement is not None
         else (prix_unitaire_final * qte).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
     )
+    # Le contrôle « vente gratuite / sous le coût » ne concerne que les ventes.
     motif_exception = validate_sale_price_policy(
         prix_unitaire_final,
         qte,
@@ -138,7 +139,7 @@ def _process_sortie_ligne(
         ligne_payload.get('motif_prix_exception', ''),
         montant_total=montant_ligne,
         request=request,
-    )
+    ) if sortie.est_commerciale else str(ligne_payload.get('motif_prix_exception') or '').strip()[:500]
     snapshot_ligne = build_conversion_snapshot(
         entreprise_id=sortie.entreprise_id,
         amount=montant_ligne,
@@ -170,6 +171,32 @@ def _process_sortie_ligne(
     }
 
 
+def _verifier_sortie_modifiable(sortie: Sortie) -> None:
+    from order.models import Commande
+    from stock.models import InventaireSession
+
+    commande = Commande.objects.filter(sortie_livraison=sortie).first()
+    if commande is not None:
+        raise serializers.ValidationError({'detail': (
+            "Cette sortie a été générée par la livraison d'une commande "
+            f"({(commande.reference or '').strip() or '#' + str(commande.pk)}) : modifiez-la depuis le module Commandes."
+        )})
+    if InventaireSession.objects.filter(sortie_ajustement=sortie).exists():
+        raise serializers.ValidationError({'detail': (
+            "Cette sortie est un ajustement d'inventaire : elle ne peut pas être modifiée "
+            "(annulez l'inventaire si nécessaire)."
+        )})
+
+
+def _resoudre_client(sortie: Sortie, client_id):
+    if not client_id:
+        return None
+    client = Client.objects.filter(pk=client_id, liens_entreprise__entreprise_id=sortie.entreprise_id).first()
+    if client is None:
+        raise serializers.ValidationError({'client_id': f"Client {client_id} introuvable dans votre entreprise."})
+    return client
+
+
 @transaction.atomic
 def update_sortie_from_payload(
     sortie: Sortie,
@@ -180,48 +207,73 @@ def update_sortie_from_payload(
     type_caisse_id: int | None = None,
 ) -> Sortie:
     """
-    Met à jour une sortie complète : rollback FIFO, nouvelles lignes, caisse.
+    Met à jour une sortie complète : rollback FIFO, nouvelles lignes, caisse, dette, journal.
 
     ``data`` attend ``lignes`` (liste), champs entête optionnels (motif, client_id, statut).
+    Les dates d'origine de la vente (lignes, bénéfices) sont conservées : une modification
+    ne déplace pas la vente dans le temps.
     """
+    from stock.models import BeneficeLot, DettesClients, LogSuppression
+    from stock.services.log_suppression import journaliser_lignes_supprimees
+    from stock.services.annulation_mouvement import inventaires_posterieurs, libelle_sortie
+    from stock.services.dettes_clients import synchroniser_dette_sortie
+    from stock.services.journal_modification import changements_sortie, journaliser, photo_sortie
+    from stock.services.retrait_marchandise import nettoyer_retire_par
+
     sortie = Sortie.objects.select_for_update().get(pk=sortie.pk)
+    _verifier_sortie_modifiable(sortie)
     old_statut = sortie.statut
     tenant_id = sortie.entreprise_id
+    avant = photo_sortie(sortie)
+    dette = DettesClients.objects.filter(sortie=sortie).first()
+    paiements_recus = dette is not None and dette.paiements.exists()
 
     lignes_data = data.get('lignes')
     if lignes_data is not None and not lignes_data:
         raise serializers.ValidationError({'lignes': 'Au moins une ligne de sortie est requise.'})
 
+    if lignes_data is not None:
+        articles = {ligne['article_id'] for ligne in avant['lignes']} | {
+            str(p.get('article_id') or p.get('article')) for p in lignes_data
+        }
+        raisons = inventaires_posterieurs(tenant_id, sortie.date_creation, articles)
+        if raisons:
+            raise serializers.ValidationError({'detail': 'Modification des lignes impossible : ' + ' '.join(raisons)})
+
     default_dev = Devise.objects.filter(entreprise_id=tenant_id, est_principal=True).first()
     if default_dev is None:
         default_dev = Devise.objects.filter(est_principal=True).first()
 
-    if lignes_data is not None:
-        for ancienne_ligne in list(sortie.lignes.select_for_update().all()):
-            rollback_sortie_ligne(ancienne_ligne)
-
+    # --- Entête : motif / nature, client, type de vente ---------------------------------
     if 'motif' in data:
-        sortie.motif = data['motif']
+        nouveau_motif = str(data.get('motif') or '').strip()
+        if nouveau_motif != (sortie.motif or '').strip():
+            sortie.motif = nouveau_motif
+            sortie.est_commerciale = est_sortie_commerciale(nouveau_motif)
     if 'client_id' in data:
-        client_id = data.get('client_id')
-        if client_id:
-            try:
-                sortie.client = Client.objects.get(pk=client_id)
-            except Client.DoesNotExist:
-                raise serializers.ValidationError({'client_id': f"Client {client_id} non trouvé."})
-        else:
-            sortie.client = None
+        nouveau_client = _resoudre_client(sortie, data.get('client_id'))
+        if (nouveau_client.pk if nouveau_client else None) != sortie.client_id and paiements_recus:
+            raise serializers.ValidationError({'client_id': (
+                "Impossible de changer le client : des paiements ont déjà été reçus sur la dette de cette vente."
+            )})
+        sortie.client = nouveau_client
 
-    new_statut = data.get('statut', sortie.statut)
+    new_statut = str(data.get('statut', sortie.statut) or 'PAYEE').upper()
+    if new_statut not in ('PAYEE', 'EN_CREDIT'):
+        raise serializers.ValidationError({'statut': 'Statut invalide (PAYEE ou EN_CREDIT).'})
     if new_statut == 'EN_CREDIT' and not sortie.client_id:
         raise serializers.ValidationError({
             'client': _('Un client est obligatoire pour une vente à crédit.'),
         })
-    if new_statut == 'EN_CREDIT' and not est_sortie_commerciale(sortie.motif):
+    if new_statut == 'EN_CREDIT' and not sortie.est_commerciale:
         raise serializers.ValidationError({'statut': MSG_SORTIE_NON_COMMERCIALE_CREDIT})
-    from stock.services.retrait_marchandise import nettoyer_retire_par
+    if old_statut == 'EN_CREDIT' and new_statut != 'EN_CREDIT' and paiements_recus:
+        raise serializers.ValidationError({'statut': (
+            "Impossible de passer cette vente au comptant : des paiements ont déjà été reçus sur sa dette. "
+            "Encaissez le reste dû depuis la dette du client."
+        )})
 
-    if str(new_statut).upper() != 'EN_CREDIT':
+    if new_statut != 'EN_CREDIT':
         if str(data.get('retire_par') or '').strip():
             nettoyer_retire_par(data.get('retire_par'), new_statut)
         sortie.retire_par = ''
@@ -230,8 +282,25 @@ def update_sortie_from_payload(
     sortie.statut = new_statut
     sortie.save()
 
+    # --- Lignes : retour des lots puis nouvelle consommation FIFO -------------------------
     totaux_par_devise = {}
     if lignes_data is not None:
+        premiere = sortie.lignes.order_by('id').first()
+        date_vente = premiere.date_sortie if premiere else sortie.date_creation
+        date_benefice = (
+            BeneficeLot.objects.filter(ligne_sortie__sortie=sortie).order_by('id')
+            .values_list('date_calcul', flat=True).first()
+        ) or date_vente
+        anciennes_lignes = list(sortie.lignes.select_for_update().select_related('article', 'devise'))
+        articles_gardes = {str(p.get('article_id') or p.get('article')) for p in lignes_data}
+        retirees = [ligne for ligne in anciennes_lignes if str(ligne.article_id) not in articles_gardes]
+        if retirees:
+            # Articles retirés de la vente : visibles dans « Stock supprimé » et l'audit.
+            journaliser_lignes_supprimees(
+                sortie, retirees, utilisateur, motif=LogSuppression.MOTIF_LIGNE, entreprise_id=tenant_id,
+            )
+        for ancienne_ligne in anciennes_lignes:
+            rollback_sortie_ligne(ancienne_ligne)
         for ligne_payload in lignes_data:
             result = _process_sortie_ligne(
                 sortie,
@@ -245,27 +314,50 @@ def update_sortie_from_payload(
             if key not in totaux_par_devise:
                 totaux_par_devise[key] = {'devise_obj': result['devise_obj'], 'total': Decimal('0')}
             totaux_par_devise[key]['total'] += result['montant_ligne']
+        LigneSortie.objects.filter(sortie=sortie).update(date_sortie=date_vente)
+        BeneficeLot.objects.filter(ligne_sortie__sortie=sortie).update(date_calcul=date_benefice)
     else:
         for ligne in sortie.lignes.select_related('devise').all():
             key = ligne.devise.sigle if ligne.devise else 'DEFAULT'
             montant = ligne.get_montant_total()
             if key not in totaux_par_devise:
-                totaux_par_devise[key] = {'devise_obj': ligne.devise, 'total': Decimal('0')}
+                totaux_par_devise[key] = {'devise_obj': ligne.devise or default_dev, 'total': Decimal('0')}
             totaux_par_devise[key]['total'] += montant
 
     if not sortie.lignes.exists():
         raise serializers.ValidationError({'lignes': 'Au moins une ligne de sortie est requise.'})
 
-    sync_sortie_cash_movements(
+    if new_statut == 'EN_CREDIT' and not sortie.devise_id:
+        from stock.services.sortie_devise import resolve_sortie_primary_devise
+
+        sortie.devise = resolve_sortie_primary_devise(sortie, default_devise=default_dev)
+        sortie.save(update_fields=['devise'])
+
+    # --- Dette puis caisse ----------------------------------------------------------------
+    synchroniser_dette_sortie(sortie)
+    impact_caisse = sync_sortie_cash_movements(
         sortie,
         totaux_par_devise,
         utilisateur=utilisateur,
         type_caisse_id=type_caisse_id,
         old_statut=old_statut,
         new_statut=new_statut,
+        motif_ajustement=f'modification {libelle_sortie(sortie)}',
     )
 
-    from stock.services.dettes_clients import synchroniser_dette_sortie
-    synchroniser_dette_sortie(sortie)
-
+    sortie.refresh_from_db()
+    apres = photo_sortie(sortie)
+    changements, sensible = changements_sortie(avant, apres)
+    journaliser(
+        type_mouvement='SORTIE',
+        piece=sortie,
+        libelle=libelle_sortie(sortie),
+        utilisateur=utilisateur,
+        avant=avant,
+        apres=apres,
+        changements=changements,
+        sensible=sensible,
+        impact_caisse=impact_caisse,
+    )
     return sortie
+

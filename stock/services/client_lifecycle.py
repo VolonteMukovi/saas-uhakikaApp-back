@@ -110,7 +110,7 @@ def _article_nom(article) -> str:
 
 def _sorties_qs(*, client: Client, entreprise_id: int, succursale_id: int | None, period: dict):
     """Achats = sorties du client (date = date_creation de la sortie)."""
-    qs = Sortie.objects.filter(client=client, entreprise_id=entreprise_id)
+    qs = Sortie.objects.filter(client=client, entreprise_id=entreprise_id, est_commerciale=True)
     if succursale_id is not None:
         qs = qs.filter(succursale_id=succursale_id)
     return _period_lookup(qs, "date_creation__date", period["_date_debut"], period["_date_fin"])

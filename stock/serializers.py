@@ -808,10 +808,26 @@ class SortieSerializer(serializers.ModelSerializer):
         max_length=150,
         help_text="Personne venue retirer la marchandise. Uniquement si statut=EN_CREDIT. Optionnel.",
     )
+    caisse_encaissement_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Sortie
-        fields = ['id', 'motif', 'statut', 'client', 'client_id', 'retire_par', 'date_creation', 'lignes']
+        fields = [
+            'id', 'motif', 'est_commerciale', 'statut', 'client', 'client_id', 'retire_par', 'date_creation',
+            'lignes', 'caisse_encaissement_id',
+        ]
+        read_only_fields = ['est_commerciale']
+
+    def get_caisse_encaissement_id(self, obj):
+        """Caisse qui détient l'encaissement de la vente (présélectionnée lors d'une modification)."""
+        nets = {}
+        for mv in obj.mouvement_caisse.all():
+            ref = mv.reference_piece or ''
+            if mv.type_caisse_id and (ref.startswith(f'VENT-{obj.pk}-') or ref.startswith(f'AJ-VENT-{obj.pk}-')):
+                signe = 1 if mv.type == 'ENTREE' else -1
+                nets[mv.type_caisse_id] = nets.get(mv.type_caisse_id, 0) + signe * mv.montant
+        positifs = {k: v for k, v in nets.items() if v > 0}
+        return max(positifs, key=positifs.get) if positifs else None
         read_only_fields = ['date_creation']
 
     @transaction.atomic

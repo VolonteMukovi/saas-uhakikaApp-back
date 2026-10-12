@@ -532,7 +532,24 @@ class Sortie(models.Model):
         blank=True,
         help_text="Motif / commentaire de la sortie (hors caisse).",
     )
+    est_commerciale = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text=(
+            "True pour une vente au client (encaissement, dette, chiffre d'affaires). "
+            "False pour une sortie non commerciale (perte, vol, périmé, ajustement d'inventaire…) : "
+            "stock uniquement, exclue des ventes et de la caisse."
+        ),
+    )
     client = models.ForeignKey('Client', on_delete=models.SET_NULL, related_name='sorties', null=True, blank=True, help_text="Client associé à cette sortie (optionnel)")
+    cree_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='sorties_creees',
+        null=True,
+        blank=True,
+        help_text="Utilisateur qui a enregistré la sortie (traçabilité / audit).",
+    )
     devise = models.ForeignKey('Devise', on_delete=models.CASCADE, related_name='sorties', null=True, blank=True)
     devise_reference = models.ForeignKey(
         'Devise',
@@ -1479,6 +1496,52 @@ class AnnulationMouvement(models.Model):
 
     def __str__(self):
         return f'Annulation {self.reference_libelle or self.reference_id}'
+
+
+class ModificationMouvement(models.Model):
+    """
+    Journal des modifications d'une entrée (approvisionnement) ou d'une sortie (vente) :
+    état avant / après, changements lisibles, écritures de caisse d'ajustement.
+    """
+
+    TYPE_ENTREE = 'ENTREE'
+    TYPE_SORTIE = 'SORTIE'
+    TYPE_CHOICES = [
+        (TYPE_ENTREE, 'Entrée de stock'),
+        (TYPE_SORTIE, 'Sortie de stock'),
+    ]
+
+    entreprise = models.ForeignKey(Entreprise, on_delete=models.CASCADE, related_name='modifications_mouvements')
+    succursale = models.ForeignKey(
+        Succursale, on_delete=models.SET_NULL, related_name='modifications_mouvements', null=True, blank=True,
+    )
+    type_mouvement = models.CharField(max_length=10, choices=TYPE_CHOICES)
+    reference_id = models.PositiveIntegerField()
+    reference_libelle = models.CharField(max_length=255, blank=True, default='')
+    utilisateur = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name='modifications_mouvements',
+        null=True, blank=True,
+    )
+    utilisateur_nom = models.CharField(max_length=255, blank=True, default='')
+    date_modification = models.DateTimeField(auto_now_add=True, db_index=True)
+    changements = models.JSONField(default=list, blank=True, help_text='Changements lisibles (une phrase par changement).')
+    avant = models.JSONField(default=dict, blank=True)
+    apres = models.JSONField(default=dict, blank=True)
+    impact_caisse = models.JSONField(default=list, blank=True)
+    sensible = models.BooleanField(
+        default=False,
+        help_text="True si la modification réduit un encaissement, change le client ou le type de vente, etc.",
+    )
+
+    class Meta:
+        ordering = ['-date_modification', '-id']
+        indexes = [
+            models.Index(fields=['entreprise', '-date_modification'], name='modifmvt_ent_date_idx'),
+            models.Index(fields=['entreprise', 'type_mouvement', 'reference_id'], name='modifmvt_ent_ref_idx'),
+        ]
+
+    def __str__(self):
+        return f'Modification {self.reference_libelle or self.reference_id}'
 
 
 # Compatibilité imports historiques (modèles définis dans l'app ``caisse``).

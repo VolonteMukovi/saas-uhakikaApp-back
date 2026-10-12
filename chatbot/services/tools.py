@@ -67,7 +67,7 @@ def _search_clients(ctx: ChatbotContext, hint: str, limit: int = 10) -> list[dic
 
 
 def _client_sales_summary(ctx: ChatbotContext, client_id: int, period: str = 'all_time') -> dict:
-    sorties = Sortie.objects.filter(entreprise_id=ctx.tenant_id, client_id=client_id)
+    sorties = Sortie.objects.filter(entreprise_id=ctx.tenant_id, client_id=client_id, est_commerciale=True)
     if ctx.branch_id is not None:
         sorties = sorties.filter(succursale_id=ctx.branch_id)
     start = _period_start(period)
@@ -267,7 +267,7 @@ def fetch_ventes_data(ctx: ChatbotContext, intent_result: IntentResult) -> dict:
     if intent_result.intent == 'top_selling_products' and period == 'all_time':
         start = None
 
-    sorties = Sortie.objects.filter(entreprise_id=ctx.tenant_id)
+    sorties = Sortie.objects.filter(entreprise_id=ctx.tenant_id, est_commerciale=True)
     if ctx.branch_id is not None:
         sorties = sorties.filter(succursale_id=ctx.branch_id)
     if start is not None:
@@ -295,7 +295,7 @@ def fetch_ventes_data(ctx: ChatbotContext, intent_result: IntentResult) -> dict:
             })
 
     top_limit = intent_result.top_n or 5
-    top_qs = LigneSortie.objects.filter(sortie__entreprise_id=ctx.tenant_id)
+    top_qs = LigneSortie.objects.filter(sortie__entreprise_id=ctx.tenant_id, sortie__est_commerciale=True)
     if ctx.branch_id is not None:
         top_qs = top_qs.filter(sortie__succursale_id=ctx.branch_id)
     if intent_result.intent == 'top_selling_products' and period != 'all_time' and start:
