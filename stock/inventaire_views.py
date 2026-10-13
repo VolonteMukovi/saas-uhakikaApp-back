@@ -215,6 +215,30 @@ class InventaireSessionViewSet(TenantFilterMixin, viewsets.ModelViewSet):
             ]
         return Response(diagnostic)
 
+    @action(detail=True, methods=['get'], url_path='export-excel')
+    def export_excel(self, request, pk=None):
+        """
+        Rapport d'un inventaire validé au format Excel (.xlsx) : même présentation que le
+        rapport, « Stock physique » et « Dernier PU » seuls modifiables, montants et totaux
+        en formules. Lecture seule : le fichier ne modifie pas l'inventaire enregistré.
+        """
+        from django.http import HttpResponse
+        from rest_framework.exceptions import ValidationError
+
+        from stock.services.inventaire_export_excel import construire_classeur_inventaire, nom_fichier_export
+
+        session = self.get_object()
+        if session.statut != InventaireSession.STATUT_VALIDE:
+            raise ValidationError({'detail': "Seul un inventaire validé peut être exporté vers Excel."})
+        contenu = construire_classeur_inventaire(session)
+        response = HttpResponse(
+            contenu,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{nom_fichier_export(session)}"'
+        response['Cache-Control'] = 'no-store'
+        return response
+
     @action(detail=True, methods=['get'], url_path='resume')
     def resume(self, request, pk=None):
         session = self.get_object()
